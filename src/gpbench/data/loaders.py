@@ -3,7 +3,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Optional, Tuple
+from typing import Optional, Tuple #tuple是不可变列表，只读的，与list相对，可以作为字典的键
 
 import torch
 
