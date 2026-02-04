@@ -127,13 +127,15 @@ class HeteroReadout(nn.Module):
 
     If `paper.batch` exists -> do mean-pool per seed-subgraph (multi-graph pooling).
     Else -> fall back to "seed-node readout": use the embeddings of the seed nodes of input_ntype.
-
     This makes pretraining stable across PyG versions.
     """
-    def forward(self, x_dict: Dict[str, torch.Tensor], batch: HeteroData, input_ntype: str) -> torch.Tensor:
-        store = batch[input_ntype]
 
-        # Case A: multi-graph pooling exists (newer/compatible behavior)
+    # input_ntype: 目标节点类型 x_dict[input_ntype] 是种子节点的特征张量
+    def forward(self, x_dict: Dict[str, torch.Tensor], batch: HeteroData, input_ntype: str) -> torch.Tensor:
+        store = batch[input_ntype] # 获取目标节点类型的存储对象 store.batch表示节点属于当前batch中哪个子图，input_id全图索引而非子图索引
+        # print({store})
+
+        # Case A: 将种子节点及其邻居节点组成的子图进行池化，在拥有batch属性的情况下（即新版PyG）
         if hasattr(store, "batch") and store.batch is not None:
             b = store.batch
             num_graphs = int(b.max().item()) + 1 if b.numel() > 0 else 1
@@ -159,8 +161,7 @@ class HeteroReadout(nn.Module):
                 raise RuntimeError("Readout produced None (no valid node types pooled).")
             return pooled_sum
 
-        # Case B: fallback for old NeighborLoader: use seed-node embeddings directly
-        # NeighborLoader usually keeps the seed nodes as the first `batch_size` nodes of the input type.
+        # Case B: 默认信息已经聚合到种子节点上（即旧版PyG），种子节点在x_dict的最前面 
         # PyG often exposes `store.batch_size` for the number of seed nodes in this mini-batch.
         if hasattr(store, "batch_size") and store.batch_size is not None:
             bs = int(store.batch_size)
