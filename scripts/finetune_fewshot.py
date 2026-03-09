@@ -3,14 +3,15 @@ from __future__ import annotations
 
 import argparse
 from pathlib import Path
-
+from typing import Optional
 import torch
 import torch.nn as nn
 
 from gpbench.data.loaders import load_hgb_node_task
 from gpbench.downstream.model import (
-    DownstreamConfig, TypePrompt, MLPHead,
+    DownstreamConfig, TypePrompt,StructuralPromptMLP,  MLPHead,
     load_frozen_encoder, encode_all_nodes,
+    build_target_structural_features,
 )
 from gpbench.downstream.fewshot import load_split_file, train_fewshot
 
@@ -19,14 +20,33 @@ class PromptClassifier(nn.Module):
     """
     最基础下游：prompt(z) -> head -> logits
     """
-    def __init__(self, prompt: TypePrompt, head: MLPHead, target_ntype: str):
+    # def __init__(self, prompt: TypePrompt, head: MLPHead, target_ntype: str):
+    def __init__(
+        self,
+        prompt,
+        head: MLPHead,
+        target_ntype: str,
+        struct_prompt=None,
+        struct_feat: Optional[torch.Tensor] = None,
+    ):
         super().__init__()
         self.prompt = prompt
         self.head = head
+        self.struct_prompt = struct_prompt
+        self.struct_feat = struct_feat
         self.target_ntype = target_ntype
 
     def forward(self, z_target: torch.Tensor) -> torch.Tensor:
-        z = self.prompt(z_target, self.target_ntype)
+        # z = self.prompt(z_target, self.target_ntype)
+        z = z_target
+
+        if self.prompt is not None:
+            z = self.prompt(z, self.target_ntype)
+
+        if self.struct_prompt is not None:
+            if self.struct_feat is None:
+                raise ValueError("struct_prompt is set but struct_feat is None")
+            z = self.struct_prompt(z, self.struct_feat)
         return self.head(z)
 
 
@@ -51,6 +71,11 @@ def main():
 
     # downstream cfg
     ap.add_argument("--prompt_mode", type=str, default="add", choices=["add", "mul"])
+
+    ap.add_argument("--prompt_type", type=str, default="type_struct", choices=["type", "struct", "type_struct"],
+                help="type=原TypePrompt; struct=结构特征MLP Prompt; type_struct=两者叠加")
+    ap.add_argument("--struct_hidden", type=int, default=64)
+
     ap.add_argument("--prompt_dropout", type=float, default=0.1)
     ap.add_argument("--head_hidden", type=int, default=128)
     ap.add_argument("--head_dropout", type=float, default=0.3)
@@ -76,7 +101,7 @@ def main():
     test_idx = split["test_idx"].long()
 
     # 冻结 encoder + 一次性编码
-    enc, ckpt_meta = load_frozen_encoder(
+    enc, _ = load_frozen_encoder(
         full_data=data,
         ckpt_path=args.ckpt,
         backbone=args.backbone,
@@ -90,6 +115,7 @@ def main():
     x_dict = encode_all_nodes(enc, data, device=device)
     z_target = x_dict[target_ntype]          # [N_target, hidden_dim]
     y = task.y.long()                        # [N_target]
+    struct_feat = build_target_structural_features(data, target_ntype).to(device)
 
     num_classes = int(y.max().item()) + 1
 
@@ -101,12 +127,40 @@ def main():
         use_layernorm=True,
     )
 
-    prompt = TypePrompt(node_types=[target_ntype], dim=args.hidden_dim, mode=dcfg.prompt_mode,
-                        dropout=dcfg.prompt_dropout, use_ln=dcfg.use_layernorm).to(device)
+    # prompt = TypePrompt(node_types=[target_ntype], dim=args.hidden_dim, mode=dcfg.prompt_mode,
+    #                     dropout=dcfg.prompt_dropout, use_ln=dcfg.use_layernorm).to(device)
     head = MLPHead(in_dim=args.hidden_dim, hidden=dcfg.head_hidden, num_classes=num_classes,
                    dropout=dcfg.head_dropout, use_ln=True).to(device)
 
-    model = PromptClassifier(prompt, head, target_ntype).to(device)
+    # model = PromptClassifier(prompt, head, target_ntype).to(device)
+    if args.prompt_type == "type":
+        prompt = TypePrompt(node_types=[target_ntype], dim=args.hidden_dim, mode=dcfg.prompt_mode,
+                            dropout=dcfg.prompt_dropout, use_ln=dcfg.use_layernorm).to(device)
+        model = PromptClassifier(prompt, head, target_ntype).to(device)
+    elif args.prompt_type == "struct":
+        prompt = StructuralPromptMLP(
+            in_dim=int(struct_feat.size(-1)),
+            out_dim=args.hidden_dim,
+            hidden_dim=args.struct_hidden,
+            mode=dcfg.prompt_mode,
+            dropout=dcfg.prompt_dropout,
+            use_ln=dcfg.use_layernorm,
+        ).to(device)
+        model = PromptClassifier(None, head, target_ntype, struct_prompt=prompt, struct_feat=struct_feat).to(device)
+    else:
+        type_prompt = TypePrompt(node_types=[target_ntype], dim=args.hidden_dim, mode=dcfg.prompt_mode,
+                                 dropout=dcfg.prompt_dropout, use_ln=dcfg.use_layernorm).to(device)
+        struct_prompt = StructuralPromptMLP(
+            in_dim=int(struct_feat.size(-1)),
+            out_dim=args.hidden_dim,
+            hidden_dim=args.struct_hidden,
+            mode=dcfg.prompt_mode,
+            dropout=dcfg.prompt_dropout,
+            use_ln=dcfg.use_layernorm,
+        ).to(device)
+        model = PromptClassifier(type_prompt, head, target_ntype, struct_prompt=struct_prompt,
+                                 struct_feat=struct_feat).to(device)
+
 
     save_dir = Path(args.save_dir) / dataset_name / f"{args.shot}-shot" / f"seed{args.seed}"
     save_dir.mkdir(parents=True, exist_ok=True)
@@ -131,6 +185,7 @@ def main():
 
     print(
     f"[DONE] {dataset_name} shot={args.shot} seed={args.seed} | "
+    f"prompt_type={args.prompt_type} | "
     f"best_val_f1(micro/macro)={res.best_val_micro:.4f}/{res.best_val_macro:.4f} | "
     f"test@best_f1(micro/macro)={res.test_at_best_micro:.4f}/{res.test_at_best_macro:.4f} | "
     f"best_epoch={res.best_epoch} | monitor={res.early_stop_metric}"
