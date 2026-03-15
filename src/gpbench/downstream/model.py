@@ -16,7 +16,7 @@ from gpbench.pretrain.model import HGMPPretrainModel, PretrainModelConfig
 @dataclass
 class DownstreamConfig:
     # prompt/head
-    prompt_mode: str = "add"     # "add" or "mul"
+    prompt_mode: str = "mul"     # "add" or "mul"
     prompt_dropout: float = 0.1
     head_hidden: int = 128
     head_dropout: float = 0.3
@@ -28,14 +28,18 @@ class TypePrompt(nn.Module):
     最基础的 type-prompt（embedding 空间）：
     - 每个 node type 一个可训练向量 p_t in R^d
     - add:  z' = LN(z + p_t)
-    - mul:  z' = LN(z * (1 + p_t))
+    - mul:  z' = LN(z * P_t)
     """
     def __init__(self, node_types, dim: int, mode: str = "add", dropout: float = 0.1, use_ln: bool = True):
         super().__init__()
         assert mode in ("add", "mul")
         self.mode = mode
         self.node_types = list(node_types)
-        self.prompt = nn.ParameterDict({nt: nn.Parameter(torch.zeros(dim)) for nt in self.node_types})
+        init_value = 1.0 if mode == "mul" else 0.0
+        self.prompt = nn.ParameterDict({
+            nt: nn.Parameter(torch.full((dim,), init_value)) for nt in self.node_types
+        })
+        # self.prompt = nn.ParameterDict({nt: nn.Parameter(torch.zeros(dim)) for nt in self.node_types})
         self.drop = nn.Dropout(dropout)
         self.ln = nn.LayerNorm(dim) if use_ln else nn.Identity()
 
@@ -44,7 +48,7 @@ class TypePrompt(nn.Module):
         if self.mode == "add":
             out = z + p
         else:
-            out = z * (1.0 + p)
+            out = z * p
         out = self.drop(out)
         out = self.ln(out)
         return out
@@ -55,7 +59,8 @@ class StructuralPromptMLP(nn.Module):
     - 输入: 每个目标节点的结构特征 s_i (例如度、2-hop 近似)
     - 输出: 与 z 同维度的 prompt 向量 p_i
     - add: z' = LN(z + p_i)
-    - mul: z' = LN(z * (1 + p_i))
+    - mul: z' = LN(z * sigmoid(p_i))
+    # - mul: z' = LN(z * (1 + p_i))
     """
 
     def __init__(
@@ -83,7 +88,8 @@ class StructuralPromptMLP(nn.Module):
         if self.mode == "add":
             out = z + p
         else:
-            out = z * (1.0 + p)
+            # out = z * (1.0 + p)
+            out =z * torch.sigmoid(p)
         out = self.drop(out)
         out = self.ln(out)
         return out
@@ -103,6 +109,79 @@ class MLPHead(nn.Module):
         x = F.relu(x)
         x = self.drop(x)
         return self.fc2(x)
+
+class HeteroFeaturePrompt(nn.Module):
+    """
+    HGMP-style hetero feature prompt:
+    - one prompt vector per node type
+    - applied BEFORE backbone message passing
+    - default mode is multiplicative
+    """
+    def __init__(
+        self,
+        node_types,
+        dim: int,
+        mode: str = "mul",
+        dropout: float = 0.0,
+        use_ln: bool = False,
+    ):
+        super().__init__()
+        assert mode in ("mul", "add")
+        self.mode = mode
+        self.node_types = list(node_types)
+
+        init_value = 1.0 if mode == "mul" else 0.0
+        self.prompt = nn.ParameterDict({
+            nt: nn.Parameter(torch.full((dim,), init_value))
+            for nt in self.node_types
+        })
+
+        self.drop = nn.Dropout(dropout)
+        self.ln = nn.ModuleDict({
+            nt: (nn.LayerNorm(dim) if use_ln else nn.Identity())
+            for nt in self.node_types
+        })
+
+    def forward(self, x_dict: Dict[str, torch.Tensor]) -> Dict[str, torch.Tensor]:
+        out: Dict[str, torch.Tensor] = {}
+        for ntype, x in x_dict.items():
+            p = self.prompt[ntype].unsqueeze(0)   # [1, d]
+            if self.mode == "mul":
+                h = x * p
+            else:
+                h = x + p
+            h = self.drop(h)
+            h = self.ln[ntype](h)
+            out[ntype] = h
+        return out
+
+
+class PromptedSubgraphClassifier(nn.Module):
+    """
+    Frozen encoder + hetero feature prompt + graph classifier head
+    """
+    def __init__(
+        self,
+        encoder: HGMPPretrainModel,
+        prompt: HeteroFeaturePrompt,
+        head: nn.Module,
+        input_ntype: str,
+    ):
+        super().__init__()
+        self.encoder = encoder
+        self.prompt = prompt
+        self.head = head
+        self.input_ntype = input_ntype
+
+    def forward(self, batch: HeteroData) -> torch.Tensor:
+        z = self.encoder(
+            batch,
+            input_ntype=self.input_ntype,
+            prompt=self.prompt,
+            return_proj=False,
+        )  # [B, hidden_dim]
+        return self.head(z)
+
 
 
 def load_frozen_encoder(

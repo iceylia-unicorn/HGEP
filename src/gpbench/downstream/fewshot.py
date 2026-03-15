@@ -47,41 +47,183 @@ def f1_micro_macro(logits: torch.Tensor, y: torch.Tensor, num_classes: int) -> t
     return micro, macro
 
 
-def train_fewshot(
-    z_target: torch.Tensor,
-    y: torch.Tensor,
-    train_idx: torch.Tensor,
-    val_idx: torch.Tensor,
-    test_idx: torch.Tensor,
+# def train_fewshot(
+#     z_target: torch.Tensor,
+#     y: torch.Tensor,
+#     train_idx: torch.Tensor,
+#     val_idx: torch.Tensor,
+#     test_idx: torch.Tensor,
+#     model,
+#     lr: float,
+#     weight_decay: float,
+#     epochs: int,
+#     patience: int,
+#     device: torch.device,
+#     save_best_path: str,
+#     early_stop_metric: str = "macro",   # ✅ 新增： "macro" 或 "micro"
+# ) -> FewShotResult:
+
+#     assert early_stop_metric in ("micro", "macro"), "early_stop_metric must be 'micro' or 'macro'"
+
+#     z_target = z_target.to(device)
+#     y = y.to(device)
+#     train_idx = train_idx.to(device)
+#     val_idx = val_idx.to(device)
+#     test_idx = test_idx.to(device)
+
+#     opt = torch.optim.AdamW(model.parameters(), lr=lr, weight_decay=weight_decay)
+
+#     es = EarlyStopping(EarlyStopConfig(
+#         patience=patience,
+#         min_delta=0.0,
+#         mode="max",  # F1 越大越好
+#         save_best=True,
+#         save_path=save_best_path,
+#     ))
+
+#     # ✅ 同时记录 micro/macro
+#     best_val_micro = 0.0
+#     best_val_macro = 0.0
+#     test_at_best_micro = 0.0
+#     test_at_best_macro = 0.0
+#     best_epoch = -1
+
+#     for epoch in range(1, epochs + 1):
+#         model.train()
+#         logits = model(z_target)
+#         loss = F.cross_entropy(logits[train_idx], y[train_idx])
+
+#         opt.zero_grad()
+#         loss.backward()
+#         opt.step()
+
+#         model.eval()
+#         with torch.no_grad():
+#             logits = model(z_target)
+#             num_classes = int(logits.size(-1))
+
+#             if val_idx.numel() > 0:
+#                 val_micro, val_macro = f1_micro_macro(logits[val_idx], y[val_idx], num_classes)
+#             else:
+#                 val_micro, val_macro = 0.0, 0.0
+
+#             test_micro, test_macro = f1_micro_macro(logits[test_idx], y[test_idx], num_classes)
+
+#         # ✅ early stop 监控指标（任选一个）
+#         monitor = val_macro if early_stop_metric == "macro" else val_micro
+
+#         # ✅ best 也按 monitor 来决定，但保存当时的 micro+macro
+#         improved = (
+#             (monitor > (best_val_macro if early_stop_metric == "macro" else best_val_micro))
+#         )
+#         if improved:
+#             best_val_micro = val_micro
+#             best_val_macro = val_macro
+#             test_at_best_micro = test_micro
+#             test_at_best_macro = test_macro
+#             best_epoch = epoch
+
+#         stop = es.step(
+#             monitor, epoch, model,
+#             extra_state={
+#                 "best_val_micro": best_val_micro,
+#                 "best_val_macro": best_val_macro,
+#                 "test_at_best_micro": test_at_best_micro,
+#                 "test_at_best_macro": test_at_best_macro,
+#                 "early_stop_metric": early_stop_metric,
+#             },
+#         )
+
+#         if epoch % 10 == 0 or epoch == 1:
+#             print(
+#                 f"Epoch {epoch:03d} | loss={loss.item():.4f} | "
+#                 f"val_f1(micro/macro)={val_micro:.4f}/{val_macro:.4f} | "
+#                 f"test_f1(micro/macro)={test_micro:.4f}/{test_macro:.4f} | "
+#                 f"monitor({early_stop_metric})={monitor:.4f}"
+#             )
+
+#         if stop:
+#             print(
+#                 f"Early stop at epoch {epoch}, best_epoch={best_epoch} | "
+#                 f"best_val_f1(micro/macro)={best_val_micro:.4f}/{best_val_macro:.4f} | "
+#                 f"test@best_f1(micro/macro)={test_at_best_micro:.4f}/{test_at_best_macro:.4f} | "
+#                 f"monitor={early_stop_metric}"
+#             )
+#             break
+
+#     return FewShotResult(
+#         best_val_micro=best_val_micro,
+#         best_val_macro=best_val_macro,
+#         test_at_best_micro=test_at_best_micro,
+#         test_at_best_macro=test_at_best_macro,
+#         best_epoch=best_epoch,
+#         early_stop_metric=early_stop_metric,
+#     )
+def _get_seed_labels(batch, input_ntype: str) -> torch.Tensor:
+    store = batch[input_ntype]
+    if not hasattr(store, "y") or store.y is None:
+        raise ValueError(f"{input_ntype} has no labels in batch")
+
+    if not hasattr(store, "batch_size") or store.batch_size is None:
+        raise ValueError(
+            "Need NeighborLoader batches with batch[input_ntype].batch_size. "
+            "Please enable disjoint=True in build_hetero_neighbor_loader."
+        )
+
+    bs = int(store.batch_size)
+    return store.y[:bs].long()
+
+
+@torch.no_grad()
+def _eval_loader(model, loader, input_ntype: str, device: torch.device):
+    if loader is None:
+        return None, None
+
+    model.eval()
+    all_logits = []
+    all_y = []
+
+    for batch in loader:
+        batch = batch.to(device)
+        logits = model(batch)
+        y = _get_seed_labels(batch, input_ntype).to(device)
+
+        all_logits.append(logits)
+        all_y.append(y)
+
+    if len(all_logits) == 0:
+        return None, None
+
+    return torch.cat(all_logits, dim=0), torch.cat(all_y, dim=0)
+
+
+def train_fewshot_subgraph(
+    train_loader,
+    val_loader,
+    test_loader,
     model,
+    input_ntype: str,
     lr: float,
     weight_decay: float,
     epochs: int,
     patience: int,
     device: torch.device,
     save_best_path: str,
-    early_stop_metric: str = "macro",   # ✅ 新增： "macro" 或 "micro"
+    early_stop_metric: str = "macro",
 ) -> FewShotResult:
 
-    assert early_stop_metric in ("micro", "macro"), "early_stop_metric must be 'micro' or 'macro'"
-
-    z_target = z_target.to(device)
-    y = y.to(device)
-    train_idx = train_idx.to(device)
-    val_idx = val_idx.to(device)
-    test_idx = test_idx.to(device)
+    assert early_stop_metric in ("micro", "macro")
 
     opt = torch.optim.AdamW(model.parameters(), lr=lr, weight_decay=weight_decay)
 
     es = EarlyStopping(EarlyStopConfig(
         patience=patience,
         min_delta=0.0,
-        mode="max",  # F1 越大越好
+        mode="max",
         save_best=True,
         save_path=save_best_path,
     ))
 
-    # ✅ 同时记录 micro/macro
     best_val_micro = 0.0
     best_val_macro = 0.0
     test_at_best_micro = 0.0
@@ -90,31 +232,45 @@ def train_fewshot(
 
     for epoch in range(1, epochs + 1):
         model.train()
-        logits = model(z_target)
-        loss = F.cross_entropy(logits[train_idx], y[train_idx])
+        total_loss = 0.0
+        total_steps = 0
 
-        opt.zero_grad()
-        loss.backward()
-        opt.step()
+        for batch in train_loader:
+            batch = batch.to(device)
 
-        model.eval()
-        with torch.no_grad():
-            logits = model(z_target)
-            num_classes = int(logits.size(-1))
+            logits = model(batch)                           # [B, C]
+            y = _get_seed_labels(batch, input_ntype).to(device)  # [B]
 
-            if val_idx.numel() > 0:
-                val_micro, val_macro = f1_micro_macro(logits[val_idx], y[val_idx], num_classes)
-            else:
-                val_micro, val_macro = 0.0, 0.0
+            loss = F.cross_entropy(logits, y)
 
-            test_micro, test_macro = f1_micro_macro(logits[test_idx], y[test_idx], num_classes)
+            opt.zero_grad()
+            loss.backward()
+            opt.step()
 
-        # ✅ early stop 监控指标（任选一个）
+            total_loss += float(loss.item())
+            total_steps += 1
+
+        avg_loss = total_loss / max(1, total_steps)
+
+        val_logits, val_y = _eval_loader(model, val_loader, input_ntype, device)
+        test_logits, test_y = _eval_loader(model, test_loader, input_ntype, device)
+
+        if val_logits is not None:
+            num_classes = int(val_logits.size(-1))
+            val_micro, val_macro = f1_micro_macro(val_logits, val_y, num_classes)
+        else:
+            val_micro, val_macro = 0.0, 0.0
+
+        if test_logits is not None:
+            num_classes = int(test_logits.size(-1))
+            test_micro, test_macro = f1_micro_macro(test_logits, test_y, num_classes)
+        else:
+            test_micro, test_macro = 0.0, 0.0
+
         monitor = val_macro if early_stop_metric == "macro" else val_micro
 
-        # ✅ best 也按 monitor 来决定，但保存当时的 micro+macro
         improved = (
-            (monitor > (best_val_macro if early_stop_metric == "macro" else best_val_micro))
+            monitor > (best_val_macro if early_stop_metric == "macro" else best_val_micro)
         )
         if improved:
             best_val_micro = val_micro
@@ -124,7 +280,9 @@ def train_fewshot(
             best_epoch = epoch
 
         stop = es.step(
-            monitor, epoch, model,
+            monitor,
+            epoch,
+            model,
             extra_state={
                 "best_val_micro": best_val_micro,
                 "best_val_macro": best_val_macro,
@@ -136,7 +294,7 @@ def train_fewshot(
 
         if epoch % 10 == 0 or epoch == 1:
             print(
-                f"Epoch {epoch:03d} | loss={loss.item():.4f} | "
+                f"Epoch {epoch:03d} | loss={avg_loss:.4f} | "
                 f"val_f1(micro/macro)={val_micro:.4f}/{val_macro:.4f} | "
                 f"test_f1(micro/macro)={test_micro:.4f}/{test_macro:.4f} | "
                 f"monitor({early_stop_metric})={monitor:.4f}"
@@ -159,7 +317,6 @@ def train_fewshot(
         best_epoch=best_epoch,
         early_stop_metric=early_stop_metric,
     )
-
 def load_split_file(splits_dir: str, dataset_name: str, shot: int, seed: int) -> Dict[str, torch.Tensor]:
     base = Path(splits_dir) / dataset_name / f"{shot}-shot"
     if not base.exists():

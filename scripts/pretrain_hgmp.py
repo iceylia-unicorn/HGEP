@@ -62,8 +62,8 @@ def main():
         fanout=args.fanout,
         shuffle=True,
         num_workers=0,
+        disjoint=True,
     )
-
     cfg = PretrainModelConfig(
         backbone=args.backbone,
         hidden_dim=args.hidden_dim,

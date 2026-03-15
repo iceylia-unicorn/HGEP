@@ -3,51 +3,19 @@ from __future__ import annotations
 
 import argparse
 from pathlib import Path
-from typing import Optional
+
 import torch
-import torch.nn as nn
 
 from gpbench.data.loaders import load_hgb_node_task
+from gpbench.pretrain import build_hetero_neighbor_loader
 from gpbench.downstream.model import (
-    DownstreamConfig, TypePrompt,StructuralPromptMLP,  MLPHead,
-    load_frozen_encoder, encode_all_nodes,
-    build_target_structural_features,
+    DownstreamConfig,
+    HeteroFeaturePrompt,
+    MLPHead,
+    PromptedSubgraphClassifier,
+    load_frozen_encoder,
 )
-from gpbench.downstream.fewshot import load_split_file, train_fewshot
-
-
-class PromptClassifier(nn.Module):
-    """
-    最基础下游：prompt(z) -> head -> logits
-    """
-    # def __init__(self, prompt: TypePrompt, head: MLPHead, target_ntype: str):
-    def __init__(
-        self,
-        prompt,
-        head: MLPHead,
-        target_ntype: str,
-        struct_prompt=None,
-        struct_feat: Optional[torch.Tensor] = None,
-    ):
-        super().__init__()
-        self.prompt = prompt
-        self.head = head
-        self.struct_prompt = struct_prompt
-        self.struct_feat = struct_feat
-        self.target_ntype = target_ntype
-
-    def forward(self, z_target: torch.Tensor) -> torch.Tensor:
-        # z = self.prompt(z_target, self.target_ntype)
-        z = z_target
-
-        if self.prompt is not None:
-            z = self.prompt(z, self.target_ntype)
-
-        if self.struct_prompt is not None:
-            if self.struct_feat is None:
-                raise ValueError("struct_prompt is set but struct_feat is None")
-            z = self.struct_prompt(z, self.struct_feat)
-        return self.head(z)
+from gpbench.downstream.fewshot import load_split_file, train_fewshot_subgraph
 
 
 def main():
@@ -62,7 +30,12 @@ def main():
     ap.add_argument("--ckpt", type=str, required=True, help="pretrain checkpoint path (.pt)")
     ap.add_argument("--device", type=str, default="cuda" if torch.cuda.is_available() else "cpu")
 
-    # encoder cfg（必须跟预训练一致）
+    # subgraph sampling
+    ap.add_argument("--tau_hops", type=int, default=2)
+    ap.add_argument("--fanout", type=int, nargs="+", default=[25, 15])
+    ap.add_argument("--batch_size", type=int, default=64)
+
+    # encoder cfg (must match pretraining)
     ap.add_argument("--backbone", type=str, default="hgt", choices=["hgt", "to_hetero_gcn", "to_hetero_gat"])
     ap.add_argument("--hidden_dim", type=int, default=128)
     ap.add_argument("--num_layers", type=int, default=2)
@@ -70,12 +43,7 @@ def main():
     ap.add_argument("--enc_dropout", type=float, default=0.2)
 
     # downstream cfg
-    ap.add_argument("--prompt_mode", type=str, default="add", choices=["add", "mul"])
-
-    ap.add_argument("--prompt_type", type=str, default="type_struct", choices=["type", "struct", "type_struct"],
-                help="type=原TypePrompt; struct=结构特征MLP Prompt; type_struct=两者叠加")
-    ap.add_argument("--struct_hidden", type=int, default=64)
-
+    ap.add_argument("--prompt_mode", type=str, default="mul", choices=["mul", "add"])
     ap.add_argument("--prompt_dropout", type=float, default=0.1)
     ap.add_argument("--head_hidden", type=int, default=128)
     ap.add_argument("--head_dropout", type=float, default=0.3)
@@ -93,14 +61,53 @@ def main():
     task = load_hgb_node_task(args.root, args.dataset)
     data = task.data
     target_ntype = task.target_ntype
-    dataset_name = task.dataset_name  # e.g. "hgb-acm"
+    dataset_name = task.dataset_name
 
     split = load_split_file(args.splits, dataset_name, args.shot, args.seed)
     train_idx = split["train_idx"].long()
     val_idx = split.get("val_idx", torch.empty(0, dtype=torch.long)).long()
     test_idx = split["test_idx"].long()
 
-    # 冻结 encoder + 一次性编码
+    # build hetero subgraph loaders: one seed node => one induced graph sample
+    train_loader = build_hetero_neighbor_loader(
+        data=data,
+        input_ntype=target_ntype,
+        batch_size=args.batch_size,
+        num_hops=args.tau_hops,
+        fanout=args.fanout,
+        seed_nodes=train_idx,
+        shuffle=True,
+        num_workers=0,
+        disjoint=True,
+    )
+
+    val_loader = None
+    if val_idx.numel() > 0:
+        val_loader = build_hetero_neighbor_loader(
+            data=data,
+            input_ntype=target_ntype,
+            batch_size=args.batch_size,
+            num_hops=args.tau_hops,
+            fanout=args.fanout,
+            seed_nodes=val_idx,
+            shuffle=False,
+            num_workers=0,
+            disjoint=True,
+        )
+
+    test_loader = build_hetero_neighbor_loader(
+        data=data,
+        input_ntype=target_ntype,
+        batch_size=args.batch_size,
+        num_hops=args.tau_hops,
+        fanout=args.fanout,
+        seed_nodes=test_idx,
+        shuffle=False,
+        num_workers=0,
+        disjoint=True,
+    )
+
+    # frozen encoder
     enc, _ = load_frozen_encoder(
         full_data=data,
         ckpt_path=args.ckpt,
@@ -112,12 +119,7 @@ def main():
         device=device,
     )
 
-    x_dict = encode_all_nodes(enc, data, device=device)
-    z_target = x_dict[target_ntype]          # [N_target, hidden_dim]
-    y = task.y.long()                        # [N_target]
-    struct_feat = build_target_structural_features(data, target_ntype).to(device)
-
-    num_classes = int(y.max().item()) + 1
+    num_classes = int(task.y.max().item()) + 1
 
     dcfg = DownstreamConfig(
         prompt_mode=args.prompt_mode,
@@ -127,52 +129,40 @@ def main():
         use_layernorm=True,
     )
 
-    # prompt = TypePrompt(node_types=[target_ntype], dim=args.hidden_dim, mode=dcfg.prompt_mode,
-    #                     dropout=dcfg.prompt_dropout, use_ln=dcfg.use_layernorm).to(device)
-    head = MLPHead(in_dim=args.hidden_dim, hidden=dcfg.head_hidden, num_classes=num_classes,
-                   dropout=dcfg.head_dropout, use_ln=True).to(device)
+    # hetero prompt over ALL node types
+    prompt = HeteroFeaturePrompt(
+        node_types=data.node_types,
+        dim=args.hidden_dim,
+        mode=dcfg.prompt_mode,
+        dropout=dcfg.prompt_dropout,
+        use_ln=dcfg.use_layernorm,
+    ).to(device)
 
-    # model = PromptClassifier(prompt, head, target_ntype).to(device)
-    if args.prompt_type == "type":
-        prompt = TypePrompt(node_types=[target_ntype], dim=args.hidden_dim, mode=dcfg.prompt_mode,
-                            dropout=dcfg.prompt_dropout, use_ln=dcfg.use_layernorm).to(device)
-        model = PromptClassifier(prompt, head, target_ntype).to(device)
-    elif args.prompt_type == "struct":
-        prompt = StructuralPromptMLP(
-            in_dim=int(struct_feat.size(-1)),
-            out_dim=args.hidden_dim,
-            hidden_dim=args.struct_hidden,
-            mode=dcfg.prompt_mode,
-            dropout=dcfg.prompt_dropout,
-            use_ln=dcfg.use_layernorm,
-        ).to(device)
-        model = PromptClassifier(None, head, target_ntype, struct_prompt=prompt, struct_feat=struct_feat).to(device)
-    else:
-        type_prompt = TypePrompt(node_types=[target_ntype], dim=args.hidden_dim, mode=dcfg.prompt_mode,
-                                 dropout=dcfg.prompt_dropout, use_ln=dcfg.use_layernorm).to(device)
-        struct_prompt = StructuralPromptMLP(
-            in_dim=int(struct_feat.size(-1)),
-            out_dim=args.hidden_dim,
-            hidden_dim=args.struct_hidden,
-            mode=dcfg.prompt_mode,
-            dropout=dcfg.prompt_dropout,
-            use_ln=dcfg.use_layernorm,
-        ).to(device)
-        model = PromptClassifier(type_prompt, head, target_ntype, struct_prompt=struct_prompt,
-                                 struct_feat=struct_feat).to(device)
+    head = MLPHead(
+        in_dim=args.hidden_dim,
+        hidden=dcfg.head_hidden,
+        num_classes=num_classes,
+        dropout=dcfg.head_dropout,
+        use_ln=True,
+    ).to(device)
 
+    model = PromptedSubgraphClassifier(
+        encoder=enc,
+        prompt=prompt,
+        head=head,
+        input_ntype=target_ntype,
+    ).to(device)
 
     save_dir = Path(args.save_dir) / dataset_name / f"{args.shot}-shot" / f"seed{args.seed}"
     save_dir.mkdir(parents=True, exist_ok=True)
     best_path = str(save_dir / "best_prompt_head.pt")
 
-    res = train_fewshot(
-        z_target=z_target,
-        y=y,
-        train_idx=train_idx,
-        val_idx=val_idx,
-        test_idx=test_idx,
+    res = train_fewshot_subgraph(
+        train_loader=train_loader,
+        val_loader=val_loader,
+        test_loader=test_loader,
         model=model,
+        input_ntype=target_ntype,
         lr=args.lr,
         weight_decay=args.weight_decay,
         epochs=args.epochs,
@@ -180,16 +170,15 @@ def main():
         device=device,
         save_best_path=best_path,
         early_stop_metric=args.early_stop_metric,
-
     )
 
     print(
-    f"[DONE] {dataset_name} shot={args.shot} seed={args.seed} | "
-    f"prompt_type={args.prompt_type} | "
-    f"best_val_f1(micro/macro)={res.best_val_micro:.4f}/{res.best_val_macro:.4f} | "
-    f"test@best_f1(micro/macro)={res.test_at_best_micro:.4f}/{res.test_at_best_macro:.4f} | "
-    f"best_epoch={res.best_epoch} | monitor={res.early_stop_metric}"
-)
+        f"[DONE] {dataset_name} shot={args.shot} seed={args.seed} | "
+        f"best_val_f1(micro/macro)={res.best_val_micro:.4f}/{res.best_val_macro:.4f} | "
+        f"test@best_f1(micro/macro)={res.test_at_best_micro:.4f}/{res.test_at_best_macro:.4f} | "
+        f"best_epoch={res.best_epoch} | monitor={res.early_stop_metric}"
+    )
+
 
 if __name__ == "__main__":
     main()

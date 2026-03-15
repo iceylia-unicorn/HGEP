@@ -1,6 +1,7 @@
 # src/gpbench/pretrain/model.py
 from __future__ import annotations
 
+
 from dataclasses import dataclass
 from typing import Dict, Optional
 
@@ -68,6 +69,7 @@ class HomoGCN(nn.Module):
         self.bns = nn.ModuleList()
         for _ in range(num_layers):
             self.convs.append(GCNConv(hidden_dim, hidden_dim, add_self_loops=False)) #必须显式关闭自环，否则会和HGT冲突
+            # self.convs.append(GraphConv(hidden_dim, hidden_dim))
             self.bns.append(nn.BatchNorm1d(hidden_dim))
         self.dropout = dropout
 
@@ -78,6 +80,34 @@ class HomoGCN(nn.Module):
             x = F.relu(x)
             x = F.dropout(x, p=self.dropout, training=self.training)
         return x
+
+class HomogenizedGCNBackbone(nn.Module):
+    """
+    Apply a true GCN backbone on a per-batch homogeneous graph converted from hetero data.
+    This keeps the backbone strictly GCNConv-based while remaining compatible with hetero inputs.
+    """
+    def __init__(self, node_types, hidden_dim: int, num_layers: int, dropout: float):
+        super().__init__()
+        self.node_types = list(node_types)
+        self.ntype_to_id = {nt: i for i, nt in enumerate(self.node_types)}
+        self.base = HomoGCN(hidden_dim=hidden_dim, num_layers=num_layers, dropout=dropout)
+
+    def forward(self, x_dict, edge_index_dict):
+        data = HeteroData()
+        for ntype, x in x_dict.items():
+            data[ntype].x = x
+        for etype, ei in edge_index_dict.items():
+            data[etype].edge_index = ei
+
+        homo = data.to_homogeneous(node_attrs=["x"])
+        x_h = self.base(homo.x, homo.edge_index)
+
+        node_type = homo.node_type
+        out = {}
+        for ntype, tid in self.ntype_to_id.items():
+            out[ntype] = x_h[node_type == tid]
+        return out
+
 
 
 class HomoGAT(nn.Module):
@@ -224,15 +254,47 @@ class HGMPPretrainModel(nn.Module):
         self.readout = HeteroReadout()
         self.proj = ProjectionHead(cfg.hidden_dim, cfg.proj_dim)
 
-    def forward(self, batch: HeteroData, input_ntype: str) -> torch.Tensor:
-        # 1) 特征对齐
+    def encode_graphs(
+        self,
+        batch: HeteroData,
+        input_ntype: str,
+        prompt=None,
+    ) -> torch.Tensor:
+        # 1) feature adaptation
         x_dict = self.adapter(batch)
 
-        # 2) backbone encode
+        # 2) optional hetero feature prompt
+        if prompt is not None:
+            x_dict = prompt(x_dict)
+
+        # 3) backbone encode
         x_dict = self.backbone(x_dict, batch.edge_index_dict)
 
-        # 3) graph pooling (per seed-subgraph)
+        # 4) graph readout
         z = self.readout(x_dict, batch, input_ntype)   # [B, hidden_dim]
+        return z
 
-        # 4) projection head
-        return self.proj(z)                            # [B, proj_dim]
+
+    def forward(
+        self,
+        batch: HeteroData,
+        input_ntype: str,
+        prompt=None,
+        return_proj: bool = True,
+    ) -> torch.Tensor:
+        z = self.encode_graphs(batch, input_ntype=input_ntype, prompt=prompt)
+        if return_proj:
+            return self.proj(z)
+        return z
+    # def forward(self, batch: HeteroData, input_ntype: str) -> torch.Tensor:
+    #     # 1) 特征对齐
+    #     x_dict = self.adapter(batch)
+
+    #     # 2) backbone encode
+    #     x_dict = self.backbone(x_dict, batch.edge_index_dict)
+
+    #     # 3) graph pooling (per seed-subgraph)
+    #     z = self.readout(x_dict, batch, input_ntype)   # [B, hidden_dim]
+
+    #     # 4) projection head
+    #     return self.proj(z)                            # [B, proj_dim]
