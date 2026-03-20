@@ -15,6 +15,7 @@ from gpbench.downstream.model import (
     PromptedSubgraphClassifier,
     load_frozen_encoder,
 )
+from gpbench.pretrain.model import TypePairRelationPrompt
 from gpbench.downstream.fewshot import load_split_file, train_fewshot_subgraph
 
 
@@ -53,6 +54,17 @@ def main():
     ap.add_argument("--weight_decay", type=float, default=1e-4)
     ap.add_argument("--early_stop_metric", type=str, default="macro", choices=["macro", "micro"])
 
+
+    ap.add_argument(
+        "--prompt_scope",
+        type=str,
+        default="type_pair",
+        choices=["node", "type_pair", "node_plus_type_pair"],
+        help="node: 只用原始 node-type prompt; type_pair: 只用 type-pair relation prompt; node_plus_type_pair: 两者都用",
+    )
+    ap.add_argument("--relation_alpha", type=float, default=0.5)
+    ap.add_argument("--relation_dropout", type=float, default=0.1)
+    ap.add_argument("--relation_aggr", type=str, default="mean", choices=["mean", "sum"])
     ap.add_argument("--save_dir", type=str, default="checkpoints/downstream")
     args = ap.parse_args()
 
@@ -129,15 +141,36 @@ def main():
         use_layernorm=True,
     )
 
-    # hetero prompt over ALL node types
-    prompt = HeteroFeaturePrompt(
-        node_types=data.node_types,
-        dim=args.hidden_dim,
-        mode=dcfg.prompt_mode,
-        dropout=dcfg.prompt_dropout,
-        use_ln=dcfg.use_layernorm,
-    ).to(device)
+    # # hetero prompt over ALL node types
+    # prompt = HeteroFeaturePrompt(
+    #     node_types=data.node_types,
+    #     dim=args.hidden_dim,
+    #     mode=dcfg.prompt_mode,
+    #     dropout=dcfg.prompt_dropout,
+    #     use_ln=dcfg.use_layernorm,
+    # ).to(device)
+    prompt = None
 
+    if args.prompt_scope in ("node", "node_plus_type_pair"):
+        prompt = HeteroFeaturePrompt(
+            node_types=data.node_types,
+            dim=args.hidden_dim,
+            mode=dcfg.prompt_mode,
+            dropout=dcfg.prompt_dropout,
+            use_ln=dcfg.use_layernorm,
+        ).to(device)
+    relation_prompt = None
+
+    if args.prompt_scope in ("type_pair", "node_plus_type_pair"):
+        relation_prompt = TypePairRelationPrompt(
+            metadata=data.metadata(),
+            dim=args.hidden_dim,
+            mode=dcfg.prompt_mode,
+            alpha=args.relation_alpha,
+            dropout=args.relation_dropout,
+            use_ln=dcfg.use_layernorm,
+            aggr=args.relation_aggr,
+        ).to(device)
     head = MLPHead(
         in_dim=args.hidden_dim,
         hidden=dcfg.head_hidden,
@@ -149,6 +182,7 @@ def main():
     model = PromptedSubgraphClassifier(
         encoder=enc,
         prompt=prompt,
+        relation_prompt=relation_prompt,
         head=head,
         input_ntype=target_ntype,
     ).to(device)

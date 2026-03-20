@@ -3,14 +3,18 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Dict, Tuple
+from typing import Dict, Tuple, Optional
 
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
 from torch_geometric.data import HeteroData
 
-from gpbench.pretrain.model import HGMPPretrainModel, PretrainModelConfig
+from gpbench.pretrain.model import (
+    HGMPPretrainModel,
+    PretrainModelConfig,
+    TypePairRelationPrompt,
+)
 
 
 @dataclass
@@ -158,18 +162,20 @@ class HeteroFeaturePrompt(nn.Module):
 
 class PromptedSubgraphClassifier(nn.Module):
     """
-    Frozen encoder + hetero feature prompt + graph classifier head
+    Frozen encoder + optional node-type prompt + optional type-pair relation prompt + head
     """
     def __init__(
         self,
         encoder: HGMPPretrainModel,
-        prompt: HeteroFeaturePrompt,
+        prompt: Optional[HeteroFeaturePrompt],
         head: nn.Module,
         input_ntype: str,
+        relation_prompt: Optional[TypePairRelationPrompt] = None,
     ):
         super().__init__()
         self.encoder = encoder
         self.prompt = prompt
+        self.relation_prompt = relation_prompt
         self.head = head
         self.input_ntype = input_ntype
 
@@ -178,8 +184,9 @@ class PromptedSubgraphClassifier(nn.Module):
             batch,
             input_ntype=self.input_ntype,
             prompt=self.prompt,
+            relation_prompt=self.relation_prompt,
             return_proj=False,
-        )  # [B, hidden_dim]
+        )
         return self.head(z)
 
 

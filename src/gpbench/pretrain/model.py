@@ -3,7 +3,7 @@ from __future__ import annotations
 
 
 from dataclasses import dataclass
-from typing import Dict, Optional
+from typing import Dict, Optional, Tuple
 
 import torch
 import torch.nn as nn
@@ -134,6 +134,99 @@ class HomoGAT(nn.Module):
             x = F.dropout(x, p=self.dropout, training=self.training)
         return x
 
+class TypePairRelationPrompt(nn.Module):
+    """
+    静态 type-pair relation prompt:
+    - 每个 (src_type, dst_type) 一个可训练向量
+    - 在每层 backbone 后，额外做一次 relation-aware residual propagation
+    - 这是最小可跑版，不引入条件网
+    """
+
+    def __init__(
+        self,
+        metadata: Tuple[list, list],
+        dim: int,
+        mode: str = "mul",          # "mul" or "add"
+        alpha: float = 0.5,         # residual strength
+        dropout: float = 0.1,
+        use_ln: bool = True,
+        aggr: str = "mean",         # "mean" or "sum"
+    ):
+        super().__init__()
+        assert mode in ("mul", "add")
+        assert aggr in ("mean", "sum")
+
+        node_types, edge_types = metadata
+        self.mode = mode
+        self.alpha = alpha
+        self.aggr = aggr
+
+        pair_keys = []
+        for src_t, _, dst_t in edge_types:
+            key = self.make_pair_key(src_t, dst_t)
+            if key not in pair_keys:
+                pair_keys.append(key)
+
+        init_value = 1.0 if mode == "mul" else 0.0
+        self.prompt = nn.ParameterDict({
+            k: nn.Parameter(torch.full((dim,), init_value))
+            for k in pair_keys
+        })
+
+        self.drop = nn.Dropout(dropout)
+        self.ln = nn.ModuleDict({
+            nt: (nn.LayerNorm(dim) if use_ln else nn.Identity())
+            for nt in node_types
+        })
+
+    @staticmethod
+    def make_pair_key(src_t: str, dst_t: str) -> str:
+        return f"{src_t}__TO__{dst_t}"
+
+    def forward(self, x_dict: Dict[str, torch.Tensor], edge_index_dict) -> Dict[str, torch.Tensor]:
+        device = next(iter(x_dict.values())).device
+
+        agg_dict = {
+            ntype: torch.zeros_like(x)
+            for ntype, x in x_dict.items()
+        }
+        deg_dict = {
+            ntype: torch.zeros((x.size(0), 1), device=device, dtype=x.dtype)
+            for ntype, x in x_dict.items()
+        }
+
+        for (src_t, _, dst_t), edge_index in edge_index_dict.items():
+            src, dst = edge_index
+            if src.numel() == 0:
+                continue
+
+            key = self.make_pair_key(src_t, dst_t)
+            p = self.prompt[key].unsqueeze(0)  # [1, d]
+
+            msg = x_dict[src_t][src]  # [E, d]
+            if self.mode == "mul":
+                msg = msg * p
+            else:
+                msg = msg + p
+
+            agg_dict[dst_t].index_add_(0, dst, msg)
+
+            ones = torch.ones((dst.size(0), 1), device=device, dtype=x_dict[dst_t].dtype)
+            deg_dict[dst_t].index_add_(0, dst, ones)
+
+        out_dict: Dict[str, torch.Tensor] = {}
+        for ntype, x in x_dict.items():
+            agg = agg_dict[ntype]
+            if self.aggr == "mean":
+                agg = agg / deg_dict[ntype].clamp_min(1.0)
+
+            h = x + self.alpha * agg
+            h = self.drop(h)
+            h = self.ln[ntype](h)
+            out_dict[ntype] = h
+
+        return out_dict
+
 
 class HGTBackbone(nn.Module):
     def __init__(self, metadata, hidden_dim: int, num_layers: int, num_heads: int, dropout: float):
@@ -143,11 +236,16 @@ class HGTBackbone(nn.Module):
         for _ in range(num_layers):
             self.convs.append(HGTConv(hidden_dim, hidden_dim, metadata, heads=num_heads))
 
-    def forward(self, x_dict, edge_index_dict):
+    def forward(self, x_dict, edge_index_dict, relation_prompt: Optional[nn.Module] = None):
         for conv in self.convs:
             x_dict = conv(x_dict, edge_index_dict)
             x_dict = {k: F.relu(v) for k, v in x_dict.items()}
             x_dict = {k: F.dropout(v, p=self.dropout, training=self.training) for k, v in x_dict.items()}
+
+            # 新增：每层后做一次 type-pair-aware residual propagation
+            if relation_prompt is not None:
+                x_dict = relation_prompt(x_dict, edge_index_dict)
+
         return x_dict
 
 
@@ -259,19 +357,29 @@ class HGMPPretrainModel(nn.Module):
         batch: HeteroData,
         input_ntype: str,
         prompt=None,
+        relation_prompt=None,
     ) -> torch.Tensor:
         # 1) feature adaptation
         x_dict = self.adapter(batch)
 
-        # 2) optional hetero feature prompt
+        # 2) optional node-type feature prompt
         if prompt is not None:
             x_dict = prompt(x_dict)
 
         # 3) backbone encode
-        x_dict = self.backbone(x_dict, batch.edge_index_dict)
+        if self.cfg.backbone == "hgt":
+            x_dict = self.backbone(
+                x_dict,
+                batch.edge_index_dict,
+                relation_prompt=relation_prompt,
+            )
+        else:
+            x_dict = self.backbone(x_dict, batch.edge_index_dict)
+            if relation_prompt is not None:
+                x_dict = relation_prompt(x_dict, batch.edge_index_dict)
 
         # 4) graph readout
-        z = self.readout(x_dict, batch, input_ntype)   # [B, hidden_dim]
+        z = self.readout(x_dict, batch, input_ntype)
         return z
 
 
@@ -280,9 +388,15 @@ class HGMPPretrainModel(nn.Module):
         batch: HeteroData,
         input_ntype: str,
         prompt=None,
+        relation_prompt=None,
         return_proj: bool = True,
     ) -> torch.Tensor:
-        z = self.encode_graphs(batch, input_ntype=input_ntype, prompt=prompt)
+        z = self.encode_graphs(
+            batch,
+            input_ntype=input_ntype,
+            prompt=prompt,
+            relation_prompt=relation_prompt,
+        )
         if return_proj:
             return self.proj(z)
         return z
