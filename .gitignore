@@ -1,2 +1,7 @@
 ./data
 ./splits
+
+__pycache__/
+*.pyc
+artifacts/checkpoints/
+artifacts/logs/
