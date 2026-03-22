@@ -5,3 +5,6 @@ __pycache__/
 *.pyc
 artifacts/checkpoints/
 artifacts/logs/
+
+.vscode/
+data/

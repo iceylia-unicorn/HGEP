@@ -59,3 +59,8 @@ python scripts/finetune_fewshot.py \
   --patience 30 \
   --early_stop_metric micro \
   --lr 1e-3
+
+# 关于HGMP
+代码位于reorg/hgmp-hgprompt-aligned分支下
+## 预处理
+使用的类ProG induced graphs形式，因此需要先运行preprocess_legacy.py，位置位于data/{dataname}/induced_graphs下
