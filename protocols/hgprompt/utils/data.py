@@ -12,6 +12,8 @@ DATA_ROOT = REPO_ROOT / "data"
 from protocols.hgprompt.utils.data_loader import data_loader,data_loader_lp
 
 def load_data(prefix='DBLP', shotnum=10,tasknum=2,index=None):
+    prefix = prefix.lower() + '/raw/' + prefix.upper()
+
     dl = data_loader(str(DATA_ROOT / prefix))
     index_dir=os.path.join(str(DATA_ROOT),prefix,index)
     print(index_dir)
@@ -53,6 +55,8 @@ def load_data(prefix='DBLP', shotnum=10,tasknum=2,index=None):
 
 
 def load_data_lp(prefix='DBLP', shotnum=10,tasknum=2,index=None):
+    prefix = prefix.lower() + '/raw/' + prefix.upper()
+
     dl = data_loader_lp(str(DATA_ROOT / prefix))
     index_dir=os.path.join(str(DATA_ROOT),prefix,index)
     print(index_dir)
@@ -98,6 +102,8 @@ def load_data_lp(prefix='DBLP', shotnum=10,tasknum=2,index=None):
 
 def load_pretrain_data(prefix='DBLP'):
     #from scripts.data_loader import data_loader
+    prefix = prefix.lower() + '/raw/' + prefix.upper()
+
     dl = data_loader(str(DATA_ROOT / prefix))
     features = []
     for i in range(len(dl.nodes['count'])):
@@ -114,6 +120,8 @@ def load_pretrain_data(prefix='DBLP'):
 
 def load_pretrain_data_lp(prefix='DBLP'):
     #from scripts.data_loader import data_loader
+    prefix = prefix.lower() + '/raw/' + prefix.upper()
+
     dl = data_loader_lp(str(DATA_ROOT / prefix))
     features = []
     for i in range(len(dl.nodes['count'])):
@@ -129,8 +137,8 @@ def load_pretrain_data_lp(prefix='DBLP'):
 
 
 def load_acm(feat_type=0,shotnum=10,tasknum=2,index=None):
-    dl = data_loader(str(DATA_ROOT / "ACM"))
-    index_dir=os.path.join(str(DATA_ROOT), "ACM", index)
+    dl = data_loader(str(DATA_ROOT / "acm/raw/ACM"))
+    index_dir=os.path.join(str(DATA_ROOT), "acm/raw/ACM", index)
     index_exist=os.path.exists(index_dir)
     if index_exist==False:
         print("Please Generate Few shot tasks first,using SHGN")

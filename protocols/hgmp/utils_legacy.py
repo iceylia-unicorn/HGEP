@@ -599,7 +599,8 @@ def act(x=None, act_type='leakyrelu'):
             return torch.tanh(x)
 
 def load_data(prefix='DBLP'):
-    dl = data_loader(DATA_ROOT + '/' + prefix)
+    prefix = prefix.lower() + '/raw/' + prefix.upper()
+    dl = data_loader(DATA_ROOT + prefix)
     features = []
     for i in range(len(dl.nodes['count'])):
         th = dl.nodes['attr'][i]
