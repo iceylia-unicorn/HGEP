@@ -6,7 +6,7 @@ import torch.nn.functional as F
 
 import dgl.function as fn
 from dgl.nn.pytorch import edge_softmax, GATConv
-from conv import myGATConv
+from protocols.hgprompt.source.conv import myGATConv
 
 class myGAT(nn.Module):
     def __init__(self,
