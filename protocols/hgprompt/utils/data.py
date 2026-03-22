@@ -1,3 +1,4 @@
+from pathlib import Path
 import sys
 import dgl
 import numpy as np
@@ -6,11 +7,13 @@ import copy
 import torch as th
 import scipy.sparse as sp
 # sys.path.append('..')
+REPO_ROOT = Path(__file__).resolve().parents[3]
+DATA_ROOT = REPO_ROOT / "data"
 from protocols.hgprompt.utils.data_loader import data_loader,data_loader_lp
 
 def load_data(prefix='DBLP', shotnum=10,tasknum=2,index=None):
-    dl = data_loader('../../../data/'+prefix)
-    index_dir=os.path.join('../../../data',prefix,index)
+    dl = data_loader(str(DATA_ROOT / prefix))
+    index_dir=os.path.join(str(DATA_ROOT),prefix,index)
     print(index_dir)
     index_exist=os.path.exists(index_dir)
     if index_exist==False:
@@ -50,8 +53,8 @@ def load_data(prefix='DBLP', shotnum=10,tasknum=2,index=None):
 
 
 def load_data_lp(prefix='DBLP', shotnum=10,tasknum=2,index=None):
-    dl = data_loader_lp('../../../data/'+prefix)
-    index_dir=os.path.join('../../../data',prefix,index)
+    dl = data_loader_lp(str(DATA_ROOT / prefix))
+    index_dir=os.path.join(str(DATA_ROOT),prefix,index)
     print(index_dir)
     index_exist=os.path.exists(index_dir)
     if index_exist==False:
@@ -95,7 +98,7 @@ def load_data_lp(prefix='DBLP', shotnum=10,tasknum=2,index=None):
 
 def load_pretrain_data(prefix='DBLP'):
     #from scripts.data_loader import data_loader
-    dl = data_loader('../../../data/'+prefix)
+    dl = data_loader(str(DATA_ROOT / prefix))
     features = []
     for i in range(len(dl.nodes['count'])):
         th = dl.nodes['attr'][i]
@@ -111,7 +114,7 @@ def load_pretrain_data(prefix='DBLP'):
 
 def load_pretrain_data_lp(prefix='DBLP'):
     #from scripts.data_loader import data_loader
-    dl = data_loader_lp('../../../data/'+prefix)
+    dl = data_loader_lp(str(DATA_ROOT / prefix))
     features = []
     for i in range(len(dl.nodes['count'])):
         th = dl.nodes['attr'][i]
@@ -126,8 +129,8 @@ def load_pretrain_data_lp(prefix='DBLP'):
 
 
 def load_acm(feat_type=0,shotnum=10,tasknum=2,index=None):
-    dl = data_loader('../../../data/ACM')
-    index_dir=os.path.join('../../../data/ACM',index)
+    dl = data_loader(str(DATA_ROOT / "ACM"))
+    index_dir=os.path.join(str(DATA_ROOT), "ACM", index)
     index_exist=os.path.exists(index_dir)
     if index_exist==False:
         print("Please Generate Few shot tasks first,using SHGN")

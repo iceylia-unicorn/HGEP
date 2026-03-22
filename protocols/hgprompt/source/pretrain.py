@@ -1,3 +1,4 @@
+from pathlib import Path
 import sys
 # sys.path.append('..')
 import time
@@ -16,7 +17,8 @@ from protocols.hgprompt.source.GNN import GCN, GAT, GIN,acm_hGCN,acm_sem_hGCN,ac
 import dgl
 import tqdm
 import os
-
+REPO_ROOT = Path(__file__).resolve().parents[3]
+DATA_ROOT = REPO_ROOT / "data"
 def sp_to_spt(mat):
     coo = mat.tocoo()
     values = coo.data
@@ -333,14 +335,14 @@ def run_model_DBLP(args):
             if (v,u) not in edge2type:
                 edge2type[(v,u)] = k+1+len(dl.links['count'])
 
-    samples_dir=os.path.join('../../../data',args.dataset,"".join([str(args.tuple_neg_disconnected_num),'neg_samples']))
-    load_samples_dir=os.path.join('../../../data',args.dataset,"".join([str(args.tuple_neg_disconnected_num),'neg_samples.npy']))
-    target_nodes_samples_dir=os.path.join('../../../data',args.dataset,"".join([str(args.target_tuple_neg_disconnected_num),'target_neg_samples']))
-    target_nodes_load_samples_dir=os.path.join('../../../data',args.dataset,"".join([str(args.target_tuple_neg_disconnected_num),'target_neg_samples.npy']))
-    hsamples_dir=os.path.join('../../../data',args.dataset,"".join([str(args.tuple_neg_unrelated_num),'neg_unrelated_samples']))
-    hload_samples_dir=os.path.join('../../../data',args.dataset,"".join([str(args.tuple_neg_unrelated_num),'neg_unrelated_samples.npy']))
-    target_nodes_tuple_num_dir=os.path.join('../../../data',args.dataset,"".join([str(args.tuple_neg_unrelated_num),'target_nodes_tuple_num']))
-    load_target_nodes_tuple_num_dir=os.path.join('../../../data',args.dataset,"".join([str(args.tuple_neg_unrelated_num),'target_nodes_tuple_num.npy']))
+    samples_dir=os.path.join(DATA_ROOT, args.dataset, "".join([str(args.tuple_neg_disconnected_num), 'neg_samples']))
+    load_samples_dir=os.path.join(DATA_ROOT, args.dataset, "".join([str(args.tuple_neg_disconnected_num), 'neg_samples.npy']))
+    target_nodes_samples_dir=os.path.join(DATA_ROOT, args.dataset, "".join([str(args.target_tuple_neg_disconnected_num), 'target_neg_samples']))
+    target_nodes_load_samples_dir=os.path.join(DATA_ROOT, args.dataset, "".join([str(args.target_tuple_neg_disconnected_num), 'target_neg_samples.npy']))
+    hsamples_dir=os.path.join(DATA_ROOT, args.dataset, "".join([str(args.tuple_neg_unrelated_num), 'neg_unrelated_samples']))
+    hload_samples_dir=os.path.join(DATA_ROOT, args.dataset, "".join([str(args.tuple_neg_unrelated_num), 'neg_unrelated_samples.npy']))
+    target_nodes_tuple_num_dir=os.path.join(DATA_ROOT, args.dataset, "".join([str(args.tuple_neg_unrelated_num), 'target_nodes_tuple_num']))
+    load_target_nodes_tuple_num_dir=os.path.join(DATA_ROOT, args.dataset, "".join([str(args.tuple_neg_unrelated_num), 'target_nodes_tuple_num.npy']))
 
     g = dgl.DGLGraph(adjM+(adjM.T))
     g = dgl.remove_self_loop(g)

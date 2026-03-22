@@ -525,27 +525,26 @@ def run_model_DBLP(args):
             train_time += train_time_one_task
             if args.tuning == 'weight-sum-center-fixed':
                 save_c_emb = c_embedding.detach().cpu().numpy()
-                np.save('../checkpoint/{}_task_center_embedding'.format(count), save_c_emb)
+                np.save('artifacts/checkpoints/hgprompt/{}_task_center_embedding'.format(count), save_c_emb)
             elif args.tuning == 'bottle-net':
                 save_c_emb = c_embedding.detach().cpu().numpy()
-                np.save('../checkpoint/{}_task_center_embedding'.format(count), save_c_emb)
+                np.save('artifacts/checkpoints/hgprompt/{}_task_center_embedding'.format(count), save_c_emb)
             elif args.tuning == 'cat':
                 save_c_emb = c_embedding.detach().cpu().numpy()
-                np.save('../checkpoint/{}_task_center_embedding_cat'.format(count), save_c_emb)
+                np.save('artifacts/checkpoints/hgprompt/{}_task_center_embedding_cat'.format(count), save_c_emb)
             elif args.tuning == 'sum':
                 save_c_emb = c_embedding.detach().cpu().numpy()
-                np.save('../checkpoint/{}_task_center_embedding_sum'.format(count), save_c_emb)
+                np.save('artifacts/checkpoints/hgprompt/{}_task_center_embedding_sum'.format(count), save_c_emb)
             elif args.tuning == 'cat_edge':
                 save_c_emb = c_embedding.detach().cpu().numpy()
-                np.save('../checkpoint/{}_task_center_embedding_cat_edge'.format(count), save_c_emb)
+                np.save('artifacts/checkpoints/hgprompt/{}_task_center_embedding_cat_edge'.format(count), save_c_emb)
             elif args.tuning == 'prompt_gcn':
                 save_c_emb = c_embedding.detach().cpu().numpy()
-                np.save('../checkpoint/{}_task_center_embedding_prompt_gcn'.format(count), save_c_emb)
+                np.save('artifacts/checkpoints/hgprompt/{}_task_center_embedding_prompt_gcn'.format(count), save_c_emb)
 
 
             # testing with evaluate_results_nc
-            classify.load_state_dict(torch.load('../checkpoint/checkpoint_{}_{}_{}_freeze_classify.pt'.format(args.dataset, args.model_type,args.tuning,args.shotnum)))
-
+            classify.load_state_dict(torch.load('artifacts/checkpoints/hgprompt/checkpoint_{}_{}_{}_freeze_classify.pt'.format(args.dataset, args.model_type,args.tuning,args.shotnum)))
             start_test_time=time.time()
             classify.eval()
             test_logits = []
@@ -601,7 +600,7 @@ def run_model_DBLP(args):
                     res['micro-f1'] = f1_score(truth, output, average='micro')
                     res['macro-f1'] = f1_score(truth, output, average='macro')
                 elif args.tuning == 'weight-sum-center-fixed':
-                    load_c_emb = np.load('../checkpoint/{}_task_center_embedding.npy'.format(count), allow_pickle=True)
+                    load_c_emb = np.load('artifacts/checkpoints/hgprompt/{}_task_center_embedding.npy'.format(count), allow_pickle=True)
                     c_embedding=torch.tensor(load_c_emb,device=device)
                     test_label = dl.labels_test['data'][dl.labels_test['mask']]
                     if args.dataset != 'IMDB':
@@ -618,7 +617,7 @@ def run_model_DBLP(args):
                     res['micro-f1'] = f1_score(truth, output, average='micro')
                     res['macro-f1'] = f1_score(truth, output, average='macro')
                 elif args.tuning == 'bottle-net':
-                    load_c_emb = np.load('../checkpoint/{}_task_center_embedding.npy'.format(count), allow_pickle=True)
+                    load_c_emb = np.load('artifacts/checkpoints/hgprompt/{}_task_center_embedding.npy'.format(count), allow_pickle=True)
                     c_embedding=torch.tensor(load_c_emb,device=device)
                     test_label = dl.labels_test['data'][dl.labels_test['mask']]
                     if args.dataset != 'IMDB':
@@ -635,7 +634,7 @@ def run_model_DBLP(args):
                     res['micro-f1'] = f1_score(truth, output, average='micro')
                     res['macro-f1'] = f1_score(truth, output, average='macro')
                 elif args.tuning == 'cat':
-                    load_c_emb = np.load('../checkpoint/{}_task_center_embedding_cat.npy'.format(count), allow_pickle=True)
+                    load_c_emb = np.load('artifacts/checkpoints/hgprompt/{}_task_center_embedding_cat.npy'.format(count), allow_pickle=True)
                     c_embedding=torch.tensor(load_c_emb,device=device)
                     test_label = dl.labels_test['data'][dl.labels_test['mask']]
                     if args.dataset != 'IMDB':
@@ -652,7 +651,7 @@ def run_model_DBLP(args):
                     res['micro-f1'] = f1_score(truth, output, average='micro')
                     res['macro-f1'] = f1_score(truth, output, average='macro')
                 elif args.tuning == 'sum':
-                    load_c_emb = np.load('../checkpoint/{}_task_center_embedding_sum.npy'.format(count), allow_pickle=True)
+                    load_c_emb = np.load('artifacts/checkpoints/hgprompt/{}_task_center_embedding_sum.npy'.format(count), allow_pickle=True)
                     c_embedding=torch.tensor(load_c_emb,device=device)
                     test_label = dl.labels_test['data'][dl.labels_test['mask']]
                     if args.dataset != 'IMDB':
@@ -669,7 +668,7 @@ def run_model_DBLP(args):
                     res['micro-f1'] = f1_score(truth, output, average='micro')
                     res['macro-f1'] = f1_score(truth, output, average='macro')
                 elif args.tuning == 'cat_edge':
-                    load_c_emb = np.load('../checkpoint/{}_task_center_embedding_cat_edge.npy'.format(count), allow_pickle=True)
+                    load_c_emb = np.load('artifacts/checkpoints/hgprompt/{}_task_center_embedding_cat_edge.npy'.format(count), allow_pickle=True)
                     c_embedding=torch.tensor(load_c_emb,device=device)
                     test_label = dl.labels_test['data'][dl.labels_test['mask']]
                     if args.dataset != 'IMDB':
@@ -686,7 +685,7 @@ def run_model_DBLP(args):
                     res['micro-f1'] = f1_score(truth, output, average='micro')
                     res['macro-f1'] = f1_score(truth, output, average='macro')
                 elif args.tuning == 'prompt_gcn':
-                    load_c_emb = np.load('../checkpoint/{}_task_center_embedding_prompt_gcn.npy'.format(count), allow_pickle=True)
+                    load_c_emb = np.load('artifacts/checkpoints/hgprompt/{}_task_center_embedding_prompt_gcn.npy'.format(count), allow_pickle=True)
                     c_embedding=torch.tensor(load_c_emb,device=device)
                     test_label = dl.labels_test['data'][dl.labels_test['mask']]
                     if args.dataset != 'IMDB':
