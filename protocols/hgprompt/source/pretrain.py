@@ -335,12 +335,12 @@ def run_model_DBLP(args):
             if (v,u) not in edge2type:
                 edge2type[(v,u)] = k+1+len(dl.links['count'])
 
-    samples_dir=os.path.join(DATA_ROOT, args.dataset, "".join([str(args.tuple_neg_disconnected_num), 'neg_samples']))
-    load_samples_dir=os.path.join(DATA_ROOT, args.dataset, "".join([str(args.tuple_neg_disconnected_num), 'neg_samples.npy']))
-    target_nodes_samples_dir=os.path.join(DATA_ROOT, args.dataset, "".join([str(args.target_tuple_neg_disconnected_num), 'target_neg_samples']))
-    target_nodes_load_samples_dir=os.path.join(DATA_ROOT, args.dataset, "".join([str(args.target_tuple_neg_disconnected_num), 'target_neg_samples.npy']))
-    hsamples_dir=os.path.join(DATA_ROOT, args.dataset, "".join([str(args.tuple_neg_unrelated_num), 'neg_unrelated_samples']))
-    hload_samples_dir=os.path.join(DATA_ROOT, args.dataset, "".join([str(args.tuple_neg_unrelated_num), 'neg_unrelated_samples.npy']))
+    samples_dir=os.path.join(DATA_ROOT, args.dataset.lower(), "".join([str(args.tuple_neg_disconnected_num), 'neg_samples']))
+    load_samples_dir=os.path.join(DATA_ROOT, args.dataset.lower(), "".join([str(args.tuple_neg_disconnected_num), 'neg_samples.npy']))
+    target_nodes_samples_dir=os.path.join(DATA_ROOT, args.dataset.lower(), "".join([str(args.target_tuple_neg_disconnected_num), 'target_neg_samples']))
+    target_nodes_load_samples_dir=os.path.join(DATA_ROOT, args.dataset.lower(), "".join([str(args.target_tuple_neg_disconnected_num), 'target_neg_samples.npy']))
+    hsamples_dir=os.path.join(DATA_ROOT, args.dataset.lower(), "".join([str(args.tuple_neg_unrelated_num), 'neg_unrelated_samples']))
+    hload_samples_dir=os.path.join(DATA_ROOT, args.dataset.lower(), "".join([str(args.tuple_neg_unrelated_num), 'neg_unrelated_samples.npy']))
     target_nodes_tuple_num_dir=os.path.join(DATA_ROOT, args.dataset, "".join([str(args.tuple_neg_unrelated_num), 'target_nodes_tuple_num']))
     load_target_nodes_tuple_num_dir=os.path.join(DATA_ROOT, args.dataset, "".join([str(args.tuple_neg_unrelated_num), 'target_nodes_tuple_num.npy']))
 

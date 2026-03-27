@@ -15,7 +15,7 @@ import dgl
 from dgl.nn.pytorch import GraphConv
 import itertools
 from sklearn.metrics import accuracy_score,f1_score,precision_score,recall_score
-from protocols.hgprompt.hprompt import hnode_prompt_layer_feature_weighted_sum,node_prompt_layer_feature_weighted_sum,distance2center,center_embedding\
+from protocols.hgprompt.source.hgprompt import hnode_prompt_layer_feature_weighted_sum,node_prompt_layer_feature_weighted_sum,distance2center,center_embedding\
     ,acm_hnode_prompt_layer_feature_weighted_sum,node_prompt_layer_feature_cat,node_prompt_layer_feature_sum,hnode_prompt_layer_feature_sum\
     ,node_prompt_layer_feature_cat_edge,hnode_prompt_layer_feature_cat_edge,prompt_gcn,hprompt_gcn\
     ,acm_eachloss_hnode_prompt_layer_feature_weighted_sum,dblp_hnode_prompt_layer_feature_weighted_sum\
