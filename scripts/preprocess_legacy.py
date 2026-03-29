@@ -1,3 +1,5 @@
+# hgmp预训练的脚本，包含了数据预处理的部分
+
 from collections import defaultdict
 import pickle as pk
 from protocols.common.paths import DATA_ROOT

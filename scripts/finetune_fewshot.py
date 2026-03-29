@@ -1,4 +1,4 @@
-# scripts/finetune_fewshot.py
+# 曾经的下游脚本
 from __future__ import annotations
 
 import argparse
