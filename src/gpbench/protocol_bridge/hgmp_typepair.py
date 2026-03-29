@@ -331,11 +331,13 @@ class TypePairLegacyPreTrain(LegacyPreTrain):
 
         early_stopping = EarlyStopping(
             patience=30,
-            verbose=False,
+            verbose=True,
             save_path=str(save_path),
         )
 
         graph = graph_list[0]
+
+        best_loss = float("inf")
 
         for epoch in range(1, epochs + 1):
             if self.pretext == 'HDGI':
@@ -359,10 +361,22 @@ class TypePairLegacyPreTrain(LegacyPreTrain):
             else:
                 raise ValueError("pretext should be HDGI, GraphCL, SimGRACE")
 
+            improved = train_loss < best_loss
+            if improved:
+                best_loss = train_loss
+
+            print(
+                f"*** epoch: {epoch}/{epochs} | "
+                f"train_loss: {train_loss:.6f} | "
+                f"best_loss: {best_loss:.6f}"
+                + (" | saved_best" if improved else "")
+            )
+
             early_stopping(train_loss, self.model.hgnn)
             if early_stopping.early_stop:
+                print("Early stopping!")
                 break
-
+        print(f"+++ best checkpoint path: {save_path}")
 
 def build_typepair_relation_cfg_from_args(args) -> TypePairRelationPromptConfig:
     return TypePairRelationPromptConfig(

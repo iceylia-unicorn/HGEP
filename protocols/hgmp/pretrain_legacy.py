@@ -35,6 +35,7 @@ PRETRAIN_DIR.mkdir(parents=True, exist_ok=True)
 DOWNSTREAM_DIR.mkdir(parents=True, exist_ok=True)
 
 
+
 class GraphCL(torch.nn.Module):
 
     def __init__(self, hgnn, hid_dim=64):
@@ -315,15 +316,13 @@ class PreTrain(torch.nn.Module):
                 #print('Early stopping!')
                 break
 
-            # print("***epoch: {}/{} | train_loss: {:.8}".format(epoch, epochs, train_loss))
-            #
-            # if train_loss_min > train_loss:
-            #     train_loss_min = train_loss
-            #     torch.save(self.model.hgnn.state_dict(),
-            #                "./pre_trained_hgnn/{}.{}.{}.pth".format(dataname, self.pretext, self.hgnn_type))
-            #     # do not use '../pre_trained_gnn/' because hope there should be two folders: (1) '../pre_trained_gnn/'  and (2) './pre_trained_gnn/'
-            #     # only selected pre-trained models will be moved into (1) so that we can keep reproduction
-            #     print("+++model saved ! {}.{}.{}.pth".format(dataname, self.pretext, self.hgnn_type))
+            print("***epoch: {}/{} | train_loss: {:.8}".format(epoch, epochs, train_loss))
+            
+            if train_loss_min > train_loss:
+                train_loss_min = train_loss
+                save_path = PRETRAIN_DIR / f"{dataname}.{self.pretext}.{self.hgnn_type}.hid{self.args.hidden_dim}.np{self.args.num_samples}.pth"
+                torch.save(self.model.hgnn.state_dict(), save_path)
+                print(f"+++ model saved! {save_path}")
 
 
 

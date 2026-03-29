@@ -292,20 +292,55 @@ class GAT(nn.Module):
         return res
 
 class HGNN(torch.nn.Module):
-    def __init__(self, ntypes ,metadata,hid_dim=None, out_dim=None, num_layer=2, pool=None, hgnn_type='SHGN'
-                 , num_heads=8, device=None,dropout=0.2, norm=False,num_etypes=None,input_dims=None,args=None):
+    def __init__(self, ntypes, metadata, hid_dim=None, out_dim=None, num_layer=2, pool=None,
+                 hgnn_type='SHGN', num_heads=8, device=None, dropout=0.2,
+                 norm=False, num_etypes=None, input_dims=None, args=None):
         super().__init__()
-        self.GraphConv=None
-        self.pool=pool
+        self.GraphConv = None
+        self.pool = pool
+
         if hgnn_type == 'HGT':
-            self.GraphConv = HGT(node_types=ntypes,metadata=metadata,hidden_channels=hid_dim,out_channels=out_dim,num_heads=num_heads,num_layers=num_layer).to(device)
+            self.GraphConv = HGT(
+                node_types=ntypes,
+                metadata=metadata,
+                hidden_channels=hid_dim,
+                out_channels=out_dim,
+                num_heads=num_heads,
+                num_layers=num_layer,
+            ).to(device)
+
         elif hgnn_type == 'SHGN':
             heads = [num_heads] * num_layer + [1]
-            self.GraphConv = myshgn(args.edge_feats,num_etypes,input_dims,hid_dim,out_dim,num_layer,heads,dropout,ntypes,args.slope)
+            self.GraphConv = myshgn(
+                args.edge_feats,
+                num_etypes,
+                input_dims,
+                hid_dim,
+                out_dim,
+                num_layer,
+                heads,
+                dropout,
+                ntypes,
+                args.slope,
+            )
+
+        elif hgnn_type == 'GCN':
+            self.GraphConv = GCL_GCN(
+                None,
+                input_dims,
+                hid_dim,
+                out_dim if out_dim is not None else hid_dim,
+                num_layer,
+                F.elu,
+                dropout,
+                hgnn_type,
+            )
+
         elif hgnn_type == 'TransformerConv':
             self.GraphConv = TransformerConv
+
         else:
-            raise KeyError('hgnn_type can be only HGT, SHGN and TransformerConv')
+            raise KeyError('hgnn_type can be only HGT, SHGN, GCN and TransformerConv')
 
         self.hgnn_type = hgnn_type
 
@@ -316,17 +351,24 @@ class HGNN(torch.nn.Module):
         # else:
         #     self.pool = pool
 
-    def forward(self,targetnode,x,edge_index):
+    def forward(self, targetnode, x, edge_index):
         if self.hgnn_type == 'HGT':
-            return self.GraphConv(targetnode,x,edge_index)
-        elif self.hgnn_type == 'SHGN':
-            g=x
-            h_dict=edge_index
-            return self.GraphConv(g,h_dict)
-        elif self.hgnn_type == 'TransformerConv':
-            GraphConv = TransformerConv
+            return self.GraphConv(targetnode, x, edge_index)
 
-        return 11
+        elif self.hgnn_type == 'SHGN':
+            g = x
+            h_dict = edge_index
+            return self.GraphConv(g, h_dict)
+
+        elif self.hgnn_type == 'GCN':
+            graph = targetnode
+            x_dict = x
+            return self.GraphConv(graph, x_dict)
+
+        elif self.hgnn_type == 'TransformerConv':
+            raise NotImplementedError("TransformerConv path is not implemented in HGNN.forward")
+
+        raise ValueError(f"Unsupported hgnn_type: {self.hgnn_type}")
 
 
 class HeteroPrompt(torch.nn.Module):

@@ -8,7 +8,7 @@ import torch
 import torch.nn as nn
 
 from protocols.hgmp.data_legacy import multi_class_NIG
-from protocols.hgmp.prompt_legacy import HGNN
+from protocols.hgmp.prompt_legacy import HGNN, GCL_GCN, GAT
 from protocols.hgmp.utils_legacy import graph_pool, load_data4pretrain, seed_everything
 
 from gpbench.downstream.model import MLPHead
@@ -17,8 +17,7 @@ from gpbench.protocol_bridge.hgmp_typepair import (
     HGMPTypePairHGNN,
     build_typepair_relation_cfg_from_args,
 )
-
-
+import torch.nn.functional as F
 @dataclass
 class LegacyFewShotEmbeddings:
     x_train: torch.Tensor
@@ -112,20 +111,48 @@ def build_frozen_legacy_hgnn(args, ckpt_path: str):
     num_etypes = len(edge_types) + 1
 
     if args.method == "hgmp":
-        hgnn = HGNN(
-            ntypes=ntypes,
-            metadata=metadata,
-            hid_dim=args.hidden_dim,
-            out_dim=args.hidden_dim,
-            hgnn_type=args.hgnn_type,
-            num_layer=args.num_layers,
-            num_heads=args.num_heads,
-            device=args.device,
-            dropout=args.dropout,
-            num_etypes=num_etypes,
-            input_dims=in_dims,
-            args=args,
-        )
+        if args.hgnn_type == "GCN":
+            hgnn = GCL_GCN(
+                None,
+                in_dims,
+                args.hidden_dim,
+                args.hidden_dim,
+                args.num_layers,
+                F.elu,
+                args.dropout,
+                args.hgnn_type,
+            )
+        elif args.hgnn_type == "GAT":
+            heads = [args.num_heads] * args.num_layers + [1]
+            hgnn = GAT(
+                None,
+                in_dims,
+                args.hidden_dim,
+                args.hidden_dim,
+                args.num_layers,
+                heads,
+                F.elu,
+                args.dropout,
+                args.dropout,
+                0.05,
+                False,
+                args.hgnn_type,
+            )
+        else:
+            hgnn = HGNN(
+                ntypes=ntypes,
+                metadata=metadata,
+                hid_dim=args.hidden_dim,
+                out_dim=args.hidden_dim,
+                hgnn_type=args.hgnn_type,
+                num_layer=args.num_layers,
+                num_heads=args.num_heads,
+                device=args.device,
+                dropout=args.dropout,
+                num_etypes=num_etypes,
+                input_dims=in_dims,
+                args=args,
+            )
     elif args.method == "typepair":
         relation_cfg = build_typepair_relation_cfg_from_args(args)
         hgnn = HGMPTypePairHGNN(

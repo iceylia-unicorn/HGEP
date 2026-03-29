@@ -42,6 +42,13 @@ python scripts/protocol_pretrain.py \
   --epochs 200 \
   --hgnn_type HGT
 
+python scripts/protocol_pretrain.py \
+  --method typepair \
+  --dataset ACM \
+  --device cpu \
+  --epochs 200 \
+  --hgnn_type HGT
+
 ## 下游
 
 python scripts/protocol_fewshot_eval.py \
@@ -49,7 +56,24 @@ python scripts/protocol_fewshot_eval.py \
   --ckpt artifacts/checkpoints/hgmp/pretrain/ACM.GraphCL.HGT.hid128.np100.pth \
   --dataset ACM \
   --device cpu \
-  --shot 5 \
+  --shot 10 \
+  --seed 0 \
+  --num_class 3 \
+  --classification_type NIG \
+  --hidden_dim 128 \
+  --num_heads 2 \
+  --num_layers 2 \
+  --hgnn_type HGT
+
+
+
+  
+python scripts/protocol_fewshot_eval.py \
+  --method typepair \
+  --ckpt artifacts/checkpoints/typepair_hgmp/pretrain/ACM.GraphCL.HGT.typepair.hid128.np100.pth \
+  --dataset ACM \
+  --device cpu \
+  --shot 10 \
   --seed 0 \
   --num_class 3 \
   --classification_type NIG \
