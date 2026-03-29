@@ -31,3 +31,29 @@ python scripts/finetune_fewshot.py \
 代码位于reorg/hgmp-hgprompt-aligned分支下
 ## 预处理
 使用的类ProG induced graphs形式，因此需要先运行scripts/preprocess_legacy.py，运行后位置位于data/{dataname}/induced_graphs下
+
+
+# 新版
+## 预训练
+python scripts/protocol_pretrain.py \
+  --method hgmp \
+  --dataset ACM \
+  --device cpu \
+  --epochs 200 \
+  --hgnn_type HGT
+
+## 下游
+
+python scripts/protocol_fewshot_eval.py \
+  --method hgmp \
+  --ckpt artifacts/checkpoints/hgmp/pretrain/ACM.GraphCL.HGT.hid128.np100.pth \
+  --dataset ACM \
+  --device cpu \
+  --shot 5 \
+  --seed 0 \
+  --num_class 3 \
+  --classification_type NIG \
+  --hidden_dim 128 \
+  --num_heads 2 \
+  --num_layers 2 \
+  --hgnn_type HGT
