@@ -40,7 +40,7 @@ python scripts/protocol_pretrain.py \
   --dataset ACM \
   --device cpu \
   --epochs 200 \
-  --hgnn_type HGT
+  --hgnn_type GCN
 
 python scripts/protocol_pretrain.py \
   --method typepair \
@@ -53,7 +53,7 @@ python scripts/protocol_pretrain.py \
 
 python scripts/protocol_fewshot_eval.py \
   --method hgmp \
-  --ckpt artifacts/checkpoints/hgmp/pretrain/ACM.GraphCL.HGT.hid128.np100.pth \
+  --ckpt artifacts/checkpoints/hgmp/pretrain/ACM.GraphCL.GCN.hid128.np100.pth \
   --dataset ACM \
   --device cpu \
   --shot 10 \
@@ -63,7 +63,7 @@ python scripts/protocol_fewshot_eval.py \
   --hidden_dim 128 \
   --num_heads 2 \
   --num_layers 2 \
-  --hgnn_type HGT
+  --hgnn_type GCN
 
 
 
