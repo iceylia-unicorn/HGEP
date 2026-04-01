@@ -1,23 +1,24 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Iterable, Tuple
 
 import dgl
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
 
 from protocols.hgmp.data_legacy import multi_class_NIG
-from protocols.hgmp.prompt_legacy import HGNN, GCL_GCN, GAT
+from protocols.hgmp.prompt_legacy import GAT, GCL_GCN, HGNN, HeteroPrompt
 from protocols.hgmp.utils_legacy import graph_pool, load_data4pretrain, seed_everything
 
-from gpbench.downstream.model import MLPHead
 from gpbench.downstream.fewshot import f1_micro_macro
+from gpbench.downstream.model import MLPHead
 from gpbench.protocol_bridge.hgmp_typepair import (
     HGMPTypePairHGNN,
     build_typepair_relation_cfg_from_args,
 )
-import torch.nn.functional as F
+
+
 @dataclass
 class LegacyFewShotEmbeddings:
     x_train: torch.Tensor
@@ -76,8 +77,7 @@ def _build_edge_index_dict(g):
     return edge_index_dict
 
 
-@torch.no_grad()
-def encode_graph_batch(hgnn, batched_graph, targetnode: str) -> torch.Tensor:
+def forward_graph_batch(hgnn, batched_graph, targetnode: str) -> torch.Tensor:
     x_dict = batched_graph.ndata["x"]
     edge_index_dict = _build_edge_index_dict(batched_graph)
 
@@ -96,7 +96,12 @@ def encode_graph_batch(hgnn, batched_graph, targetnode: str) -> torch.Tensor:
     return graph_emb
 
 
-def build_frozen_legacy_hgnn(args, ckpt_path: str):
+@torch.no_grad()
+def encode_graph_batch(hgnn, batched_graph, targetnode: str) -> torch.Tensor:
+    return forward_graph_batch(hgnn, batched_graph, targetnode)
+
+
+def _build_legacy_hgnn(args):
     graph_list, in_dims, _ = load_data4pretrain(
         args.feats_type,
         args.device,
@@ -110,9 +115,9 @@ def build_frozen_legacy_hgnn(args, ckpt_path: str):
     metadata = (ntypes, edge_types)
     num_etypes = len(edge_types) + 1
 
-    if args.method == "hgmp":
+    if args.method in {"hgmp", "hgmp_prompt"}:
         if args.hgnn_type == "GCN":
-            hgnn = GCL_GCN(
+            return GCL_GCN(
                 None,
                 in_dims,
                 args.hidden_dim,
@@ -122,9 +127,9 @@ def build_frozen_legacy_hgnn(args, ckpt_path: str):
                 args.dropout,
                 args.hgnn_type,
             )
-        elif args.hgnn_type == "GAT":
+        if args.hgnn_type == "GAT":
             heads = [args.num_heads] * args.num_layers + [1]
-            hgnn = GAT(
+            return GAT(
                 None,
                 in_dims,
                 args.hidden_dim,
@@ -138,24 +143,24 @@ def build_frozen_legacy_hgnn(args, ckpt_path: str):
                 False,
                 args.hgnn_type,
             )
-        else:
-            hgnn = HGNN(
-                ntypes=ntypes,
-                metadata=metadata,
-                hid_dim=args.hidden_dim,
-                out_dim=args.hidden_dim,
-                hgnn_type=args.hgnn_type,
-                num_layer=args.num_layers,
-                num_heads=args.num_heads,
-                device=args.device,
-                dropout=args.dropout,
-                num_etypes=num_etypes,
-                input_dims=in_dims,
-                args=args,
-            )
-    elif args.method == "typepair":
+        return HGNN(
+            ntypes=ntypes,
+            metadata=metadata,
+            hid_dim=args.hidden_dim,
+            out_dim=args.hidden_dim,
+            hgnn_type=args.hgnn_type,
+            num_layer=args.num_layers,
+            num_heads=args.num_heads,
+            device=args.device,
+            dropout=args.dropout,
+            num_etypes=num_etypes,
+            input_dims=in_dims,
+            args=args,
+        )
+
+    if args.method == "typepair":
         relation_cfg = build_typepair_relation_cfg_from_args(args)
-        hgnn = HGMPTypePairHGNN(
+        return HGMPTypePairHGNN(
             ntypes=ntypes,
             metadata=metadata,
             hid_dim=args.hidden_dim,
@@ -170,24 +175,66 @@ def build_frozen_legacy_hgnn(args, ckpt_path: str):
             args=args,
             relation_cfg=relation_cfg,
         )
-    else:
-        raise ValueError(f"Unsupported method: {args.method}")
+
+    raise ValueError(f"Unsupported method: {args.method}")
+
+
+def _log_state_dict_load(args, missing, unexpected):
+    if args.method == "typepair":
+        expected_missing_prefixes = ("relation_prompt.", "GraphConv.relation_prompt.")
+        expected_missing = [k for k in missing if k.startswith(expected_missing_prefixes)]
+        other_missing = [k for k in missing if not k.startswith(expected_missing_prefixes)]
+
+        if len(expected_missing) > 0:
+            print(
+                "[load_state_dict] typepair prompt keys were missing from ckpt "
+                "(expected when loading a plain hgmp checkpoint)."
+            )
+        if len(other_missing) > 0:
+            print("[load_state_dict] missing keys:", other_missing[:10], "...")
+    elif len(missing) > 0:
+        print("[load_state_dict] missing keys:", missing[:10], "...")
+
+    if len(unexpected) > 0:
+        print("[load_state_dict] unexpected keys:", unexpected[:10], "...")
+
+
+def build_legacy_hgnn(
+    args,
+    ckpt_path: str,
+    *,
+    freeze: bool = True,
+    train_relation_prompt_only: bool = False,
+):
+    hgnn = _build_legacy_hgnn(args)
 
     state = torch.load(ckpt_path, map_location="cpu")
     if isinstance(state, dict) and "model_state" in state:
         state = state["model_state"]
 
     missing, unexpected = hgnn.load_state_dict(state, strict=False)
-    if len(missing) > 0:
-        print("[load_state_dict] missing keys:", missing[:10], "...")
-    if len(unexpected) > 0:
-        print("[load_state_dict] unexpected keys:", unexpected[:10], "...")
+    _log_state_dict_load(args, missing, unexpected)
 
     hgnn = hgnn.to(args.device)
-    hgnn.eval()
-    for p in hgnn.parameters():
-        p.requires_grad_(False)
+
+    if freeze:
+        hgnn.eval()
+        for p in hgnn.parameters():
+            p.requires_grad_(False)
+
+    if train_relation_prompt_only:
+        if args.method != "typepair":
+            raise ValueError("train_relation_prompt_only only supports method='typepair'")
+        for p in hgnn.relation_prompt.parameters():
+            p.requires_grad_(True)
+        hgnn.eval()
+        hgnn.relation_prompt.train()
+
     return hgnn
+
+
+def build_frozen_legacy_hgnn(args, ckpt_path: str):
+    return build_legacy_hgnn(args, ckpt_path, freeze=True, train_relation_prompt_only=False)
 
 
 @torch.no_grad()
@@ -215,7 +262,7 @@ def extract_split_embeddings(
     return torch.cat(xs, dim=0), torch.cat(ys, dim=0)
 
 
-def build_legacy_fewshot_embeddings(args, batch_size: int = 32) -> LegacyFewShotEmbeddings:
+def _load_legacy_fewshot_splits(args):
     if args.classification_type != "NIG":
         raise NotImplementedError("v1 only supports classification_type='NIG'")
 
@@ -237,6 +284,11 @@ def build_legacy_fewshot_embeddings(args, batch_size: int = 32) -> LegacyFewShot
 
     sample_graph = _first_graph_from_sample(train_list[0], args.classification_type)
     targetnode = _infer_targetnode(sample_graph)
+    return train_list, valid_list, test_list, targetnode
+
+
+def build_legacy_fewshot_embeddings(args, batch_size: int = 32) -> LegacyFewShotEmbeddings:
+    train_list, valid_list, test_list, targetnode = _load_legacy_fewshot_splits(args)
 
     hgnn = build_frozen_legacy_hgnn(args, args.ckpt)
 
@@ -260,6 +312,468 @@ def build_legacy_fewshot_embeddings(args, batch_size: int = 32) -> LegacyFewShot
         targetnode=targetnode,
     )
 
+
+def _evaluate_graph_probe(
+    graph_list,
+    hgnn,
+    head,
+    targetnode: str,
+    classification_type: str,
+    batch_size: int,
+    device: torch.device,
+    num_classes: int,
+):
+    loader = dgl.dataloading.GraphDataLoader(graph_list, batch_size=batch_size, shuffle=False)
+
+    logits_list = []
+    labels_list = []
+
+    hgnn.eval()
+    head.eval()
+    with torch.no_grad():
+        for batch in loader:
+            batched_graph, batched_label = _unpack_batch(batch, classification_type)
+            batched_graph = batched_graph.to(device)
+            batched_label = batched_label.to(device).long()
+
+            graph_emb = encode_graph_batch(hgnn, batched_graph, targetnode)
+            logits = head(graph_emb)
+
+            logits_list.append(logits)
+            labels_list.append(batched_label)
+
+    all_logits = torch.cat(logits_list, dim=0)
+    all_labels = torch.cat(labels_list, dim=0)
+    return f1_micro_macro(all_logits, all_labels, num_classes)
+
+
+def train_typepair_prompt_probe(
+    args,
+    batch_size: int = 32,
+    hidden_dim: int = 128,
+    dropout: float = 0.3,
+    head_lr: float = 5e-3,
+    prompt_lr: float | None = None,
+    weight_decay: float = 1e-4,
+    epochs: int = 200,
+    patience: int = 30,
+    early_stop_metric: str = "macro",
+    save_best_path: str | None = None,
+):
+    assert early_stop_metric in {"micro", "macro"}
+
+    train_list, valid_list, test_list, targetnode = _load_legacy_fewshot_splits(args)
+
+    hgnn = build_legacy_hgnn(
+        args,
+        args.ckpt,
+        freeze=True,
+        train_relation_prompt_only=True,
+    )
+
+    head = MLPHead(
+        in_dim=args.hidden_dim,
+        hidden=hidden_dim,
+        num_classes=args.num_class,
+        dropout=dropout,
+        use_ln=True,
+    ).to(args.device)
+
+    prompt_lr = head_lr if prompt_lr is None else prompt_lr
+    opt = torch.optim.AdamW(
+        [
+            {
+                "params": list(hgnn.relation_prompt.parameters()),
+                "lr": prompt_lr,
+                "weight_decay": weight_decay,
+            },
+            {
+                "params": list(head.parameters()),
+                "lr": head_lr,
+                "weight_decay": weight_decay,
+            },
+        ]
+    )
+
+    train_loader = dgl.dataloading.GraphDataLoader(
+        train_list,
+        batch_size=batch_size,
+        shuffle=True,
+    )
+
+    best_val_micro = 0.0
+    best_val_macro = 0.0
+    test_at_best_micro = 0.0
+    test_at_best_macro = 0.0
+    best_epoch = -1
+    bad_epochs = 0
+
+    for epoch in range(1, epochs + 1):
+        hgnn.eval()
+        hgnn.relation_prompt.train()
+        head.train()
+
+        epoch_loss = 0.0
+        epoch_graphs = 0
+
+        for batch in train_loader:
+            batched_graph, batched_label = _unpack_batch(batch, args.classification_type)
+            batched_graph = batched_graph.to(args.device)
+            batched_label = batched_label.to(args.device).long()
+
+            graph_emb = encode_graph_batch(hgnn, batched_graph, targetnode)
+            logits = head(graph_emb)
+            loss = nn.functional.cross_entropy(logits, batched_label)
+
+            opt.zero_grad()
+            loss.backward()
+            opt.step()
+
+            batch_n = batched_label.size(0)
+            epoch_loss += loss.item() * batch_n
+            epoch_graphs += batch_n
+
+        train_loss = epoch_loss / max(epoch_graphs, 1)
+
+        val_micro, val_macro = _evaluate_graph_probe(
+            valid_list,
+            hgnn,
+            head,
+            targetnode,
+            args.classification_type,
+            batch_size,
+            args.device,
+            args.num_class,
+        )
+        test_micro, test_macro = _evaluate_graph_probe(
+            test_list,
+            hgnn,
+            head,
+            targetnode,
+            args.classification_type,
+            batch_size,
+            args.device,
+            args.num_class,
+        )
+
+        monitor = val_macro if early_stop_metric == "macro" else val_micro
+        best_monitor = best_val_macro if early_stop_metric == "macro" else best_val_micro
+
+        if monitor > best_monitor:
+            best_val_micro = val_micro
+            best_val_macro = val_macro
+            test_at_best_micro = test_micro
+            test_at_best_macro = test_macro
+            best_epoch = epoch
+            bad_epochs = 0
+
+            if save_best_path is not None:
+                torch.save(
+                    {
+                        "hgnn_state": hgnn.state_dict(),
+                        "head_state": head.state_dict(),
+                        "in_dim": args.hidden_dim,
+                        "hidden_dim": hidden_dim,
+                        "num_classes": args.num_class,
+                        "best_val_micro": best_val_micro,
+                        "best_val_macro": best_val_macro,
+                        "test_at_best_micro": test_at_best_micro,
+                        "test_at_best_macro": test_at_best_macro,
+                        "best_epoch": best_epoch,
+                        "early_stop_metric": early_stop_metric,
+                    },
+                    save_best_path,
+                )
+        else:
+            bad_epochs += 1
+
+        if epoch == 1 or epoch % 10 == 0:
+            print(
+                f"Epoch {epoch:03d} | loss={train_loss:.4f} | "
+                f"val_f1(micro/macro)={val_micro:.4f}/{val_macro:.4f} | "
+                f"test_f1(micro/macro)={test_micro:.4f}/{test_macro:.4f} | "
+                f"monitor({early_stop_metric})={monitor:.4f}"
+            )
+
+        if bad_epochs >= patience:
+            print(
+                f"Early stop at epoch {epoch}, best_epoch={best_epoch} | "
+                f"best_val_f1(micro/macro)={best_val_micro:.4f}/{best_val_macro:.4f} | "
+                f"test@best_f1(micro/macro)={test_at_best_micro:.4f}/{test_at_best_macro:.4f} | "
+                f"monitor={early_stop_metric}"
+            )
+            break
+
+    return {
+        "best_val_micro": best_val_micro,
+        "best_val_macro": best_val_macro,
+        "test_at_best_micro": test_at_best_micro,
+        "test_at_best_macro": test_at_best_macro,
+        "best_epoch": best_epoch,
+        "early_stop_metric": early_stop_metric,
+    }
+
+
+def _set_requires_grad(module: nn.Module, flag: bool):
+    for p in module.parameters():
+        p.requires_grad_(flag)
+
+
+def _evaluate_hgmp_prompt_probe(
+    graph_list,
+    hgnn,
+    PG,
+    head,
+    targetnode: str,
+    classification_type: str,
+    batch_size: int,
+    device: torch.device,
+    num_classes: int,
+):
+    loader = dgl.dataloading.GraphDataLoader(
+        graph_list,
+        batch_size=batch_size,
+        shuffle=False,
+    )
+
+    logits_all = []
+    labels_all = []
+
+    PG.eval()
+    head.eval()
+    with torch.no_grad():
+        for batch in loader:
+            batched_graph, batched_label = _unpack_batch(batch, classification_type)
+            batched_graph = batched_graph.to(device)
+            batched_label = batched_label.to(device).long()
+
+            prompted_graph = PG(batched_graph)
+            graph_emb = forward_graph_batch(hgnn, prompted_graph, targetnode)
+            logits = head(graph_emb)
+
+            logits_all.append(logits)
+            labels_all.append(batched_label)
+
+    logits_all = torch.cat(logits_all, dim=0)
+    labels_all = torch.cat(labels_all, dim=0)
+    return f1_micro_macro(logits_all, labels_all, num_classes)
+
+
+def _run_hgmp_prompt_epoch(
+    train_loader,
+    hgnn,
+    PG,
+    head,
+    optimizer,
+    targetnode: str,
+    classification_type: str,
+    device: torch.device,
+):
+    total_loss = 0.0
+    total_graphs = 0
+
+    for batch in train_loader:
+        batched_graph, batched_label = _unpack_batch(batch, classification_type)
+        batched_graph = batched_graph.to(device)
+        batched_label = batched_label.to(device).long()
+
+        prompted_graph = PG(batched_graph)
+        graph_emb = forward_graph_batch(hgnn, prompted_graph, targetnode)
+        logits = head(graph_emb)
+        loss = nn.functional.cross_entropy(logits, batched_label)
+
+        optimizer.zero_grad()
+        loss.backward()
+        optimizer.step()
+
+        batch_n = batched_label.size(0)
+        total_loss += loss.item() * batch_n
+        total_graphs += batch_n
+
+    return total_loss / max(total_graphs, 1)
+
+
+def train_hgmp_heteroprompt_probe(
+    args,
+    batch_size: int = 32,
+    hidden_dim: int = 128,
+    dropout: float = 0.3,
+    lr: float = 5e-3,
+    weight_decay: float = 1e-4,
+    epochs: int = 200,
+    patience: int = 30,
+    early_stop_metric: str = "macro",
+    save_best_path: str | None = None,
+):
+    assert early_stop_metric in {"micro", "macro"}
+
+    if args.classification_type != "NIG":
+        raise NotImplementedError("v1 only supports classification_type='NIG'")
+
+    if args.dataset == "IMDB":
+        raise NotImplementedError(
+            "v1 intentionally skips IMDB because its legacy batch/label format "
+            "differs in this branch. Start with ACM/DBLP first."
+        )
+
+    seed_everything(args.seed)
+
+    train_list, valid_list, test_list = multi_class_NIG(
+        dataname=args.dataset,
+        num_class=args.num_class,
+        shots=args.shot,
+        classification_type=args.classification_type,
+        feats_type=args.feats_type,
+    )
+
+    sample_graph = _first_graph_from_sample(train_list[0], args.classification_type)
+    targetnode = _infer_targetnode(sample_graph)
+    ntypes = sample_graph.ntypes
+    token_dims = [sample_graph.ndata["x"][nt].shape[1] for nt in ntypes]
+
+    hgnn = build_frozen_legacy_hgnn(args, args.ckpt)
+
+    PG = HeteroPrompt(
+        token_dims=token_dims,
+        ntypes=ntypes,
+    ).to(args.device)
+
+    head = MLPHead(
+        in_dim=args.hidden_dim,
+        hidden=hidden_dim,
+        num_classes=args.num_class,
+        dropout=dropout,
+        use_ln=True,
+    ).to(args.device)
+
+    train_loader = dgl.dataloading.GraphDataLoader(
+        train_list,
+        batch_size=batch_size,
+        shuffle=True,
+    )
+
+    prompt_opt = torch.optim.AdamW(PG.parameters(), lr=lr, weight_decay=weight_decay)
+    head_opt = torch.optim.AdamW(head.parameters(), lr=lr, weight_decay=weight_decay)
+
+    best_val_micro = 0.0
+    best_val_macro = 0.0
+    test_at_best_micro = 0.0
+    test_at_best_macro = 0.0
+    best_epoch = -1
+    bad_epochs = 0
+
+    for epoch in range(1, epochs + 1):
+        # phase 1: tune head, freeze prompt
+        _set_requires_grad(PG, False)
+        _set_requires_grad(head, True)
+        PG.eval()
+        head.train()
+
+        head_loss = _run_hgmp_prompt_epoch(
+            train_loader=train_loader,
+            hgnn=hgnn,
+            PG=PG,
+            head=head,
+            optimizer=head_opt,
+            targetnode=targetnode,
+            classification_type=args.classification_type,
+            device=args.device,
+        )
+
+        # phase 2: tune prompt, freeze head
+        _set_requires_grad(PG, True)
+        _set_requires_grad(head, False)
+        PG.train()
+        head.eval()
+
+        prompt_loss = _run_hgmp_prompt_epoch(
+            train_loader=train_loader,
+            hgnn=hgnn,
+            PG=PG,
+            head=head,
+            optimizer=prompt_opt,
+            targetnode=targetnode,
+            classification_type=args.classification_type,
+            device=args.device,
+        )
+
+        val_micro, val_macro = _evaluate_hgmp_prompt_probe(
+            graph_list=valid_list,
+            hgnn=hgnn,
+            PG=PG,
+            head=head,
+            targetnode=targetnode,
+            classification_type=args.classification_type,
+            batch_size=batch_size,
+            device=args.device,
+            num_classes=args.num_class,
+        )
+        test_micro, test_macro = _evaluate_hgmp_prompt_probe(
+            graph_list=test_list,
+            hgnn=hgnn,
+            PG=PG,
+            head=head,
+            targetnode=targetnode,
+            classification_type=args.classification_type,
+            batch_size=batch_size,
+            device=args.device,
+            num_classes=args.num_class,
+        )
+
+        monitor = val_macro if early_stop_metric == "macro" else val_micro
+        best_monitor = best_val_macro if early_stop_metric == "macro" else best_val_micro
+
+        if monitor > best_monitor:
+            best_val_micro = val_micro
+            best_val_macro = val_macro
+            test_at_best_micro = test_micro
+            test_at_best_macro = test_macro
+            best_epoch = epoch
+            bad_epochs = 0
+
+            if save_best_path is not None:
+                torch.save(
+                    {
+                        "pg_state": PG.state_dict(),
+                        "head_state": head.state_dict(),
+                        "best_val_micro": best_val_micro,
+                        "best_val_macro": best_val_macro,
+                        "test_at_best_micro": test_at_best_micro,
+                        "test_at_best_macro": test_at_best_macro,
+                        "best_epoch": best_epoch,
+                        "early_stop_metric": early_stop_metric,
+                    },
+                    save_best_path,
+                )
+        else:
+            bad_epochs += 1
+
+        if epoch == 1 or epoch % 10 == 0:
+            print(
+                f"Epoch {epoch:03d} | "
+                f"head_loss={head_loss:.4f} | prompt_loss={prompt_loss:.4f} | "
+                f"val_f1(micro/macro)={val_micro:.4f}/{val_macro:.4f} | "
+                f"test_f1(micro/macro)={test_micro:.4f}/{test_macro:.4f} | "
+                f"monitor({early_stop_metric})={monitor:.4f}"
+            )
+
+        if bad_epochs >= patience:
+            print(
+                f"Early stop at epoch {epoch}, best_epoch={best_epoch} | "
+                f"best_val_f1(micro/macro)={best_val_micro:.4f}/{best_val_macro:.4f} | "
+                f"test@best_f1(micro/macro)={test_at_best_micro:.4f}/{test_at_best_macro:.4f} | "
+                f"monitor={early_stop_metric}"
+            )
+            break
+
+    return {
+        "best_val_micro": best_val_micro,
+        "best_val_macro": best_val_macro,
+        "test_at_best_micro": test_at_best_micro,
+        "test_at_best_macro": test_at_best_macro,
+        "best_epoch": best_epoch,
+        "early_stop_metric": early_stop_metric,
+    }
 
 def train_mlp_probe(
     x_train: torch.Tensor,

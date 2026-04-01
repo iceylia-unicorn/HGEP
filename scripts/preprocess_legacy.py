@@ -1,5 +1,10 @@
 # hgmp预训练的脚本，包含了数据预处理的部分
-
+from pathlib import Path
+import sys
+# 将root路径插入到sys.path，才能import protocols
+ROOT = Path(__file__).resolve().parents[1]
+if str(ROOT) not in sys.path:
+    sys.path.insert(0, str(ROOT))
 from collections import defaultdict
 import pickle as pk
 from protocols.common.paths import DATA_ROOT

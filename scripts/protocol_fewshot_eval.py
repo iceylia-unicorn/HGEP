@@ -1,23 +1,28 @@
 from pathlib import Path
 import sys
+import argparse
 
+# 需要先将root路径插入到sys.path，才能import protocol_bridge下的legacy训练函数
 ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
-
-import argparse
 import torch
 
 from gpbench.protocol_bridge.downstream_legacy import (
     build_legacy_fewshot_embeddings,
     train_mlp_probe,
+    train_typepair_prompt_probe,
+    train_hgmp_heteroprompt_probe,
 )
+
+
+
 
 
 def main():
     ap = argparse.ArgumentParser()
 
-    ap.add_argument("--method", type=str, required=True, choices=["hgmp", "typepair"])
+    ap.add_argument("--method", type=str, required=True, choices=["hgmp", "typepair", "hgmp_prompt"])
     ap.add_argument("--ckpt", type=str, required=True)
 
     ap.add_argument("--dataset", type=str, default="ACM", choices=["ACM", "DBLP", "IMDB"])
@@ -43,15 +48,21 @@ def main():
     ap.add_argument("--relation_prompt_aggr", type=str, default="mean", choices=["mean", "sum"])
     ap.add_argument("--relation_prompt_use_ln", action="store_true")
 
-    # embedding extraction
+    # graph / embedding batch size
     ap.add_argument("--embed_batch_size", type=int, default=32)
 
-    # probe head
+    # probe head / downstream tuning
     ap.add_argument("--head_hidden", type=int, default=128)
     ap.add_argument("--head_dropout", type=float, default=0.3)
     ap.add_argument("--epochs", type=int, default=200)
     ap.add_argument("--patience", type=int, default=30)
     ap.add_argument("--lr", type=float, default=5e-3)
+    ap.add_argument(
+        "--prompt_lr",
+        type=float,
+        default=None,
+        help="Only used when method=typepair. Defaults to --lr when omitted.",
+    )
     ap.add_argument("--weight_decay", type=float, default=1e-4)
     ap.add_argument("--early_stop_metric", type=str, default="macro", choices=["micro", "macro"])
 
@@ -70,11 +81,6 @@ def main():
         f"dataset={args.dataset} | shot={args.shot} | seed={args.seed}"
     )
 
-    emb = build_legacy_fewshot_embeddings(
-        args=args,
-        batch_size=args.embed_batch_size,
-    )
-
     save_dir = (
         Path(args.save_dir)
         / args.dataset
@@ -85,25 +91,65 @@ def main():
     save_dir.mkdir(parents=True, exist_ok=True)
     best_path = str(save_dir / "best_head.pt")
 
-    res = train_mlp_probe(
-        x_train=emb.x_train,
-        y_train=emb.y_train,
-        x_val=emb.x_val,
-        y_val=emb.y_val,
-        x_test=emb.x_test,
-        y_test=emb.y_test,
-        in_dim=emb.x_train.size(-1),
-        num_classes=args.num_class,
-        device=args.device,
-        hidden_dim=args.head_hidden,
-        dropout=args.head_dropout,
-        lr=args.lr,
-        weight_decay=args.weight_decay,
-        epochs=args.epochs,
-        patience=args.patience,
-        early_stop_metric=args.early_stop_metric,
-        save_best_path=best_path,
-    )
+    if args.method == "typepair":
+        print(
+            "[INFO] method=typepair now means downstream prompt tuning: "
+            "freeze HGMP backbone, train relation_prompt + head."
+        )
+        res = train_typepair_prompt_probe(
+            args=args,
+            batch_size=args.embed_batch_size,
+            hidden_dim=args.head_hidden,
+            dropout=args.head_dropout,
+            head_lr=args.lr,
+            prompt_lr=args.prompt_lr,
+            weight_decay=args.weight_decay,
+            epochs=args.epochs,
+            patience=args.patience,
+            early_stop_metric=args.early_stop_metric,
+            save_best_path=best_path,
+        )
+    elif args.method == "hgmp_prompt":
+        print(
+            "[INFO] method=hgmp_prompt means end-to-end prompt tuning: "
+        )
+        res = train_hgmp_heteroprompt_probe(
+            args=args,
+            batch_size=args.embed_batch_size,
+            hidden_dim=args.head_hidden,
+            dropout=args.head_dropout,
+            lr=args.lr,
+            weight_decay=args.weight_decay,
+            epochs=args.epochs,
+            patience=args.patience,
+            early_stop_metric=args.early_stop_metric,
+            save_best_path=best_path,
+        )
+    else:
+        emb = build_legacy_fewshot_embeddings(
+            args=args,
+            batch_size=args.embed_batch_size,
+        )
+
+        res = train_mlp_probe(
+            x_train=emb.x_train,
+            y_train=emb.y_train,
+            x_val=emb.x_val,
+            y_val=emb.y_val,
+            x_test=emb.x_test,
+            y_test=emb.y_test,
+            in_dim=emb.x_train.size(-1),
+            num_classes=args.num_class,
+            device=args.device,
+            hidden_dim=args.head_hidden,
+            dropout=args.head_dropout,
+            lr=args.lr,
+            weight_decay=args.weight_decay,
+            epochs=args.epochs,
+            patience=args.patience,
+            early_stop_metric=args.early_stop_metric,
+            save_best_path=best_path,
+        )
 
     print(
         f"[DONE] {args.dataset} | method={args.method} | shot={args.shot} | seed={args.seed} | "

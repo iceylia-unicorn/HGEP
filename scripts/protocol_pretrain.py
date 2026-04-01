@@ -78,10 +78,21 @@ def build_parser():
 
     # type-pair args
     ap.add_argument("--relation_prompt_mode", type=str, default="mul", choices=["mul", "add"])
-    ap.add_argument("--relation_prompt_alpha", type=float, default=0.5)
+    ap.add_argument("--relation_prompt_alpha", type=float, default=0.3)
     ap.add_argument("--relation_prompt_dropout", type=float, default=0.1)
     ap.add_argument("--relation_prompt_aggr", type=str, default="mean", choices=["mean", "sum"])
     ap.add_argument("--relation_prompt_use_ln", action="store_true")
+    ap.add_argument(
+        "--typepair_pretrain_mode",
+        type=str,
+        default="pretrain",
+        choices=["pretrain", "downstream_only"],
+        help=(
+            "When method=typepair: 'pretrain' keeps the old behavior and injects relation "
+            "prompt during pretraining; 'downstream_only' reroutes this stage to plain hgmp "
+            "pretraining so relation prompt is only introduced in protocol_fewshot_eval."
+        ),
+    )
 
     return ap
 
@@ -108,24 +119,36 @@ def normalize_args(args):
     return args
 
 
+def resolve_pretrain_method(args) -> str:
+    if args.method == "typepair" and args.typepair_pretrain_mode == "downstream_only":
+        print(
+            "[INFO] typepair_pretrain_mode=downstream_only -> reroute pretrain to method=hgmp. "
+            "Use scripts/protocol_fewshot_eval.py --method typepair for downstream prompt tuning."
+        )
+        return "hgmp"
+    return args.method
+
+
 def main():
     ap = build_parser()
     args = ap.parse_args()
     args = normalize_args(args)
 
-    if args.method in {"hgmp", "typepair"}:
+    effective_method = resolve_pretrain_method(args)
+
+    if effective_method in {"hgmp", "typepair"}:
         args.device = torch.device(args.device)
 
-    if args.method == "hgprompt":
+    if effective_method == "hgprompt":
         args.device = args.hgprompt_device
         args.epoch = args.epochs
         args.model_type = args.model_type.lower()
 
     print(
         f"[INFO] protocol_pretrain | method={args.method} | "
-        f"dataset={args.dataset} | seed={args.seed}"
+        f"effective_method={effective_method} | dataset={args.dataset} | seed={args.seed}"
     )
-    run_protocol_pretrain(args.method, args)
+    run_protocol_pretrain(effective_method, args)
 
 
 if __name__ == "__main__":

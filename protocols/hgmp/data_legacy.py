@@ -8,6 +8,11 @@ import os
 
 from collections import defaultdict
 import dgl
+import dgl.heterograph as dgl_heterograph
+
+# legacy pickle compatibility
+if not hasattr(dgl_heterograph, "DGLHeteroGraph") and hasattr(dgl_heterograph, "DGLGraph"):
+    dgl_heterograph.DGLHeteroGraph = dgl_heterograph.DGLGraph
 DATA_ROOT = Path("data")
 
 def multi_class_NIG(dataname, num_class,shots=100,classification_type=0,feats_type=None):

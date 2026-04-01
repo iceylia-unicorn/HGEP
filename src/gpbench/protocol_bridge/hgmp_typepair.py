@@ -4,6 +4,7 @@ from protocols.hgmp.pretrain_legacy import EarlyStopping
 from dataclasses import dataclass
 from typing import Dict, Iterable, Tuple
 
+import dgl
 import torch
 import torch.nn as nn
 
@@ -19,6 +20,8 @@ from pathlib import Path
 
 TYPEPAIR_PRETRAIN_DIR = Path("artifacts/checkpoints/typepair_hgmp/pretrain")
 TYPEPAIR_PRETRAIN_DIR.mkdir(parents=True, exist_ok=True)
+
+
 @dataclass
 class TypePairRelationPromptConfig:
     mode: str = "mul"          # "mul" or "add"
@@ -108,9 +111,9 @@ class TypePairRelationPrompt(nn.Module):
             if key not in self.prompt:
                 continue
 
-            p = self.prompt[key].unsqueeze(0)  # [1, d]
+            p = self.prompt[key].unsqueeze(0)
 
-            msg = x_dict[src_t][src]           # [E, d]
+            msg = x_dict[src_t][src]
             if self.mode == "mul":
                 msg = msg * p
             else:
@@ -139,16 +142,42 @@ class TypePairRelationPrompt(nn.Module):
         return out_dict
 
 
+def _build_edge_index_dict(graph) -> Dict[Tuple[str, str, str], torch.Tensor]:
+    edge_index_dict = {}
+    for etype in graph.canonical_etypes:
+        src, dst = graph.edges(etype=etype)
+        edge_index_dict[etype] = torch.stack((src, dst), dim=0)
+    return edge_index_dict
+
+
+def _split_h_by_keys(
+    h: torch.Tensor,
+    keys: Iterable[str],
+    sizes: Iterable[int],
+) -> Dict[str, torch.Tensor]:
+    out = {}
+    start = 0
+    for key, size in zip(keys, sizes):
+        out[key] = h[start:start + size]
+        start += size
+    return out
+
+
 class RelationInjectedLegacyHGT(nn.Module):
     """
     Wrap protocols.hgmp.prompt_legacy.HGT without modifying it.
     Injection point:
       after each HGTConv block, before the final output projection.
+
+    Keep legacy parameter names (lin_dict / convs / lin) so a plain HGMP-HGT
+    checkpoint can still load into this wrapper with only relation prompt keys missing.
     """
 
     def __init__(self, base_hgt: nn.Module, relation_prompt: TypePairRelationPrompt):
         super().__init__()
-        self.base_hgt = base_hgt
+        self.lin_dict = base_hgt.lin_dict
+        self.convs = base_hgt.convs
+        self.lin = base_hgt.lin
         self.relation_prompt = relation_prompt
 
     def forward(
@@ -157,31 +186,82 @@ class RelationInjectedLegacyHGT(nn.Module):
         x_dict: Dict[str, torch.Tensor],
         edge_index_dict: Dict[Tuple[str, str, str], torch.Tensor],
     ) -> Dict[str, torch.Tensor]:
-        del targetnode  # kept only for signature compatibility
+        del targetnode
 
         x_dict = {
-            node_type: self.base_hgt.lin_dict[node_type](x).relu_()
+            node_type: self.lin_dict[node_type](x).relu_()
             for node_type, x in x_dict.items()
         }
 
-        for conv in self.base_hgt.convs:
+        for conv in self.convs:
             x_dict = conv(x_dict, edge_index_dict)
             x_dict = self.relation_prompt(x_dict, edge_index_dict)
 
         x_dict = {
-            node_type: self.base_hgt.lin(x)
+            node_type: self.lin(x)
             for node_type, x in x_dict.items()
         }
         return x_dict
+
+
+class RelationInjectedLegacyGCN(nn.Module):
+    """
+    Wrap protocols.hgmp.prompt_legacy.GCL_GCN without modifying it.
+
+    Injection point:
+      after each GraphConv block on the hidden representation.
+
+    Keep legacy parameter names (fc_list / layers / dropout) so a plain HGMP-GCN
+    checkpoint can still load into this wrapper with only relation prompt keys missing.
+    """
+
+    def __init__(self, base_gcn: nn.Module, relation_prompt: TypePairRelationPrompt):
+        super().__init__()
+        self.fc_list = base_gcn.fc_list
+        self.layers = base_gcn.layers
+        self.dropout = base_gcn.dropout
+        self.relation_prompt = relation_prompt
+
+    def forward(
+        self,
+        graph,
+        x_dict: Dict[str, torch.Tensor],
+    ) -> Dict[str, torch.Tensor]:
+        keys = list(x_dict.keys())
+        sizes = [x_dict[key].shape[0] for key in keys]
+
+        feats_emd = [x_dict[key] for key in keys]
+        h_list = []
+        for fc, feature in zip(self.fc_list, feats_emd):
+            h_list.append(fc(feature))
+        h = torch.cat(h_list, dim=0)
+
+        edge_index_dict = _build_edge_index_dict(graph)
+        homo_g = dgl.to_homogeneous(graph)
+        homo_g = dgl.remove_self_loop(homo_g)
+        homo_g = dgl.add_self_loop(homo_g)
+
+        for layer in self.layers:
+            h = self.dropout(h)
+            h = layer(homo_g, h)
+
+            hidden_dict = _split_h_by_keys(h, keys, sizes)
+            hidden_dict = self.relation_prompt(hidden_dict, edge_index_dict)
+            h = torch.cat([hidden_dict[key] for key in keys], dim=0)
+
+        return _split_h_by_keys(h, keys, sizes)
 
 
 class HGMPTypePairHGNN(nn.Module):
     """
     New-file-only wrapper around protocols.hgmp.prompt_legacy.HGNN.
 
-    We do NOT modify legacy HGNN/HGT.
-    We instantiate legacy HGNN, then replace only its HGT forward path
-    with a relation-injected wrapper.
+    We do NOT modify legacy HGNN modules. Instead, we instantiate legacy HGNN,
+    then replace its encoder path with a relation-injected wrapper.
+
+    Supported now:
+    - HGT: inject after each HGTConv block
+    - GCN: inject after each GraphConv block
     """
 
     def __init__(
@@ -203,15 +283,15 @@ class HGMPTypePairHGNN(nn.Module):
         relation_cfg: TypePairRelationPromptConfig | None = None,
     ):
         super().__init__()
-        if hgnn_type != "HGT":
+        if hgnn_type not in {"HGT", "GCN"}:
             raise NotImplementedError(
-                "First bridge version only supports HGT for fair HGMP-aligned comparison."
+                "HGMPTypePairHGNN currently supports only HGT and GCN."
             )
 
         if relation_cfg is None:
             relation_cfg = TypePairRelationPromptConfig()
 
-        self.base_hgnn = HGNN(
+        base_hgnn = HGNN(
             ntypes=ntypes,
             metadata=metadata,
             hid_dim=hid_dim,
@@ -228,8 +308,8 @@ class HGMPTypePairHGNN(nn.Module):
             args=args,
         )
 
-        self.hgnn_type = self.base_hgnn.hgnn_type
-        self.relation_prompt = TypePairRelationPrompt(
+        self.hgnn_type = base_hgnn.hgnn_type
+        relation_prompt = TypePairRelationPrompt(
             metadata=metadata,
             dim=hid_dim,
             mode=relation_cfg.mode,
@@ -238,15 +318,36 @@ class HGMPTypePairHGNN(nn.Module):
             use_ln=relation_cfg.use_ln,
             aggr=relation_cfg.aggr,
         )
-        self.GraphConv = RelationInjectedLegacyHGT(
-            self.base_hgnn.GraphConv,
-            self.relation_prompt,
-        )
 
-    def forward(self, targetnode, x, edge_index):
-        if self.hgnn_type != "HGT":
-            raise NotImplementedError("Only HGT is supported in this bridge.")
-        return self.GraphConv(targetnode, x, edge_index)
+        if self.hgnn_type == "HGT":
+            self.GraphConv = RelationInjectedLegacyHGT(
+                base_hgnn.GraphConv,
+                relation_prompt,
+            )
+        elif self.hgnn_type == "GCN":
+            self.GraphConv = RelationInjectedLegacyGCN(
+                base_hgnn.GraphConv,
+                relation_prompt,
+            )
+        else:
+            raise NotImplementedError(
+                f"Unsupported hgnn_type in HGMPTypePairHGNN: {self.hgnn_type}"
+            )
+
+    @property
+    def relation_prompt(self) -> TypePairRelationPrompt:
+        return self.GraphConv.relation_prompt
+
+    def forward(self, targetnode, x, edge_index=None):
+        if self.hgnn_type == "HGT":
+            return self.GraphConv(targetnode, x, edge_index)
+        if self.hgnn_type == "GCN":
+            graph = targetnode
+            x_dict = x
+            return self.GraphConv(graph, x_dict)
+        raise NotImplementedError(
+            f"Unsupported hgnn_type in HGMPTypePairHGNN.forward: {self.hgnn_type}"
+        )
 
 
 class TypePairLegacyPreTrain(LegacyPreTrain):
@@ -272,9 +373,9 @@ class TypePairLegacyPreTrain(LegacyPreTrain):
         self.device = args.device
         self.args = args
 
-        if args.hgnn_type != "HGT":
+        if args.hgnn_type not in {"HGT", "GCN"}:
             raise NotImplementedError(
-                "TypePair bridge currently supports only HGT."
+                "TypePair bridge currently supports only HGT and GCN."
             )
 
         self.hgnn = HGMPTypePairHGNN(
@@ -377,6 +478,7 @@ class TypePairLegacyPreTrain(LegacyPreTrain):
                 print("Early stopping!")
                 break
         print(f"+++ best checkpoint path: {save_path}")
+
 
 def build_typepair_relation_cfg_from_args(args) -> TypePairRelationPromptConfig:
     return TypePairRelationPromptConfig(
