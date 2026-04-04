@@ -32,7 +32,6 @@ python scripts/finetune_fewshot.py \
 ## 预处理
 使用的类ProG induced graphs形式，因此需要先运行scripts/preprocess_legacy.py，运行后位置位于data/{dataname}/induced_graphs下
 
-
 # 新版
 ## 预训练
 ```bash
@@ -111,3 +110,14 @@ Python 3.9
 torch 12.5
 dgl 2.4 
 pip install dgl==2.4.0 -f https://data.dgl.ai/wheels/torch-2.4/cu121/repo.html
+
+
+# eval2
+
+python scripts/protocol_fewshot_eval_v2.py \
+  --method none \
+  --ckpt artifacts/checkpoints/hgmp/pretrain/ACM.GraphCL.GCN.hid128.np100.pth \
+  --dataset ACM \
+  --backbone hgt \
+  --shot 10 \
+  --seed 0

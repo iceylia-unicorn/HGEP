@@ -9,12 +9,10 @@ if str(ROOT) not in sys.path:
 import torch
 
 from gpbench.protocol_bridge.downstream_legacy import (
-    build_legacy_fewshot_embeddings,
-    train_mlp_probe,
-    train_typepair_prompt_probe,
+    train_hgmp_original_prompt_probe,
+    train_hgmp_typepair_replace_prompt_probe,
     train_hgmp_heteroprompt_probe,
 )
-
 
 
 
@@ -43,13 +41,13 @@ def main():
 
     # typepair cfg (only used when method=typepair)
     ap.add_argument("--relation_prompt_mode", type=str, default="mul", choices=["mul", "add"])
-    ap.add_argument("--relation_prompt_alpha", type=float, default=0.5)
+    ap.add_argument("--relation_prompt_alpha", type=float, default=0.3)
     ap.add_argument("--relation_prompt_dropout", type=float, default=0.1)
     ap.add_argument("--relation_prompt_aggr", type=str, default="mean", choices=["mean", "sum"])
     ap.add_argument("--relation_prompt_use_ln", action="store_true")
 
     # graph / embedding batch size
-    ap.add_argument("--embed_batch_size", type=int, default=32)
+    ap.add_argument("--embed_batch_size", type=int, default=10)
 
     # probe head / downstream tuning
     ap.add_argument("--head_hidden", type=int, default=128)
@@ -91,27 +89,31 @@ def main():
     save_dir.mkdir(parents=True, exist_ok=True)
     best_path = str(save_dir / "best_head.pt")
 
-    if args.method == "typepair":
+    if args.method == "hgmp":
         print(
-            "[INFO] method=typepair now means downstream prompt tuning: "
-            "freeze HGMP backbone, train relation_prompt + head."
+            "[INFO] method=hgmp uses original HGMP downstream protocol: "
+            "node prompt (HeteroPrompt) + original answering head."
         )
-        res = train_typepair_prompt_probe(
+        res = train_hgmp_original_prompt_probe(
             args=args,
             batch_size=args.embed_batch_size,
-            hidden_dim=args.head_hidden,
-            dropout=args.head_dropout,
-            head_lr=args.lr,
-            prompt_lr=args.prompt_lr,
-            weight_decay=args.weight_decay,
-            epochs=args.epochs,
-            patience=args.patience,
-            early_stop_metric=args.early_stop_metric,
             save_best_path=best_path,
         )
+
+    elif args.method == "typepair":
+        print(
+            "[INFO] method=typepair uses original HGMP downstream protocol, "
+            "but replaces node prompt with relation prompt injected after each HGNN layer."
+        )
+        res = train_hgmp_typepair_replace_prompt_probe(
+            args=args,
+            batch_size=args.embed_batch_size,
+            save_best_path=best_path,
+        )
+
     elif args.method == "hgmp_prompt":
         print(
-            "[INFO] method=hgmp_prompt means end-to-end prompt tuning: "
+            "[INFO] method=hgmp_prompt keeps the older experimental branch."
         )
         res = train_hgmp_heteroprompt_probe(
             args=args,
@@ -125,38 +127,9 @@ def main():
             early_stop_metric=args.early_stop_metric,
             save_best_path=best_path,
         )
+
     else:
-        emb = build_legacy_fewshot_embeddings(
-            args=args,
-            batch_size=args.embed_batch_size,
-        )
-
-        res = train_mlp_probe(
-            x_train=emb.x_train,
-            y_train=emb.y_train,
-            x_val=emb.x_val,
-            y_val=emb.y_val,
-            x_test=emb.x_test,
-            y_test=emb.y_test,
-            in_dim=emb.x_train.size(-1),
-            num_classes=args.num_class,
-            device=args.device,
-            hidden_dim=args.head_hidden,
-            dropout=args.head_dropout,
-            lr=args.lr,
-            weight_decay=args.weight_decay,
-            epochs=args.epochs,
-            patience=args.patience,
-            early_stop_metric=args.early_stop_metric,
-            save_best_path=best_path,
-        )
-
-    print(
-        f"[DONE] {args.dataset} | method={args.method} | shot={args.shot} | seed={args.seed} | "
-        f"best_val_f1(micro/macro)={res['best_val_micro']:.4f}/{res['best_val_macro']:.4f} | "
-        f"test@best_f1(micro/macro)={res['test_at_best_micro']:.4f}/{res['test_at_best_macro']:.4f} | "
-        f"best_epoch={res['best_epoch']} | monitor={res['early_stop_metric']}"
-    )
+        raise ValueError(f"Unsupported method: {args.method}")
 
 
 if __name__ == "__main__":

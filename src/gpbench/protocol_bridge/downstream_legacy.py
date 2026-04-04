@@ -17,7 +17,7 @@ from gpbench.protocol_bridge.hgmp_typepair import (
     HGMPTypePairHGNN,
     build_typepair_relation_cfg_from_args,
 )
-
+from protocols.hgmp.eval_legacy import acc_f1_over_batches, valid_over_batches
 
 @dataclass
 class LegacyFewShotEmbeddings:
@@ -28,7 +28,6 @@ class LegacyFewShotEmbeddings:
     x_test: torch.Tensor
     y_test: torch.Tensor
     targetnode: str
-
 
 def _first_graph_from_sample(sample, classification_type: str):
     if classification_type == "NIG":
@@ -421,7 +420,7 @@ def train_typepair_prompt_probe(
             batched_graph = batched_graph.to(args.device)
             batched_label = batched_label.to(args.device).long()
 
-            graph_emb = encode_graph_batch(hgnn, batched_graph, targetnode)
+            graph_emb = forward_graph_batch(hgnn, batched_graph, targetnode)
             logits = head(graph_emb)
             loss = nn.functional.cross_entropy(logits, batched_label)
 
@@ -892,3 +891,325 @@ def train_mlp_probe(
         "best_epoch": best_epoch,
         "early_stop_metric": early_stop_metric,
     }
+
+class IdentityPrompt(nn.Module):
+    """
+    Used by typepair to replace HGMP's node prompt.
+    Keeps the original HGMP downstream protocol unchanged:
+    the training / valid / test code still calls PG(graph),
+    but here PG is just identity.
+    """
+    def forward(self, batched_graph):
+        return batched_graph
+
+
+def _set_parameter_list_requires_grad(params, flag: bool):
+    for p in params:
+        p.requires_grad_(flag)
+
+
+def _build_legacy_answering(args):
+    return nn.Sequential(
+        nn.Linear(args.hidden_dim, args.num_class),
+        nn.Softmax(dim=1),
+    ).to(args.device)
+
+
+def _build_legacy_prompt_metadata(args):
+    train_list, valid_list, test_list, targetnode = _load_legacy_fewshot_splits(args)
+    sample_graph = _first_graph_from_sample(train_list[0], args.classification_type)
+    ntypes = sample_graph.ntypes
+    token_dims = [sample_graph.ndata["x"][nt].shape[1] for nt in ntypes]
+    return train_list, valid_list, test_list, targetnode, ntypes, token_dims
+
+
+def _run_hgmp_style_epoch(
+    train_loader,
+    hgnn,
+    PG,
+    answering,
+    optimizer,
+    lossfn,
+    targetnode: str,
+    classification_type: str,
+    device: torch.device,
+):
+    total_loss = 0.0
+    total_steps = 0
+
+    for train_batch in train_loader:
+        batched_graph, batched_label = _unpack_batch(train_batch, classification_type)
+        batched_graph = batched_graph.to(device)
+        batched_label = batched_label.to(device)
+
+        prompted_graph = PG(batched_graph)
+
+        x_dict = prompted_graph.ndata["x"]
+        edge_index_dict = _build_edge_index_dict(prompted_graph)
+
+        if hgnn.hgnn_type == "HGT":
+            node_emb = hgnn(targetnode, x_dict, edge_index_dict)
+        elif hgnn.hgnn_type == "SHGN":
+            node_emb = hgnn(targetnode, prompted_graph, x_dict)
+        elif hgnn.hgnn_type == "GCN":
+            node_emb = hgnn(prompted_graph, x_dict)
+        elif hgnn.hgnn_type == "GAT":
+            node_emb = hgnn(prompted_graph, x_dict, False)
+        else:
+            raise ValueError(f"Unsupported hgnn_type: {hgnn.hgnn_type}")
+
+        graph_emb = graph_pool("mean", node_emb, prompted_graph)
+        pre = answering(graph_emb)
+        loss = lossfn(pre, batched_label)
+
+        optimizer.zero_grad()
+        loss.backward()
+        optimizer.step()
+
+        total_loss += loss.item()
+        total_steps += 1
+
+    return total_loss / max(total_steps, 1)
+
+
+def _train_hgmp_style_downstream(
+    args,
+    *,
+    hgnn,
+    PG,
+    prompt_parameters,
+    batch_size: int = 10,
+    save_best_path: str | None = None,
+):
+    """
+    Keep the original HGMP downstream protocol:
+      - GraphDataLoader over multi_class_NIG
+      - answering phase / prompt phase alternation
+      - valid_over_batches for validation loss
+      - acc_f1_over_batches for final test metrics
+
+    The only thing we swap is the prompt module:
+      - hgmp: PG = HeteroPrompt
+      - typepair: PG = IdentityPrompt, prompt_parameters = relation_prompt.parameters()
+    """
+    if args.classification_type != "NIG":
+        raise NotImplementedError("currently only supports classification_type='NIG'")
+
+    if args.dataset == "IMDB":
+        raise NotImplementedError("Start with ACM/DBLP first for this alignment path.")
+
+    seed_everything(args.seed)
+
+    train_list, valid_list, test_list, targetnode, _, _ = _build_legacy_prompt_metadata(args)
+
+    train_loader = dgl.dataloading.GraphDataLoader(train_list, batch_size=batch_size, shuffle=True)
+    valid_loader = dgl.dataloading.GraphDataLoader(valid_list, batch_size=batch_size, shuffle=True)
+    test_loader = dgl.dataloading.GraphDataLoader(test_list, batch_size=batch_size, shuffle=True)
+
+    answering = _build_legacy_answering(args)
+    lossfn = nn.CrossEntropyLoss(reduction="mean")
+
+    prompt_parameters = list(prompt_parameters)
+    prompt_lr = args.prompt_lr if args.prompt_lr is not None else args.lr
+
+    opi_prompt = torch.optim.Adam(
+        filter(lambda p: p.requires_grad, prompt_parameters),
+        lr=prompt_lr,
+        weight_decay=args.weight_decay,
+    )
+    opi_answer = torch.optim.Adam(
+        filter(lambda p: p.requires_grad, answering.parameters()),
+        lr=args.lr,
+        weight_decay=args.weight_decay,
+    )
+
+    best_valid_loss = float("inf")
+    best_epoch = -1
+    bad_epochs = 0
+
+    for epoch in range(1, args.epochs + 1):
+        # phase 1: tune answering, freeze prompt
+        hgnn.eval()
+        PG.eval()
+        if hasattr(hgnn, "relation_prompt"):
+            hgnn.relation_prompt.eval()
+
+        _set_parameter_list_requires_grad(prompt_parameters, False)
+        _set_parameter_list_requires_grad(answering.parameters(), True)
+
+        head_loss = _run_hgmp_style_epoch(
+            train_loader=train_loader,
+            hgnn=hgnn,
+            PG=PG,
+            answering=answering,
+            optimizer=opi_answer,
+            lossfn=lossfn,
+            targetnode=targetnode,
+            classification_type=args.classification_type,
+            device=args.device,
+        )
+
+        # phase 2: tune prompt, freeze answering
+        hgnn.eval()
+        PG.train()
+        if hasattr(hgnn, "relation_prompt"):
+            hgnn.relation_prompt.train()
+
+        _set_parameter_list_requires_grad(prompt_parameters, True)
+        _set_parameter_list_requires_grad(answering.parameters(), False)
+
+        prompt_loss = _run_hgmp_style_epoch(
+            train_loader=train_loader,
+            hgnn=hgnn,
+            PG=PG,
+            answering=answering,
+            optimizer=opi_prompt,
+            lossfn=lossfn,
+            targetnode=targetnode,
+            classification_type=args.classification_type,
+            device=args.device,
+        )
+
+        valid_loss = valid_over_batches(
+            valid_loader=valid_loader,
+            PG=PG,
+            hgnn=hgnn,
+            answering=answering,
+            num_class=args.num_class,
+            task_type="multi_class_classification",
+            device=args.device,
+            targetnode=targetnode,
+            dataname=args.dataset,
+            lossfn=lossfn,
+            classification_type=args.classification_type,
+        )
+
+        if valid_loss < best_valid_loss:
+            best_valid_loss = valid_loss
+            best_epoch = epoch
+            bad_epochs = 0
+
+            if save_best_path is not None:
+                torch.save(
+                    {
+                        "hgnn_state": hgnn.state_dict(),
+                        "pg_state": PG.state_dict(),
+                        "answer_state": answering.state_dict(),
+                        "best_valid_loss": best_valid_loss,
+                        "best_epoch": best_epoch,
+                    },
+                    save_best_path,
+                )
+        else:
+            bad_epochs += 1
+
+        if epoch == 1 or epoch % 10 == 0:
+            print(
+                f"Epoch {epoch:03d} | head_loss={head_loss:.4f} | "
+                f"prompt_loss={prompt_loss:.4f} | valid_loss={valid_loss:.4f}"
+            )
+
+        if bad_epochs >= args.patience:
+            print(
+                f"Early stop at epoch {epoch}, best_epoch={best_epoch}, "
+                f"best_valid_loss={best_valid_loss:.4f}"
+            )
+            break
+
+    print("[INFO] loading best checkpoint...")
+    if save_best_path is not None:
+        state = torch.load(save_best_path, map_location=args.device, weights_only=True)
+        hgnn.load_state_dict(state["hgnn_state"], strict=False)
+        PG.load_state_dict(state["pg_state"], strict=False)
+        answering.load_state_dict(state["answer_state"], strict=False)
+
+    print("[INFO] start final validation on best checkpoint...")
+    val_micro, val_macro = acc_f1_over_batches(
+        valid_loader, PG, hgnn, answering,
+        args.num_class,
+        "multi_class_classification",
+        device=args.device,
+        targetnode=targetnode,
+        dataname=args.dataset,
+        classification_type=args.classification_type,
+    )
+    print(f"[INFO] final validation done: {val_micro:.4f}/{val_macro:.4f}")
+
+    print("[INFO] start final test on best checkpoint...")
+    test_micro, test_macro = acc_f1_over_batches(
+        test_loader, PG, hgnn, answering,
+        args.num_class,
+        "multi_class_classification",
+        device=args.device,
+        targetnode=targetnode,
+        dataname=args.dataset,
+        classification_type=args.classification_type,
+    )
+    print(f"[INFO] final test done: {test_micro:.4f}/{test_macro:.4f}")
+    return {
+        "best_val_micro": val_micro,
+        "best_val_macro": val_macro,
+        "test_at_best_micro": test_micro,
+        "test_at_best_macro": test_macro,
+        "best_epoch": best_epoch,
+        "early_stop_metric": "valid_loss",
+    }
+
+
+def train_hgmp_original_prompt_probe(
+    args,
+    batch_size: int = 10,
+    save_best_path: str | None = None,
+):
+    """
+    Original HGMP downstream protocol:
+      node prompt = HeteroPrompt
+      backbone = original HGNN / GCN / GAT / HGT
+    """
+    _, _, _, _, ntypes, token_dims = _build_legacy_prompt_metadata(args)
+
+    hgnn = build_frozen_legacy_hgnn(args, args.ckpt)
+
+    PG = HeteroPrompt(
+        token_dims=token_dims,
+        ntypes=ntypes,
+    ).to(args.device)
+
+    return _train_hgmp_style_downstream(
+        args,
+        hgnn=hgnn,
+        PG=PG,
+        prompt_parameters=PG.parameters(),
+        batch_size=batch_size,
+        save_best_path=save_best_path,
+    )
+
+
+def train_hgmp_typepair_replace_prompt_probe(
+    args,
+    batch_size: int = 10,
+    save_best_path: str | None = None,
+):
+    """
+    Replace HGMP's node prompt with relation prompt:
+      - node prompt removed: PG = IdentityPrompt()
+      - relation prompt inserted after each HGNN layer via HGMPTypePairHGNN
+      - downstream protocol stays aligned with original HGMP
+    """
+    hgnn = build_legacy_hgnn(
+        args,
+        args.ckpt,
+        freeze=True,
+        train_relation_prompt_only=True,
+    )
+
+    PG = IdentityPrompt().to(args.device)
+
+    return _train_hgmp_style_downstream(
+        args,
+        hgnn=hgnn,
+        PG=PG,
+        prompt_parameters=hgnn.relation_prompt.parameters(),
+        batch_size=batch_size,
+        save_best_path=save_best_path,
+    )
