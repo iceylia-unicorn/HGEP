@@ -1,8 +1,8 @@
-##数据格式
+## 数据存储位置
 data/acm/raw/ACM/node.dat
 
 
-## gpt修改后
+## 分支exp/ v1
 
 ### 预训练
 ```bash
@@ -111,3 +111,18 @@ Python 3.9
 torch 12.5
 dgl 2.4 
 pip install dgl==2.4.0 -f https://data.dgl.ai/wheels/torch-2.4/cu121/repo.html
+
+
+# protocol_benchmark
+
+python scripts/protocol_benchmark.py \
+  --dataset ACM \
+  --shot 10 \
+  --splits splits \
+  --methods hgmp typepair hgprompt \
+  --seeds 0 1 2 3 4 \
+  --repeats 50 \
+  --device cuda \
+  --hgmp_ckpt <hgmp_pretrain_ckpt> \
+  --typepair_ckpt <typepair_ckpt_or_hgmp_ckpt> \
+  --hgprompt_ckpt <hgprompt_pretrain_ckpt>

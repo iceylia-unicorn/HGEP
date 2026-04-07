@@ -14,7 +14,7 @@ def main():
     ap = argparse.ArgumentParser()
 
     ap.add_argument("--dataset", type=str, default="ACM")
-    ap.add_argument("--device", type=int, default=-1)   # -1 => cpu
+    ap.add_argument("--device", type=int, default="cuda")   # -1 => cpu
     ap.add_argument("--epoch", type=int, default=1)
 
     ap.add_argument("--feats_type", type=int, default=0)

@@ -71,6 +71,8 @@ def _set_global_seed(seed: int):
 
 
 def _apply_feats_type(data, feats_type: int):
+
+    # 将节点特征字典放入列表中
     features = data.x_dict
     features_list = []
     for value in features.values():
@@ -78,6 +80,7 @@ def _apply_feats_type(data, feats_type: int):
 
     if feats_type in (0, 6, 7, -1, 8, 9):
         pass
+    # 变换
     elif feats_type in (1, 5):
         save = 0 if feats_type == 1 else 2
         for i in range(len(features_list)):
@@ -149,7 +152,7 @@ def _build_single_sample(graph, targetnode: str, node_id: int, label: int, datas
     )
     return (subgraph, inverse_indices, torch.tensor(int(label)))
 
-
+# 缓存划分地址
 def _aligned_cache_path(root: str, dataset: str, shot: int, split_seed: int, feats_type: int) -> Path:
     return (
         ROOT
@@ -163,12 +166,13 @@ def _aligned_cache_path(root: str, dataset: str, shot: int, split_seed: int, fea
     )
 
 
+#核心函数
 def load_aligned_legacy_splits(args):
     if args.dataset not in HOP_NUM:
         raise ValueError(f"Unsupported dataset for aligned legacy splits: {args.dataset}")
     if args.dataset == "IMDB":
         raise NotImplementedError("Aligned legacy split builder currently targets ACM/DBLP/Freebase first.")
-
+    # 查看是否缓存了划分
     cache_path = _aligned_cache_path(args.root, args.dataset, args.shot, args.split_seed, args.feats_type)
     if cache_path.exists():
         with open(cache_path, "rb") as f:
