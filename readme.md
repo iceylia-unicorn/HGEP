@@ -111,7 +111,7 @@ Python 3.9
 torch 12.5
 dgl 2.4 
 pip install dgl==2.4.0 -f https://data.dgl.ai/wheels/torch-2.4/cu121/repo.html
-
+https://data.dgl.ai/wheels/torch-2.5/cu121/repo.html
 
 # protocol_benchmark
 

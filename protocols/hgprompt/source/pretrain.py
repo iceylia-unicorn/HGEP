@@ -28,7 +28,7 @@ def sp_to_spt(mat):
     v = torch.FloatTensor(values)
     shape = coo.shape
 
-    return torch.sparse.FloatTensor(i, v, torch.Size(shape))
+    return torch.sparse_coo_tensor(i, v, torch.Size(shape)).coalesce()
 
 def mat2tensor(mat):
     if type(mat) is np.ndarray:
@@ -350,8 +350,17 @@ def run_model_DBLP(args):
     g = g.to(device)
     trans_g=dgl.reverse(g)
 
-    torch_sparse_adj=g.adj()
-    torch_sparse_adj = torch_sparse_adj.to(device)
+    # torch_sparse_adj=g.adj()
+    # torch_sparse_adj = torch_sparse_adj.to(device)
+    src, dst = g.edges()
+    indices = torch.stack([src, dst], dim=0)
+    values = torch.ones(indices.shape[1], device=device, dtype=torch.float32)
+    torch_sparse_adj = torch.sparse_coo_tensor(
+        indices,
+        values,
+        (g.num_nodes(), g.num_nodes()),
+        device=device,
+    ).coalesce()
 
     if os.path.exists(load_samples_dir)==False:
         if args.dataset=='Freebase':
