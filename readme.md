@@ -110,19 +110,31 @@ Cuda 12.1
 Python 3.9
 torch 12.5
 dgl 2.4 
-pip install dgl==2.4.0 -f https://data.dgl.ai/wheels/torch-2.4/cu121/repo.html
-https://data.dgl.ai/wheels/torch-2.5/cu121/repo.html
+pip install dgl==2.4.0 -f https://data.dgl.ai/wheels/torch-2.5/cu121/repo.html
 
-# protocol_benchmark
-
-python scripts/protocol_benchmark.py \
+# hgprompt 
+## pretrain
+python scripts/hgprompt_pretrain.py \
   --dataset ACM \
-  --shot 10 \
+  --device cuda:0 \
+  --seed 1 \
+  --epoch 200 \
+  --benchmark_defaults \
+  --ckpt_alias artifacts/checkpoints/hgprompt/pretrain/acm_hgprompt_seed1.pt
+## downstream
+
+python scripts/hgprompt_run.py \
+  --dataset ACM \
   --splits splits \
-  --methods hgmp typepair hgprompt \
-  --seeds 0 1 2 3 4 \
-  --repeats 50 \
+  --shot 10 \
+  --seed 0 \
+  --repeat 1 \
   --device cuda \
-  --hgmp_ckpt <hgmp_pretrain_ckpt> \
-  --typepair_ckpt <typepair_ckpt_or_hgmp_ckpt> \
-  --hgprompt_ckpt <hgprompt_pretrain_ckpt>
+  --ckpt artifacts/checkpoints/hgprompt/pretrain/ACM.gcn.ft2.hop1.seed0.best.pt \
+  --benchmark_defaults
+
+
+# 有关aligned
+需要先用hgprompt生成0-4 seed pretrain.pt，然后就能自动读取不同pt进行
+
+但是这种方式和我以前见过的不一样，应该是同一pretrain，然后不同seed
