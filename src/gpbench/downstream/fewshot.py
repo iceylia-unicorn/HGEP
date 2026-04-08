@@ -317,10 +317,41 @@ def train_fewshot_subgraph(
         best_epoch=best_epoch,
         early_stop_metric=early_stop_metric,
     )
-def load_split_file(splits_dir: str, dataset_name: str, shot: int, seed: int) -> Dict[str, torch.Tensor]:
-    base = Path(splits_dir) / dataset_name / f"{shot}-shot"
-    if not base.exists():
-        raise FileNotFoundError(f"Split dir not found: {base}")
+_SPLIT_DIR_ALIASES = {
+    "ACM": ["ACM", "hgb-acm", "acm"],
+    "DBLP": ["DBLP", "hgb-dblp", "dblp"],
+    "IMDB": ["IMDB", "hgb-imdb", "imdb"],
+    "Freebase": ["Freebase", "hgb-freebase", "freebase"],
+    "hgb-acm": ["hgb-acm", "ACM", "acm"],
+    "hgb-dblp": ["hgb-dblp", "DBLP", "dblp"],
+    "hgb-imdb": ["hgb-imdb", "IMDB", "imdb"],
+    "hgb-freebase": ["hgb-freebase", "Freebase", "freebase"],
+}
+
+def _candidate_split_dirs(splits_dir: str, dataset_name: str, shot: int):
+    aliases = _SPLIT_DIR_ALIASES.get(str(dataset_name), [str(dataset_name)])
+    out = []
+    seen = set()
+    for name in aliases:
+        base = Path(splits_dir) / name / f"{shot}-shot"
+        if str(base) not in seen:
+            seen.add(str(base))
+            out.append(base)
+    return out
+
+def load_split_file(splits_dir: str, dataset_name: str, shot: int, seed: int):
+    tried = _candidate_split_dirs(splits_dir, dataset_name, shot)
+
+    base = None
+    for cand in tried:
+        if cand.exists():
+            base = cand
+            break
+
+    if base is None:
+        raise FileNotFoundError(
+            "Split dir not found. tried: " + ", ".join(str(x) for x in tried)
+        )
 
     cands = sorted(base.glob(f"*{seed}*.pt"))
     if len(cands) == 0:
