@@ -1,10 +1,14 @@
+
+# scripts/protocol_benchmark_v2.py
 from pathlib import Path
 import sys
 
 ROOT = Path(__file__).resolve().parents[1]
-if str(ROOT) not in sys.path:
-    sys.path.insert(0, str(ROOT))
+SRC = ROOT / "src"
 
+for p in (ROOT, SRC):
+    if str(p) not in sys.path:
+        sys.path.insert(0, str(p))
 import argparse
 import csv
 import json
@@ -239,14 +243,30 @@ def _patched_legacy_split_loader(args):
 
 
 def _resolve_ckpt(cli_args, method: str) -> str:
+    def _maybe_format(pattern: str | None):
+        if not pattern:
+            return None
+        return pattern.format(
+            seed=cli_args.pretrain_seed,
+            pretrain_seed=cli_args.pretrain_seed,
+            dataset=cli_args.dataset,
+            shot=cli_args.shot,
+            method=method,
+        )
+
     if method == "hgmp":
-        candidate = cli_args.hgmp_ckpt
+        candidate = _maybe_format(cli_args.hgmp_ckpt_pattern) or cli_args.hgmp_ckpt
     elif method == "typepair":
-        candidate = cli_args.typepair_ckpt or cli_args.hgmp_ckpt
+        candidate = (
+            _maybe_format(cli_args.typepair_ckpt_pattern)
+            or cli_args.typepair_ckpt
+            or _maybe_format(cli_args.hgmp_ckpt_pattern)
+            or cli_args.hgmp_ckpt
+        )
     elif method == "hgmp_prompt":
-        candidate = cli_args.hgmp_ckpt
+        candidate = _maybe_format(cli_args.hgmp_ckpt_pattern) or cli_args.hgmp_ckpt
     elif method == "hgprompt":
-        candidate = cli_args.hgprompt_ckpt
+        candidate = _maybe_format(cli_args.hgprompt_ckpt_pattern) or cli_args.hgprompt_ckpt
     else:
         raise ValueError(f"Unsupported method: {method}")
 
@@ -311,6 +331,7 @@ def run_legacy_method_once(cli_args, method: str, ckpt_path: str, split_seed: in
             / args.dataset
             / method
             / f"{args.shot}-shot"
+            / f"pretrainseed{cli_args.pretrain_seed}"
             / f"splitseed{split_seed}"
             / f"repeat{repeat_id}"
         )
@@ -439,6 +460,7 @@ def run_hgprompt_once(cli_args, ckpt_path: str, split_seed: int, repeat_id: int)
         / cli_args.dataset
         / "hgprompt"
         / f"{cli_args.shot}-shot"
+        / f"pretrainseed{cli_args.pretrain_seed}"
         / f"splitseed{split_seed}"
     )
     save_dir.mkdir(parents=True, exist_ok=True)
@@ -535,6 +557,7 @@ def build_parser():
     ap.add_argument("--methods", nargs="+", default=["hgmp", "typepair", "hgprompt"])
     ap.add_argument("--seeds", nargs="+", type=int, default=[0, 1, 2, 3, 4])
     ap.add_argument("--repeats", type=int, default=50)
+    ap.add_argument("--pretrain_seed", type=int, default=0)
     ap.add_argument("--run_seed_base", type=int, default=0)
     ap.add_argument("--device", type=str, default="cuda" if torch.cuda.is_available() else "cpu")
     ap.add_argument("--save_dir", type=Path, default=ROOT / "artifacts" / "results" / "protocol_benchmark")
@@ -542,6 +565,9 @@ def build_parser():
     ap.add_argument("--hgmp_ckpt", type=str, default=None)
     ap.add_argument("--typepair_ckpt", type=str, default=None)
     ap.add_argument("--hgprompt_ckpt", type=str, default=None)
+    ap.add_argument("--hgmp_ckpt_pattern", type=str, default=None)
+    ap.add_argument("--typepair_ckpt_pattern", type=str, default=None)
+    ap.add_argument("--hgprompt_ckpt_pattern", type=str, default=None)
 
     ap.add_argument("--feats_type", type=int, default=0)
     ap.add_argument("--hidden_dim", type=int, default=128)
@@ -648,12 +674,16 @@ def main():
         "shot": args.shot,
         "seeds": args.seeds,
         "repeats": args.repeats,
+        "pretrain_seed": args.pretrain_seed,
         "run_seed_base": args.run_seed_base,
         "methods": args.methods,
         "resolved_ckpt_by_method": ckpt_by_method,
         "hgmp_ckpt": args.hgmp_ckpt,
         "typepair_ckpt": args.typepair_ckpt,
         "hgprompt_ckpt": args.hgprompt_ckpt,
+        "hgmp_ckpt_pattern": args.hgmp_ckpt_pattern,
+        "typepair_ckpt_pattern": args.typepair_ckpt_pattern,
+        "hgprompt_ckpt_pattern": args.hgprompt_ckpt_pattern,
     }
     with open(out_dir / "run_config.json", "w", encoding="utf-8") as f:
         json.dump(config, f, indent=2, ensure_ascii=False)
