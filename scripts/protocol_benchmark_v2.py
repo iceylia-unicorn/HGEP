@@ -52,6 +52,7 @@ class RunRecord:
     method: str
     split_seed: int
     repeat_id: int
+    run_seed: int
     ckpt_path: str
     test_micro: float
     test_macro: float
@@ -237,31 +238,15 @@ def _patched_legacy_split_loader(args):
     return load_aligned_legacy_splits(args)
 
 
-def _resolve_ckpt(cli_args, method: str, split_seed: int) -> str:
-    def _maybe_format(pattern: str | None):
-        if not pattern:
-            return None
-        return pattern.format(
-            seed=split_seed,
-            split_seed=split_seed,
-            dataset=cli_args.dataset,
-            shot=cli_args.shot,
-            method=method,
-        )
-
+def _resolve_ckpt(cli_args, method: str) -> str:
     if method == "hgmp":
-        candidate = _maybe_format(cli_args.hgmp_ckpt_pattern) or cli_args.hgmp_ckpt
+        candidate = cli_args.hgmp_ckpt
     elif method == "typepair":
-        candidate = (
-            _maybe_format(cli_args.typepair_ckpt_pattern)
-            or cli_args.typepair_ckpt
-            or _maybe_format(cli_args.hgmp_ckpt_pattern)
-            or cli_args.hgmp_ckpt
-        )
+        candidate = cli_args.typepair_ckpt or cli_args.hgmp_ckpt
     elif method == "hgmp_prompt":
-        candidate = _maybe_format(cli_args.hgmp_ckpt_pattern) or cli_args.hgmp_ckpt
+        candidate = cli_args.hgmp_ckpt
     elif method == "hgprompt":
-        candidate = _maybe_format(cli_args.hgprompt_ckpt_pattern) or cli_args.hgprompt_ckpt
+        candidate = cli_args.hgprompt_ckpt
     else:
         raise ValueError(f"Unsupported method: {method}")
 
@@ -270,8 +255,12 @@ def _resolve_ckpt(cli_args, method: str, split_seed: int) -> str:
     return candidate
 
 
+def _make_run_seed(split_seed: int, repeat_id: int, run_seed_base: int) -> int:
+    return int(run_seed_base) + int(split_seed) * 1000 + int(repeat_id)
+
+
 def _make_legacy_args(cli_args, method: str, ckpt_path: str, split_seed: int, repeat_id: int):
-    run_seed = split_seed * 1000 + repeat_id
+    run_seed = _make_run_seed(split_seed, repeat_id, cli_args.run_seed_base)
     return SimpleNamespace(
         method=method,
         ckpt=ckpt_path,
@@ -383,6 +372,7 @@ def run_legacy_method_once(cli_args, method: str, ckpt_path: str, split_seed: in
         method=method,
         split_seed=split_seed,
         repeat_id=repeat_id,
+        run_seed=int(args.seed),
         ckpt_path=ckpt_path,
         test_micro=float(res["test_at_best_micro"]),
         test_macro=float(res["test_at_best_macro"]),
@@ -390,7 +380,8 @@ def run_legacy_method_once(cli_args, method: str, ckpt_path: str, split_seed: in
     )
 
 
-def _make_hgprompt_args(cli_args, ckpt_path: str, split_seed: int, save_dir: Path):
+def _make_hgprompt_args(cli_args, ckpt_path: str, split_seed: int, repeat_id: int, save_dir: Path):
+    run_seed = _make_run_seed(split_seed, repeat_id, cli_args.run_seed_base)
     return SimpleNamespace(
         root=cli_args.root,
         dataset=cli_args.dataset,
@@ -434,10 +425,14 @@ def _make_hgprompt_args(cli_args, ckpt_path: str, split_seed: int, save_dir: Pat
         semantic_prompt_weight=cli_args.hgprompt_semantic_prompt_weight,
         freebase_type=cli_args.hgprompt_freebase_type,
         shgn_hidden_dim=cli_args.hgprompt_shgn_hidden_dim,
+        downstream_run_seed=run_seed,
     )
 
 
 def run_hgprompt_once(cli_args, ckpt_path: str, split_seed: int, repeat_id: int) -> RunRecord:
+    run_seed = _make_run_seed(split_seed, repeat_id, cli_args.run_seed_base)
+    _set_global_seed(run_seed)
+
     save_dir = (
         Path(cli_args.save_dir)
         / "aligned_protocol"
@@ -448,7 +443,7 @@ def run_hgprompt_once(cli_args, ckpt_path: str, split_seed: int, repeat_id: int)
     )
     save_dir.mkdir(parents=True, exist_ok=True)
 
-    args = _make_hgprompt_args(cli_args, ckpt_path, split_seed, save_dir)
+    args = _make_hgprompt_args(cli_args, ckpt_path, split_seed, repeat_id, save_dir)
     bundle = load_hgprompt_downstream_bundle(
         root=cli_args.root,
         dataset=cli_args.dataset,
@@ -461,6 +456,7 @@ def run_hgprompt_once(cli_args, ckpt_path: str, split_seed: int, repeat_id: int)
         method="hgprompt",
         split_seed=split_seed,
         repeat_id=repeat_id,
+        run_seed=run_seed,
         ckpt_path=ckpt_path,
         test_micro=float(res.test_micro),
         test_macro=float(res.test_macro),
@@ -539,15 +535,13 @@ def build_parser():
     ap.add_argument("--methods", nargs="+", default=["hgmp", "typepair", "hgprompt"])
     ap.add_argument("--seeds", nargs="+", type=int, default=[0, 1, 2, 3, 4])
     ap.add_argument("--repeats", type=int, default=50)
+    ap.add_argument("--run_seed_base", type=int, default=0)
     ap.add_argument("--device", type=str, default="cuda" if torch.cuda.is_available() else "cpu")
     ap.add_argument("--save_dir", type=Path, default=ROOT / "artifacts" / "results" / "protocol_benchmark")
 
     ap.add_argument("--hgmp_ckpt", type=str, default=None)
     ap.add_argument("--typepair_ckpt", type=str, default=None)
     ap.add_argument("--hgprompt_ckpt", type=str, default=None)
-    ap.add_argument("--hgmp_ckpt_pattern", type=str, default=None)
-    ap.add_argument("--typepair_ckpt_pattern", type=str, default=None)
-    ap.add_argument("--hgprompt_ckpt_pattern", type=str, default=None)
 
     ap.add_argument("--feats_type", type=int, default=0)
     ap.add_argument("--hidden_dim", type=int, default=128)
@@ -611,11 +605,12 @@ def main():
     args = build_parser().parse_args()
 
     records: list[RunRecord] = []
+    ckpt_by_method = {method: _resolve_ckpt(args, method) for method in args.methods}
 
     for method in args.methods:
-        print(f"================ method={method} ================")
+        ckpt_path = ckpt_by_method[method]
+        print(f"================ method={method} | ckpt={ckpt_path} ================")
         for split_seed in args.seeds:
-            ckpt_path = _resolve_ckpt(args, method, split_seed)
             for repeat_id in range(args.repeats):
                 if method == "hgprompt":
                     record = run_hgprompt_once(args, ckpt_path, split_seed, repeat_id)
@@ -631,7 +626,8 @@ def main():
                 records.append(record)
                 print(
                     f"[RUN] method={record.method} | split_seed={record.split_seed} | repeat={record.repeat_id} | "
-                    f"ckpt={record.ckpt_path} | micro={record.test_micro:.4f} | macro={record.test_macro:.4f} | best_epoch={record.best_epoch}"
+                    f"run_seed={record.run_seed} | ckpt={record.ckpt_path} | "
+                    f"micro={record.test_micro:.4f} | macro={record.test_macro:.4f} | best_epoch={record.best_epoch}"
                 )
 
     out_dir = _ensure_dir(args.save_dir / args.dataset / f"{args.shot}-shot")
@@ -652,13 +648,12 @@ def main():
         "shot": args.shot,
         "seeds": args.seeds,
         "repeats": args.repeats,
+        "run_seed_base": args.run_seed_base,
         "methods": args.methods,
+        "resolved_ckpt_by_method": ckpt_by_method,
         "hgmp_ckpt": args.hgmp_ckpt,
         "typepair_ckpt": args.typepair_ckpt,
         "hgprompt_ckpt": args.hgprompt_ckpt,
-        "hgmp_ckpt_pattern": args.hgmp_ckpt_pattern,
-        "typepair_ckpt_pattern": args.typepair_ckpt_pattern,
-        "hgprompt_ckpt_pattern": args.hgprompt_ckpt_pattern,
     }
     with open(out_dir / "run_config.json", "w", encoding="utf-8") as f:
         json.dump(config, f, indent=2, ensure_ascii=False)
