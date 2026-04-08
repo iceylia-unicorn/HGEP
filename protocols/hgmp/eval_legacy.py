@@ -1,6 +1,5 @@
 import torch
 import numpy as np
-import torchmetrics
 import warnings
 import dgl
 from protocols.hgmp.utils_legacy import graph_pool
@@ -128,6 +127,48 @@ class Evaluator:
             return mrr_list.mean()
 
 
+def _to_class_ids(x: torch.Tensor) -> torch.Tensor:
+    if not isinstance(x, torch.Tensor):
+        x = torch.as_tensor(x)
+    x = x.detach().cpu()
+    if x.ndim == 1:
+        return x.long()
+    if x.ndim == 2:
+        if x.shape[1] == 1:
+            return x.view(-1).long()
+        return x.argmax(dim=1).long()
+    raise ValueError(f"Unsupported tensor shape for class ids: {tuple(x.shape)}")
+
+
+def _f1_micro_macro(pred, y, num_classes: int):
+    pred = _to_class_ids(pred)
+    y = _to_class_ids(y)
+
+    cm = torch.zeros((num_classes, num_classes), dtype=torch.long)
+    for t, p in zip(y.view(-1), pred.view(-1)):
+        if int(t) < 0 or int(p) < 0:
+            continue
+        if int(t) >= num_classes or int(p) >= num_classes:
+            continue
+        cm[t.long(), p.long()] += 1
+
+    tp = cm.diag().to(torch.float32)
+    fp = cm.sum(dim=0).to(torch.float32) - tp
+    fn = cm.sum(dim=1).to(torch.float32) - tp
+    eps = 1e-12
+
+    support = cm.sum(dim=1).to(torch.float32)
+    f1_c = (2 * tp) / (2 * tp + fp + fn + eps)
+    mask = support > 0
+    macro = float(f1_c[mask].mean().item()) if mask.any() else 0.0
+
+    TP = tp.sum()
+    FP = fp.sum()
+    FN = fn.sum()
+    micro = float((2 * TP / (2 * TP + FP + FN + eps)).item())
+    return micro, macro
+
+
 def mrr_hit(normal_label: np.ndarray, pos_out: np.ndarray, metric: list = None):
     if isinstance(normal_label, np.ndarray) and isinstance(pos_out, np.ndarray):
         pass
@@ -174,27 +215,23 @@ def mrr_hit(normal_label: np.ndarray, pos_out: np.ndarray, metric: list = None):
     return results
 
 
-def acc_f1_over_batches(test_loader, PG, hgnn, answering, num_class, task_type, device,targetnode,dataname,classification_type):
-    PG = PG.to("cpu")
+def acc_f1_over_batches(test_loader, PG, hgnn, answering, num_class, task_type, device, targetnode, dataname, classification_type):
+    PG = PG.to('cpu')
     if answering is not None:
-        answering = answering.to("cpu")
-    hgnn = hgnn.to("cpu")
-    if task_type == "multi_class_classification":
-        micro_f1 = torchmetrics.classification.F1Score(task="multiclass", num_classes=num_class, average="micro")
-        macro_f1 = torchmetrics.classification.F1Score(task="multiclass", num_classes=num_class, average="macro")
-    elif task_type == "binary_classification":
-        micro_f1 = torchmetrics.classification.F1Score(task="multiclass", num_classes=num_class, average="micro")
-        macro_f1 = torchmetrics.classification.F1Score(task="multiclass", num_classes=num_class, average="macro")
-    else:
+        answering = answering.to('cpu')
+    hgnn = hgnn.to('cpu')
+    if task_type not in {'multi_class_classification', 'binary_classification'}:
         raise NotImplementedError
 
+    preds = []
+    labels = []
+
     for batch_id, test_batch in enumerate(test_loader):
-        if (classification_type == 'NIG'):
+        if classification_type == 'NIG':
             batched_graph, _, batched_label = test_batch
         else:
             batched_graph, batched_label = test_batch
 
-
         prompted_graph = PG(batched_graph)
 
         x_dict = prompted_graph.ndata['x']
@@ -206,65 +243,53 @@ def acc_f1_over_batches(test_loader, PG, hgnn, answering, num_class, task_type, 
             edge_index = torch.cat((src, tar), dim=0)
             edge_index_dict[etype] = edge_index
 
-        if (hgnn.hgnn_type == 'HGT'):
+        if hgnn.hgnn_type == 'HGT':
             node_emb = hgnn(targetnode, x_dict, edge_index_dict)
-        elif (hgnn.hgnn_type == 'SHGN'):
+        elif hgnn.hgnn_type == 'SHGN':
             node_emb = hgnn(targetnode, prompted_graph, x_dict)
-        elif (hgnn.hgnn_type == 'GCN'):
+        elif hgnn.hgnn_type == 'GCN':
             node_emb = hgnn(prompted_graph, x_dict)
-        elif (hgnn.hgnn_type == 'GAT'):
+        elif hgnn.hgnn_type == 'GAT':
             node_emb = hgnn(prompted_graph, x_dict, False)
+        else:
+            raise ValueError(f"Unsupported hgnn_type: {hgnn.hgnn_type}")
 
         graph_emb = graph_pool('mean', node_emb, prompted_graph)
+        pre = answering(graph_emb).detach()
+        preds.append(pre)
+        labels.append(batched_label.detach().cpu())
 
-        pre = answering(graph_emb)
+    all_pred = torch.cat(preds, dim=0)
+    all_y = torch.cat(labels, dim=0)
+    mi_f1, ma_f1 = _f1_micro_macro(all_pred, all_y, num_class)
 
-        pre = pre.detach()
-        y = batched_label
-
-        pre_cla = torch.argmax(pre, dim=1)
-        if(dataname=="IMDB" and classification_type!='GIG'):
-            pre_cla=torch.nn.functional.one_hot(pre_cla, num_classes=num_class)
-
-        mi_f1 = micro_f1(pre_cla, y)
-        ma_f1 = macro_f1(pre_cla, y)
-        #print("Batch {} Acc: {:.4f} | Macro-F1: {:.4f}".format(batch_id, acc.item(), ma_f1.item()))
-
-    mi_f1 = micro_f1.compute()
-    ma_f1 = macro_f1.compute()
-    #print("Final True Micro-F1: {:.4f} | Macro-F1: {:.4f}".format(mi_f1.item(), ma_f1.item()))
-    micro_f1.reset()
-    macro_f1.reset()
     PG = PG.to(device)
     if answering is not None:
         answering = answering.to(device)
     hgnn = hgnn.to(device)
-    return mi_f1.item(), ma_f1.item()
+    return mi_f1, ma_f1
 
-def valid_over_batches(valid_loader, PG, hgnn, answering, num_class, task_type, device,targetnode,dataname,lossfn,classification_type):
-    PG = PG.to("cpu")
+
+def valid_over_batches(valid_loader, PG, hgnn, answering, num_class, task_type, device, targetnode, dataname, lossfn, classification_type):
+    PG = PG.to('cpu')
     if answering is not None:
-        answering = answering.to("cpu")
-    hgnn = hgnn.to("cpu")
-    if task_type == "multi_class_classification":
-        micro_f1 = torchmetrics.classification.F1Score(task="multiclass", num_classes=num_class, average="micro")
-        macro_f1 = torchmetrics.classification.F1Score(task="multiclass", num_classes=num_class, average="macro")
-    elif task_type == "binary_classification":
-        micro_f1 = torchmetrics.classification.F1Score(task="multiclass", num_classes=num_class, average="micro")
-        macro_f1 = torchmetrics.classification.F1Score(task="multiclass", num_classes=num_class, average="macro")
-    else:
+        answering = answering.to('cpu')
+    hgnn = hgnn.to('cpu')
+    if task_type not in {'multi_class_classification', 'binary_classification'}:
         raise NotImplementedError
 
-    total_loss=0
-    for batch_id, test_batch in enumerate(valid_loader):
-        if(classification_type=='NIG'):
-            batched_graph,_,batched_label=test_batch
-        else:
-            batched_graph,batched_label = test_batch
+    total_loss = 0.0
+    total_batches = 0
+    preds = []
+    labels = []
 
+    for batch_id, test_batch in enumerate(valid_loader):
+        if classification_type == 'NIG':
+            batched_graph, _, batched_label = test_batch
+        else:
+            batched_graph, batched_label = test_batch
 
         prompted_graph = PG(batched_graph)
-
 
         x_dict = prompted_graph.ndata['x']
         edge_index_dict = {}
@@ -275,40 +300,30 @@ def valid_over_batches(valid_loader, PG, hgnn, answering, num_class, task_type, 
             edge_index = torch.cat((src, tar), dim=0)
             edge_index_dict[etype] = edge_index
 
-        if (hgnn.hgnn_type == 'HGT'):
+        if hgnn.hgnn_type == 'HGT':
             node_emb = hgnn(targetnode, x_dict, edge_index_dict)
-        elif (hgnn.hgnn_type == 'SHGN'):
+        elif hgnn.hgnn_type == 'SHGN':
             node_emb = hgnn(targetnode, prompted_graph, x_dict)
-        elif (hgnn.hgnn_type == 'GCN'):
+        elif hgnn.hgnn_type == 'GCN':
             node_emb = hgnn(prompted_graph, x_dict)
-        elif (hgnn.hgnn_type == 'GAT'):
+        elif hgnn.hgnn_type == 'GAT':
             node_emb = hgnn(prompted_graph, x_dict, False)
-
+        else:
+            raise ValueError(f"Unsupported hgnn_type: {hgnn.hgnn_type}")
 
         graph_emb = graph_pool('mean', node_emb, prompted_graph)
+        pre = answering(graph_emb).detach()
+        y = batched_label.detach().cpu()
 
+        valid_loss = lossfn(pre, y)
+        total_loss += float(valid_loss.item())
+        total_batches += 1
+        preds.append(pre)
+        labels.append(y)
 
-        pre = answering(graph_emb)
-        pre = pre.detach()
-        y = batched_label
+    _ = _f1_micro_macro(torch.cat(preds, dim=0), torch.cat(labels, dim=0), num_class)
+    mean_loss = total_loss / max(total_batches, 1)
 
-        valid_loss=lossfn(pre,y)
-        total_loss+=valid_loss.item()
-
-        pre_cla = torch.argmax(pre, dim=1)
-        if(dataname=="IMDB" and classification_type!='GIG'):
-            pre_cla=torch.nn.functional.one_hot(pre_cla, num_classes=num_class)
-
-        mi_f1 = micro_f1(pre_cla, y)
-        ma_f1 = macro_f1(pre_cla, y)
-        #print("Batch {} Acc: {:.4f} | Macro-F1: {:.4f}".format(batch_id, acc.item(), ma_f1.item()))
-
-    mi_f1 = micro_f1.compute()
-    ma_f1 = macro_f1.compute()
-    mean_loss=total_loss/len(valid_loader)
-    #print("valid loss: {:.8f} | Micro-F1: {:.4f} | Macro-F1: {:.4f}".format(mean_loss,mi_f1.item(), ma_f1.item()))
-    micro_f1.reset()
-    macro_f1.reset()
     PG = PG.to(device)
     if answering is not None:
         answering = answering.to(device)
