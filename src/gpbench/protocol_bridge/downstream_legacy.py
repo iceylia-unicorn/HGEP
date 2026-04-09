@@ -6,6 +6,7 @@ import dgl
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
+from torch.nn.parameter import UninitializedParameter
 
 from protocols.hgmp.data_legacy import multi_class_NIG
 from protocols.hgmp.prompt_legacy import GAT, GCL_GCN, HGNN, HeteroPrompt
@@ -32,9 +33,7 @@ class LegacyFewShotEmbeddings:
 
 def _first_graph_from_sample(sample, classification_type: str):
     if classification_type == "NIG":
-        # non-IMDB NIG usually stores (graph, extra, label)
         return sample[0]
-    # EIG / GIG fallback
     return sample[0]
 
 
@@ -179,6 +178,40 @@ def _build_legacy_hgnn(args):
     raise ValueError(f"Unsupported method: {args.method}")
 
 
+def _set_requires_grad(module: nn.Module, flag: bool):
+    for p in module.parameters():
+        if isinstance(p, UninitializedParameter):
+            continue
+        p.requires_grad_(flag)
+
+
+def _remap_plain_hgmp_state_for_typepair(args, state):
+    if args.method != "typepair":
+        return state, 0
+    if not isinstance(state, dict):
+        return state, 0
+    if any(k.startswith("GraphConv.") for k in state.keys()):
+        return state, 0
+
+    remap_prefixes = ()
+    if args.hgnn_type == "GCN":
+        remap_prefixes = ("fc_list.", "layers.")
+    elif args.hgnn_type == "HGT":
+        remap_prefixes = ("lin_dict.", "convs.", "lin.")
+    else:
+        return state, 0
+
+    remapped = {}
+    remap_count = 0
+    for key, value in state.items():
+        if key.startswith(remap_prefixes):
+            remapped[f"GraphConv.{key}"] = value
+            remap_count += 1
+        else:
+            remapped[key] = value
+    return remapped, remap_count
+
+
 def _log_state_dict_load(args, missing, unexpected):
     if args.method == "typepair":
         expected_missing_prefixes = ("relation_prompt.", "GraphConv.relation_prompt.")
@@ -212,6 +245,12 @@ def build_legacy_hgnn(
     if isinstance(state, dict) and "model_state" in state:
         state = state["model_state"]
 
+    state, remap_count = _remap_plain_hgmp_state_for_typepair(args, state)
+    if remap_count > 0:
+        print(
+            f"[load_state_dict] remapped {remap_count} plain HGMP keys to TypePair wrapper keys."
+        )
+
     missing, unexpected = hgnn.load_state_dict(state, strict=False)
     _log_state_dict_load(args, missing, unexpected)
 
@@ -219,14 +258,12 @@ def build_legacy_hgnn(
 
     if freeze:
         hgnn.eval()
-        for p in hgnn.parameters():
-            p.requires_grad_(False)
+        _set_requires_grad(hgnn, False)
 
     if train_relation_prompt_only:
         if args.method != "typepair":
             raise ValueError("train_relation_prompt_only only supports method='typepair'")
-        for p in hgnn.relation_prompt.parameters():
-            p.requires_grad_(True)
+        _set_requires_grad(hgnn.relation_prompt, True)
         hgnn.eval()
         hgnn.relation_prompt.train()
 
@@ -514,11 +551,6 @@ def train_typepair_prompt_probe(
     }
 
 
-def _set_requires_grad(module: nn.Module, flag: bool):
-    for p in module.parameters():
-        p.requires_grad_(flag)
-
-
 def _evaluate_hgmp_prompt_probe(
     graph_list,
     hgnn,
@@ -663,7 +695,6 @@ def train_hgmp_heteroprompt_probe(
     bad_epochs = 0
 
     for epoch in range(1, epochs + 1):
-        # phase 1: tune head, freeze prompt
         _set_requires_grad(PG, False)
         _set_requires_grad(head, True)
         PG.eval()
@@ -680,7 +711,6 @@ def train_hgmp_heteroprompt_probe(
             device=args.device,
         )
 
-        # phase 2: tune prompt, freeze head
         _set_requires_grad(PG, True)
         _set_requires_grad(head, False)
         PG.train()
@@ -774,6 +804,7 @@ def train_hgmp_heteroprompt_probe(
         "best_epoch": best_epoch,
         "early_stop_metric": early_stop_metric,
     }
+
 
 def train_mlp_probe(
     x_train: torch.Tensor,
