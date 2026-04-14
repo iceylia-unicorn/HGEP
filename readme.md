@@ -172,3 +172,14 @@ python scripts/protocol_benchmark_v2.py \
   --hgmp_ckpt artifacts/checkpoints/hgmp/pretrain/ACM.GraphCL.GCN.hid128.np100.pth \
   --typepair_ckpt artifacts/checkpoints/hgmp/pretrain/ACM.GraphCL.GCN.hid128.np100.pth \
   --hgprompt_ckpt artifacts/checkpoints/hgprompt/pretrain/ACM.gcn.ft2.hop1.seed0.best.pt
+
+python scripts/protocol_benchmark_v2.py \
+  --dataset ACM \
+  --shot 10 \
+  --methods typepair \
+  --seeds 0 1 2 3 4 \
+  --hgnn_type GCN \
+  --repeats 2 \
+  --hgmp_ckpt artifacts/checkpoints/hgmp/pretrain/ACM.GraphCL.GCN.hid128.np100.pth \
+  --typepair_ckpt artifacts/checkpoints/hgmp/pretrain/ACM.GraphCL.GCN.hid128.np100.pth \
+  --hgprompt_ckpt artifacts/checkpoints/hgprompt/pretrain/ACM.gcn.ft2.hop1.seed0.best.pt
