@@ -292,7 +292,7 @@ class PreTrain(torch.nn.Module):
 
         return train_loss_accum / total_step
 
-    def train(self, graph_batch_size,node_batch_size,dataname, graph_list, lr=0.01,decay=0.0001, epochs=100,aug1='dropN',aug2='permE',seed=None,aug_ration=None):
+    def train(self, graph_batch_size,node_batch_size,dataname, graph_list, lr=0.01,decay=0.0001, epochs=100,aug1='dropN',aug2='permE',seed=None,aug_ration=None, epoch_callback=None):
 
         loader1, loader2 = self.get_loader(graph_list, graph_batch_size, aug1=aug1, aug2=aug2,aug_ratio=aug_ration,
                                            pretext=self.pretext)
@@ -311,7 +311,22 @@ class PreTrain(torch.nn.Module):
             else:
                 raise ValueError("pretext should be GraphCL, SimGRACE")
 
+            is_best = train_loss_min > train_loss
             early_stopping(train_loss,self.model.hgnn)
+            if epoch_callback is not None:
+                epoch_callback(
+                    {
+                        "epoch": epoch,
+                        "train_loss": float(train_loss),
+                        "best_train_loss": float(min(train_loss_min, train_loss)),
+                        "is_best": bool(is_best),
+                        "early_stop": bool(early_stopping.early_stop),
+                        "early_stop_counter": int(early_stopping.counter),
+                        "lr": float(optimizer.param_groups[0]["lr"]),
+                        "pretext": self.pretext,
+                        "hgnn_type": self.hgnn_type,
+                    }
+                )
             if early_stopping.early_stop:
                 #print('Early stopping!')
                 break

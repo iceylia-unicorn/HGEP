@@ -1,0 +1,16 @@
+wandb_version: 1
+
+aug_ration:
+  value: 0.3
+dropout:
+  value: 0.3
+hidden_dim:
+  value: 512
+num_heads:
+  value: 8
+num_samples:
+  value: 300
+pre_lr:
+  value: 0.003923240998252273
+weight_decay:
+  value: 0.0002604852327553831

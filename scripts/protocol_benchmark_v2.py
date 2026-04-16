@@ -31,6 +31,16 @@ from gpbench.protocol_bridge.downstream_legacy import (
     train_typepair_prompt_probe,
 )
 from gpbench.downstream.fewshot import load_split_file
+from gpbench.utils.wandb_utils import (
+    finish_wandb_run,
+    init_wandb_run,
+    log_nested_summary,
+    log_metrics,
+    log_run_record,
+    log_table,
+    maybe_configure_wandb_env,
+    upload_dir_artifact,
+)
 from protocols.hgmp.utils_legacy import create_matrix, seed_everything
 from protocols.hgprompt.runner import _run_once as hgprompt_run_once
 from protocols.hgprompt.adapter import load_hgprompt_downstream_bundle
@@ -318,7 +328,7 @@ def _make_legacy_args(cli_args, method: str, ckpt_path: str, split_seed: int, re
     )
 
 
-def run_legacy_method_once(cli_args, method: str, ckpt_path: str, split_seed: int, repeat_id: int) -> RunRecord:
+def run_legacy_method_once(cli_args, method: str, ckpt_path: str, split_seed: int, repeat_id: int, epoch_callback=None) -> RunRecord:
     args = _make_legacy_args(cli_args, method, ckpt_path, split_seed, repeat_id)
     _set_global_seed(args.seed)
 
@@ -351,6 +361,7 @@ def run_legacy_method_once(cli_args, method: str, ckpt_path: str, split_seed: in
                 patience=args.patience,
                 early_stop_metric=args.early_stop_metric,
                 save_best_path=best_path,
+                epoch_callback=epoch_callback,
             )
         elif method == "hgmp_prompt":
             res = train_hgmp_heteroprompt_probe(
@@ -364,6 +375,7 @@ def run_legacy_method_once(cli_args, method: str, ckpt_path: str, split_seed: in
                 patience=args.patience,
                 early_stop_metric=args.early_stop_metric,
                 save_best_path=best_path,
+                epoch_callback=epoch_callback,
             )
         else:
             emb = build_legacy_fewshot_embeddings(args=args, batch_size=args.embed_batch_size)
@@ -385,6 +397,7 @@ def run_legacy_method_once(cli_args, method: str, ckpt_path: str, split_seed: in
                 patience=args.patience,
                 early_stop_metric=args.early_stop_metric,
                 save_best_path=best_path,
+                epoch_callback=epoch_callback,
             )
     finally:
         legacy_bridge._load_legacy_fewshot_splits = orig_loader
@@ -450,7 +463,7 @@ def _make_hgprompt_args(cli_args, ckpt_path: str, split_seed: int, repeat_id: in
     )
 
 
-def run_hgprompt_once(cli_args, ckpt_path: str, split_seed: int, repeat_id: int) -> RunRecord:
+def run_hgprompt_once(cli_args, ckpt_path: str, split_seed: int, repeat_id: int, epoch_callback=None) -> RunRecord:
     run_seed = _make_run_seed(split_seed, repeat_id, cli_args.run_seed_base)
     _set_global_seed(run_seed)
 
@@ -473,7 +486,7 @@ def run_hgprompt_once(cli_args, ckpt_path: str, split_seed: int, repeat_id: int)
         shot=cli_args.shot,
         seed=split_seed,
     )
-    res = hgprompt_run_once(args, bundle, repeat_id)
+    res = hgprompt_run_once(args, bundle, repeat_id, epoch_callback=epoch_callback)
     return RunRecord(
         method="hgprompt",
         split_seed=split_seed,
@@ -545,6 +558,45 @@ def _write_csv(path: Path, rows: list[dict]):
         writer = csv.DictWriter(f, fieldnames=list(rows[0].keys()))
         writer.writeheader()
         writer.writerows(rows)
+
+
+def _json_ready(value):
+    if isinstance(value, Path):
+        return str(value)
+    if isinstance(value, dict):
+        return {key: _json_ready(child) for key, child in value.items()}
+    if isinstance(value, (list, tuple)):
+        return [_json_ready(child) for child in value]
+    return value
+
+
+def _build_run_config(args, ckpt_by_method: dict[str, str]):
+    config = vars(args).copy()
+    config.pop("wandb_key", None)
+    config["resolved_ckpt_by_method"] = ckpt_by_method
+    return _json_ready(config)
+
+
+def _make_downstream_epoch_logger(wandb_run, args, method: str, split_seed: int, repeat_id: int, run_seed: int):
+    if wandb_run is None:
+        return None
+
+    def _callback(metrics: dict):
+        payload = {f"downstream/{key}": value for key, value in metrics.items()}
+        payload.update(
+            {
+                "downstream/method": method,
+                "downstream/dataset": args.dataset,
+                "downstream/shot": args.shot,
+                "downstream/split_seed": split_seed,
+                "downstream/repeat_id": repeat_id,
+                "downstream/run_seed": run_seed,
+                "downstream/pretrain_seed": args.pretrain_seed,
+            }
+        )
+        log_metrics(wandb_run, payload)
+
+    return _callback
 
 
 def build_parser():
@@ -624,84 +676,134 @@ def build_parser():
     ap.add_argument("--hgprompt_freebase_type", type=int, default=0)
     ap.add_argument("--hgprompt_shgn_hidden_dim", type=int, default=3)
 
+    ap.add_argument("--use_wandb", action="store_true")
+    ap.add_argument("--wandb_project", type=str, default="HGEP")
+    ap.add_argument("--wandb_entity", type=str, default=None)
+    ap.add_argument("--wandb_name", type=str, default=None)
+    ap.add_argument("--wandb_group", type=str, default=None)
+    ap.add_argument("--wandb_job_type", type=str, default="protocol_benchmark_v2")
+    ap.add_argument("--wandb_tags", nargs="*", default=[])
+    ap.add_argument("--wandb_notes", type=str, default=None)
+    ap.add_argument("--wandb_mode", type=str, default="online", choices=["online", "offline"])
+    ap.add_argument("--wandb_dir", type=Path, default=ROOT / "artifacts" / "wandb")
+    ap.add_argument("--wandb_key", type=str, default=None)
+    ap.add_argument("--wandb_key_file", type=Path, default=ROOT / ".codex")
+
     return ap
 
 
 def main():
     args = build_parser().parse_args()
+    wandb_run = None
+    try:
+        records: list[RunRecord] = []
+        ckpt_by_method = {method: _resolve_ckpt(args, method) for method in args.methods}
+        config = _build_run_config(args, ckpt_by_method)
 
-    records: list[RunRecord] = []
-    ckpt_by_method = {method: _resolve_ckpt(args, method) for method in args.methods}
+        if args.use_wandb:
+            maybe_configure_wandb_env(api_key=args.wandb_key, env_file=args.wandb_key_file)
+            wandb_run = init_wandb_run(
+                enabled=True,
+                project=args.wandb_project,
+                entity=args.wandb_entity,
+                name=args.wandb_name,
+                group=args.wandb_group or f"{args.dataset}-{args.shot}shot",
+                job_type=args.wandb_job_type,
+                tags=args.wandb_tags or [args.dataset, f"{args.shot}-shot", "protocol_benchmark_v2"],
+                notes=args.wandb_notes,
+                mode=args.wandb_mode,
+                dir_path=args.wandb_dir,
+                config=config,
+            )
 
-    for method in args.methods:
-        ckpt_path = ckpt_by_method[method]
-        print(f"================ method={method} | ckpt={ckpt_path} ================")
-        for split_seed in args.seeds:
-            for repeat_id in range(args.repeats):
-                if method == "hgprompt":
-                    record = run_hgprompt_once(args, ckpt_path, split_seed, repeat_id)
-                elif method == "typepair":
-                    record = run_legacy_method_once(args, "typepair", ckpt_path, split_seed, repeat_id)
-                elif method == "hgmp":
-                    record = run_legacy_method_once(args, "hgmp", ckpt_path, split_seed, repeat_id)
-                elif method == "hgmp_prompt":
-                    record = run_legacy_method_once(args, "hgmp_prompt", ckpt_path, split_seed, repeat_id)
-                else:
-                    raise ValueError(f"Unsupported method: {method}")
+        for method in args.methods:
+            ckpt_path = ckpt_by_method[method]
+            print(f"================ method={method} | ckpt={ckpt_path} ================")
+            for split_seed in args.seeds:
+                for repeat_id in range(args.repeats):
+                    run_seed = _make_run_seed(split_seed, repeat_id, args.run_seed_base)
+                    epoch_logger = _make_downstream_epoch_logger(
+                        wandb_run,
+                        args,
+                        method=method,
+                        split_seed=split_seed,
+                        repeat_id=repeat_id,
+                        run_seed=run_seed,
+                    )
+                    if method == "hgprompt":
+                        record = run_hgprompt_once(args, ckpt_path, split_seed, repeat_id, epoch_callback=epoch_logger)
+                    elif method == "typepair":
+                        record = run_legacy_method_once(args, "typepair", ckpt_path, split_seed, repeat_id, epoch_callback=epoch_logger)
+                    elif method == "hgmp":
+                        record = run_legacy_method_once(args, "hgmp", ckpt_path, split_seed, repeat_id, epoch_callback=epoch_logger)
+                    elif method == "hgmp_prompt":
+                        record = run_legacy_method_once(args, "hgmp_prompt", ckpt_path, split_seed, repeat_id, epoch_callback=epoch_logger)
+                    else:
+                        raise ValueError(f"Unsupported method: {method}")
 
-                records.append(record)
-                print(
-                    f"[RUN] method={record.method} | split_seed={record.split_seed} | repeat={record.repeat_id} | "
-                    f"run_seed={record.run_seed} | ckpt={record.ckpt_path} | "
-                    f"micro={record.test_micro:.4f} | macro={record.test_macro:.4f} | best_epoch={record.best_epoch}"
-                )
+                    records.append(record)
+                    print(
+                        f"[RUN] method={record.method} | split_seed={record.split_seed} | repeat={record.repeat_id} | "
+                        f"run_seed={record.run_seed} | ckpt={record.ckpt_path} | "
+                        f"micro={record.test_micro:.4f} | macro={record.test_macro:.4f} | best_epoch={record.best_epoch}"
+                    )
+                    log_run_record(
+                        wandb_run,
+                        record,
+                        extra={
+                            "per_run/dataset": args.dataset,
+                            "per_run/shot": args.shot,
+                            "per_run/pretrain_seed": args.pretrain_seed,
+                        },
+                    )
 
-    out_dir = _ensure_dir(args.save_dir / args.dataset / f"{args.shot}-shot")
-    per_run_rows = [asdict(r) for r in records]
-    _write_csv(out_dir / "per_run.csv", per_run_rows)
+        out_dir = _ensure_dir(args.save_dir / args.dataset / f"{args.shot}-shot")
+        per_run_rows = [asdict(r) for r in records]
+        _write_csv(out_dir / "per_run.csv", per_run_rows)
 
-    seed_rows = _aggregate_by_seed(records)
-    _write_csv(out_dir / "per_seed_summary.csv", [asdict(r) for r in seed_rows])
+        seed_rows = _aggregate_by_seed(records)
+        seed_row_dicts = [asdict(r) for r in seed_rows]
+        _write_csv(out_dir / "per_seed_summary.csv", seed_row_dicts)
 
-    pooled_summary = {}
-    seedmean_summary = {}
-    for method in sorted(set(r.method for r in records)):
-        pooled_summary[method] = _summarize_runs([r for r in records if r.method == method])
-        seedmean_summary[method] = _summarize_seed_means(seed_rows, method)
+        pooled_summary = {}
+        seedmean_summary = {}
+        for method in sorted(set(r.method for r in records)):
+            pooled_summary[method] = _summarize_runs([r for r in records if r.method == method])
+            seedmean_summary[method] = _summarize_seed_means(seed_rows, method)
 
-    config = {
-        "dataset": args.dataset,
-        "shot": args.shot,
-        "seeds": args.seeds,
-        "repeats": args.repeats,
-        "pretrain_seed": args.pretrain_seed,
-        "run_seed_base": args.run_seed_base,
-        "methods": args.methods,
-        "resolved_ckpt_by_method": ckpt_by_method,
-        "hgmp_ckpt": args.hgmp_ckpt,
-        "typepair_ckpt": args.typepair_ckpt,
-        "hgprompt_ckpt": args.hgprompt_ckpt,
-        "hgmp_ckpt_pattern": args.hgmp_ckpt_pattern,
-        "typepair_ckpt_pattern": args.typepair_ckpt_pattern,
-        "hgprompt_ckpt_pattern": args.hgprompt_ckpt_pattern,
-    }
-    with open(out_dir / "run_config.json", "w", encoding="utf-8") as f:
-        json.dump(config, f, indent=2, ensure_ascii=False)
+        with open(out_dir / "run_config.json", "w", encoding="utf-8") as f:
+            json.dump(config, f, indent=2, ensure_ascii=False)
 
-    with open(out_dir / "overall_summary.json", "w", encoding="utf-8") as f:
-        json.dump(
-            {
-                "config": config,
-                "pooled_runs": pooled_summary,
-                "seed_mean_then_std": seedmean_summary,
-            },
-            f,
-            indent=2,
-            ensure_ascii=False,
+        with open(out_dir / "overall_summary.json", "w", encoding="utf-8") as f:
+            json.dump(
+                {
+                    "config": config,
+                    "pooled_runs": pooled_summary,
+                    "seed_mean_then_std": seedmean_summary,
+                },
+                f,
+                indent=2,
+                ensure_ascii=False,
+            )
+
+        log_table(wandb_run, "per_run_table", per_run_rows)
+        log_table(wandb_run, "per_seed_summary_table", seed_row_dicts)
+        log_nested_summary(wandb_run, "pooled_runs", pooled_summary)
+        log_nested_summary(wandb_run, "seed_mean_then_std", seedmean_summary)
+        upload_dir_artifact(
+            wandb_run,
+            out_dir,
+            name=f"{args.dataset}-{args.shot}shot-protocol-benchmark-v2-{args.pretrain_seed}",
+            artifact_type="benchmark-results",
         )
 
-    print("####################################################")
-    print(json.dumps({"pooled_runs": pooled_summary, "seed_mean_then_std": seedmean_summary}, indent=2, ensure_ascii=False))
+        print("####################################################")
+        print(json.dumps({"pooled_runs": pooled_summary, "seed_mean_then_std": seedmean_summary}, indent=2, ensure_ascii=False))
+    except Exception:
+        finish_wandb_run(wandb_run, exit_code=1)
+        raise
+    else:
+        finish_wandb_run(wandb_run, exit_code=0)
 
 
 if __name__ == "__main__":

@@ -1,0 +1,58 @@
+program: scripts/protocol_benchmark_v2.py
+method: bayes
+metric:
+  name: per_run/test_macro
+  goal: maximize
+command:
+  - ${env}
+  - python
+  - ${program}
+  - --dataset
+  - ACM
+  - --shot
+  - "10"
+  - --methods
+  - typepair
+  - --seeds
+  - "0"
+  - --repeats
+  - "1"
+  - --device
+  - cuda:0
+  - --hgnn_type
+  - GCN
+  - --hidden_dim
+  - "512"
+  - --num_heads
+  - "8"
+  - --num_samples
+  - "500"
+  - --hgmp_ckpt
+  - artifacts/checkpoints/hgmp/pretrain/ACM.GraphCL.GCN.hid512.np500.pth
+  - --typepair_ckpt
+  - artifacts/checkpoints/hgmp/pretrain/ACM.GraphCL.GCN.hid512.np500.pth
+  - --use_wandb
+  - ${args}
+parameters:
+  lr:
+    distribution: log_uniform_values
+    min: 0.0005
+    max: 0.02
+  prompt_lr:
+    distribution: log_uniform_values
+    min: 0.0005
+    max: 0.05
+  weight_decay:
+    distribution: log_uniform_values
+    min: 0.000001
+    max: 0.001
+  head_hidden:
+    values: [64, 128, 256]
+  head_dropout:
+    values: [0.1, 0.3, 0.5]
+  relation_prompt_alpha:
+    values: [0.1, 0.3, 0.5, 0.8]
+  relation_prompt_dropout:
+    values: [0.0, 0.1, 0.3]
+  relation_prompt_mode:
+    values: [mul, add]

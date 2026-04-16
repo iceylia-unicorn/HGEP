@@ -280,7 +280,7 @@ def two_hop_subgraph_nodelist(g,subgraphs_dir,max_neigbour_num=10):
     return subgraph_list
 
 
-def run_model_DBLP(args):
+def run_model_DBLP(args, epoch_callback=None):
     feats_type = args.feats_type
     features_list, adjM, dl = load_pretrain_data(args.dataset)
     if args.device==1:
@@ -391,7 +391,7 @@ def run_model_DBLP(args):
 
     train_time=0
     early_stop=False
-    for _ in range(args.repeat):
+    for repeat_id in range(args.repeat):
         num_classes = dl.labels_train['num_classes']
         heads = [args.num_heads] * args.num_layers + [1]
         if args.model_type == 'gat':
@@ -584,7 +584,26 @@ def run_model_DBLP(args):
 
             print('Epoch {:05d} | Train_Loss: {:.4f} | Time: {:.4f}'.format(epoch, total_loss.item(), t_end-t_start))
 
+            loss_value = float(total_loss.detach().cpu().item())
+            prev_best = early_stopping.val_loss_min
+            prev_best_value = float(prev_best.detach().cpu().item()) if isinstance(prev_best, torch.Tensor) else float(prev_best)
             early_stopping(total_loss, net)
+            if epoch_callback is not None:
+                best_value = min(prev_best_value, loss_value)
+                epoch_callback(
+                    {
+                        "epoch": int(epoch + 1),
+                        "repeat_id": int(repeat_id),
+                        "train_loss": loss_value,
+                        "best_train_loss": float(best_value),
+                        "is_best": bool(loss_value <= prev_best_value),
+                        "early_stop": bool(early_stopping.early_stop),
+                        "early_stop_counter": int(early_stopping.counter),
+                        "epoch_time_sec": float(t_end - t_start),
+                        "lr": float(optimizer.param_groups[0]["lr"]),
+                        "model_type": args.model_type,
+                    }
+                )
             if early_stopping.early_stop:
                 print('Early stopping!')
                 train_time = train_time / epoch

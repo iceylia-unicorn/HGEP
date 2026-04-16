@@ -3,8 +3,10 @@ import sys
 from typing import Union
 
 ROOT = Path(__file__).resolve().parents[1]
-if str(ROOT) not in sys.path:
-    sys.path.insert(0, str(ROOT))
+SRC = ROOT / "src"
+for p in (ROOT, SRC):
+    if str(p) not in sys.path:
+        sys.path.insert(0, str(p))
 
 import argparse
 import json
@@ -14,6 +16,13 @@ import shutil
 import numpy as np
 import torch
 
+from gpbench.utils.wandb_utils import (
+    finish_wandb_run,
+    init_wandb_run,
+    log_metrics,
+    maybe_configure_wandb_env,
+    upload_file_artifact,
+)
 from protocols.hgmp.run_legacy import pretrain
 
 
@@ -22,6 +31,49 @@ DATASET_NUM_CLASS = {
     "DBLP": 4,
     "IMDB": 5,
     "Freebase": 7,
+}
+
+LEGACY_PRETRAIN_DEFAULTS = {
+    "feats_type": 0,
+    "hidden_dim": 512,
+    "num_heads": 8,
+    "num_layers": 2,
+    "dropout": 0.5,
+    "pretext": "GraphCL",
+    "hgnn_type": "GCN",
+    "num_samples": 100,
+    "pre_lr": 1e-3,
+    "aug_ration": 1e-3,
+    "prompt_lr": 1e-3,
+    "head_lr": 1e-3,
+    "weight_decay": 5e-4,
+    "patience": 7,
+    "repeat": 1,
+    "prompt_epoch": 300,
+    "schedule_step": 300,
+    "use_norm": False,
+    "edge_feats": 64,
+}
+
+LEGACY_DATASET_PRETRAIN_DEFAULTS = {
+    "ACM": {
+        "hidden_dim": 512,
+        "num_samples": 500,
+        "prompt_lr": 5e-2,
+        "head_lr": 5e-4,
+        "weight_decay": 5e-5,
+        "pre_lr": 1e-4,
+        "aug_ration": 0.1,
+    },
+    "IMDB": {
+        "hidden_dim": 256,
+        "num_samples": 200,
+        "prompt_lr": 5e-2,
+        "head_lr": 5e-2,
+        "weight_decay": 1e-4,
+        "pre_lr": 1e-3,
+        "aug_ration": 0.3,
+    },
 }
 
 
@@ -50,28 +102,31 @@ def normalize_device(raw_device: Union[str, int]) -> torch.device:
         raise ValueError(f"Unsupported device spec: {raw_device}")
 
 
-def apply_benchmark_defaults(args):
-    args.feats_type = 0
-    args.hidden_dim = 128
-    args.num_heads = 2
-    args.num_layers = 2
-    args.dropout = 0.5
-    args.pretext = "GraphCL"
-    args.hgnn_type = "GCN"
-    args.num_samples = 100
-    args.pre_lr = 1e-3
-    args.aug_ration = 0.2
-    args.prompt_lr = 1e-3
-    args.head_lr = 1e-3
-    args.weight_decay = 5e-4
-    args.patience = 7
-    args.repeat = 1
-    args.prompt_epoch = 1
-    args.schedule_step = 300
-    args.use_norm = False
-    args.edge_feats = args.hidden_dim
+def collect_provided_options(argv: list[str]) -> set[str]:
+    provided = set()
+    for token in argv:
+        if not token.startswith("--"):
+            continue
+        option = token[2:].split("=", 1)[0].replace("-", "_")
+        provided.add(option)
+    return provided
+
+
+def _set_default_if_missing(args, provided_options: set[str], name: str, value):
+    if name not in provided_options:
+        setattr(args, name, value)
+
+
+def apply_benchmark_defaults(args, provided_options: set[str] | None = None):
+    provided_options = provided_options or set()
+    for key, value in LEGACY_PRETRAIN_DEFAULTS.items():
+        _set_default_if_missing(args, provided_options, key, value)
+
+    for key, value in LEGACY_DATASET_PRETRAIN_DEFAULTS.get(args.dataset, {}).items():
+        _set_default_if_missing(args, provided_options, key, value)
+
     if args.dataset in DATASET_NUM_CLASS:
-        args.num_class = DATASET_NUM_CLASS[args.dataset]
+        _set_default_if_missing(args, provided_options, "num_class", DATASET_NUM_CLASS[args.dataset])
     return args
 
 
@@ -90,6 +145,45 @@ def build_alias_path(args) -> Path:
         f"np{args.num_samples}.seed{args.seed}.pth"
     )
     return save_dir / filename
+
+
+def _json_ready(value):
+    if isinstance(value, Path):
+        return str(value)
+    if isinstance(value, torch.device):
+        return str(value)
+    if isinstance(value, dict):
+        return {key: _json_ready(child) for key, child in value.items()}
+    if isinstance(value, (list, tuple)):
+        return [_json_ready(child) for child in value]
+    return value
+
+
+def _build_run_config(args, upstream_ckpt: Path, alias_ckpt: Path):
+    config = vars(args).copy()
+    config.pop("wandb_key", None)
+    config["upstream_ckpt"] = str(upstream_ckpt)
+    config["alias_ckpt"] = str(alias_ckpt)
+    return _json_ready(config)
+
+
+def _make_pretrain_epoch_logger(wandb_run, args):
+    if wandb_run is None:
+        return None
+
+    def _callback(metrics: dict):
+        payload = {f"pretrain/{key}": value for key, value in metrics.items()}
+        payload.update(
+            {
+                "pretrain/dataset": args.dataset,
+                "pretrain/seed": args.seed,
+                "pretrain/hidden_dim": args.hidden_dim,
+                "pretrain/num_samples": args.num_samples,
+            }
+        )
+        log_metrics(wandb_run, payload)
+
+    return _callback
 
 
 def main():
@@ -134,68 +228,117 @@ def main():
     ap.add_argument("--ckpt_alias", type=str, default=None)
     ap.add_argument("--print_ckpt_only", action="store_true")
 
+    ap.add_argument("--use_wandb", action="store_true")
+    ap.add_argument("--wandb_project", type=str, default="HGEP")
+    ap.add_argument("--wandb_entity", type=str, default=None)
+    ap.add_argument("--wandb_name", type=str, default=None)
+    ap.add_argument("--wandb_group", type=str, default=None)
+    ap.add_argument("--wandb_job_type", type=str, default="hgmp_pretrain")
+    ap.add_argument("--wandb_tags", nargs="*", default=[])
+    ap.add_argument("--wandb_notes", type=str, default=None)
+    ap.add_argument("--wandb_mode", type=str, default="online", choices=["online", "offline"])
+    ap.add_argument("--wandb_dir", type=Path, default=ROOT / "artifacts" / "wandb")
+    ap.add_argument("--wandb_key", type=str, default=None)
+    ap.add_argument("--wandb_key_file", type=Path, default=ROOT / ".codex")
+
+    provided_options = collect_provided_options(sys.argv[1:])
     args = ap.parse_args()
+    wandb_run = None
+    exit_code = 0
 
-    if args.benchmark_defaults:
-        args = apply_benchmark_defaults(args)
+    try:
+        if args.benchmark_defaults:
+            args = apply_benchmark_defaults(args, provided_options)
 
-    if args.num_class is None:
-        args.num_class = DATASET_NUM_CLASS.get(args.dataset, 3)
+        if args.num_class is None:
+            args.num_class = DATASET_NUM_CLASS.get(args.dataset, 3)
 
-    args.pre_epoch = args.epochs
-    args.edge_feats = args.hidden_dim if args.edge_feats is None else args.edge_feats
-    args.device = normalize_device(args.device)
+        args.pre_epoch = args.epochs
+        args.edge_feats = args.hidden_dim if args.edge_feats is None else args.edge_feats
+        args.device = normalize_device(args.device)
 
-    set_seed(args.seed)
+        set_seed(args.seed)
 
-    upstream_ckpt = resolve_upstream_ckpt_path(args)
-    alias_ckpt = build_alias_path(args)
+        upstream_ckpt = resolve_upstream_ckpt_path(args)
+        alias_ckpt = build_alias_path(args)
+        config = _build_run_config(args, upstream_ckpt, alias_ckpt)
 
-    print(
-        f"[INFO] HGMP pretrain | dataset={args.dataset} | device={args.device} | seed={args.seed} | "
-        f"pretext={args.pretext} | hgnn_type={args.hgnn_type} | hidden_dim={args.hidden_dim} | "
-        f"num_samples={args.num_samples}"
-    )
-    print(f"[INFO] upstream best ckpt path: {upstream_ckpt}")
-    print(f"[INFO] benchmark alias ckpt path: {alias_ckpt}")
+        if args.use_wandb:
+            maybe_configure_wandb_env(api_key=args.wandb_key, env_file=args.wandb_key_file)
+            wandb_run = init_wandb_run(
+                enabled=True,
+                project=args.wandb_project,
+                entity=args.wandb_entity,
+                name=args.wandb_name or f"hgmp-pretrain-{args.dataset}-{args.hgnn_type}-seed{args.seed}",
+                group=args.wandb_group or f"hgmp-pretrain-{args.dataset}",
+                job_type=args.wandb_job_type,
+                tags=args.wandb_tags or [args.dataset, "hgmp", "pretrain", args.hgnn_type],
+                notes=args.wandb_notes,
+                mode=args.wandb_mode,
+                dir_path=args.wandb_dir,
+                config=config,
+            )
 
-    if args.print_ckpt_only:
-        return
+        print(
+            f"[INFO] HGMP pretrain | dataset={args.dataset} | device={args.device} | seed={args.seed} | "
+            f"pretext={args.pretext} | hgnn_type={args.hgnn_type} | hidden_dim={args.hidden_dim} | "
+            f"num_samples={args.num_samples}"
+        )
+        print(f"[INFO] upstream best ckpt path: {upstream_ckpt}")
+        print(f"[INFO] benchmark alias ckpt path: {alias_ckpt}")
 
-    pretrain(args)
+        if args.print_ckpt_only:
+            return
 
-    if not upstream_ckpt.exists():
-        raise FileNotFoundError(f"Expected upstream checkpoint not found: {upstream_ckpt}")
+        pretrain(args, epoch_callback=_make_pretrain_epoch_logger(wandb_run, args))
 
-    alias_ckpt.parent.mkdir(parents=True, exist_ok=True)
-    if upstream_ckpt.resolve() != alias_ckpt.resolve():
-        shutil.copy2(upstream_ckpt, alias_ckpt)
+        if not upstream_ckpt.exists():
+            raise FileNotFoundError(f"Expected upstream checkpoint not found: {upstream_ckpt}")
 
-    meta = {
-        "dataset": args.dataset,
-        "device": str(args.device),
-        "seed": args.seed,
-        "epochs": args.epochs,
-        "feats_type": args.feats_type,
-        "hidden_dim": args.hidden_dim,
-        "num_heads": args.num_heads,
-        "num_layers": args.num_layers,
-        "dropout": args.dropout,
-        "pretext": args.pretext,
-        "hgnn_type": args.hgnn_type,
-        "num_class": args.num_class,
-        "num_samples": args.num_samples,
-        "pre_lr": args.pre_lr,
-        "aug_ration": args.aug_ration,
-        "upstream_ckpt": str(upstream_ckpt),
-        "alias_ckpt": str(alias_ckpt),
-    }
-    meta_path = alias_ckpt.with_suffix(alias_ckpt.suffix + ".json")
-    with open(meta_path, "w", encoding="utf-8") as f:
-        json.dump(meta, f, indent=2, ensure_ascii=False)
+        alias_ckpt.parent.mkdir(parents=True, exist_ok=True)
+        if upstream_ckpt.resolve() != alias_ckpt.resolve():
+            shutil.copy2(upstream_ckpt, alias_ckpt)
 
-    print(f"[DONE] benchmark-ready ckpt copied to: {alias_ckpt}")
-    print(f"[DONE] run metadata saved to: {meta_path}")
+        meta = {
+            "dataset": args.dataset,
+            "device": str(args.device),
+            "seed": args.seed,
+            "epochs": args.epochs,
+            "feats_type": args.feats_type,
+            "hidden_dim": args.hidden_dim,
+            "num_heads": args.num_heads,
+            "num_layers": args.num_layers,
+            "dropout": args.dropout,
+            "pretext": args.pretext,
+            "hgnn_type": args.hgnn_type,
+            "num_class": args.num_class,
+            "num_samples": args.num_samples,
+            "pre_lr": args.pre_lr,
+            "aug_ration": args.aug_ration,
+            "upstream_ckpt": str(upstream_ckpt),
+            "alias_ckpt": str(alias_ckpt),
+        }
+        meta_path = alias_ckpt.with_suffix(alias_ckpt.suffix + ".json")
+        with open(meta_path, "w", encoding="utf-8") as f:
+            json.dump(meta, f, indent=2, ensure_ascii=False)
+
+        log_metrics(
+            wandb_run,
+            {
+                "pretrain/upstream_ckpt_exists": upstream_ckpt.exists(),
+                "pretrain/alias_ckpt_exists": alias_ckpt.exists(),
+            },
+        )
+        upload_file_artifact(wandb_run, alias_ckpt, name=f"hgmp-{args.dataset}-{args.hgnn_type}-seed{args.seed}", artifact_type="checkpoint")
+        upload_file_artifact(wandb_run, meta_path, name=f"hgmp-{args.dataset}-{args.hgnn_type}-seed{args.seed}-metadata", artifact_type="metadata")
+
+        print(f"[DONE] benchmark-ready ckpt copied to: {alias_ckpt}")
+        print(f"[DONE] run metadata saved to: {meta_path}")
+    except Exception:
+        exit_code = 1
+        raise
+    finally:
+        finish_wandb_run(wandb_run, exit_code=exit_code)
 
 
 if __name__ == "__main__":

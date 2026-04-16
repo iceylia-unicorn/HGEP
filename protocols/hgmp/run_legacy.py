@@ -77,7 +77,7 @@ def model_create(input_dims,dataname, hgnn_type,pre_method, num_class,metadata,n
         raise ValueError("model_create function hasn't supported {} task".format(task_type))
 
 
-def pretrain(args):
+def pretrain(args, epoch_callback=None):
     # mkdir('./pre_trained_hgnn/')
 
     #print("load data...")
@@ -101,7 +101,7 @@ def pretrain(args):
     #print("pre-training...")
 
 
-    pt.train(dataname=args.dataset, graph_list=graph_list, graph_batch_size=10, lr=args.pre_lr, decay=0.0001, epochs=args.pre_epoch,aug1='maskN', aug2='permE',node_batch_size=batch_size,seed=args.seed,aug_ration=args.aug_ration)
+    pt.train(dataname=args.dataset, graph_list=graph_list, graph_batch_size=10, lr=args.pre_lr, decay=0.0001, epochs=args.pre_epoch,aug1='maskN', aug2='permE',node_batch_size=batch_size,seed=args.seed,aug_ration=args.aug_ration, epoch_callback=epoch_callback)
 
 def train_one_outer_epoch(targetnode, epoch, train_loader, opi, lossfn, hgnn, PG, answering, classification_type, args):
     for j in range(1, epoch + 1):

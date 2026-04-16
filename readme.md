@@ -38,14 +38,20 @@ python scripts/hgmp_pretrain.py \
   --device cuda:0 \
   --seed 0 \
   --epochs 200 \
-  --benchmark_defaults
+  --benchmark_defaults \
+  --use_wandb
+
+# wandb sweep 调 HGMP pretrain
+wandb sweep configs/wandb/hgmp_pretrain_sweep.yaml
+wandb agent <entity>/<project>/<sweep_id>
+
 
 python scripts/hgmp_run.py \
   --dataset ACM \
   --shot 10 \
   --seed 0 \
   --device cuda:0 \
-  --ckpt artifacts/checkpoints/hgmp/pretrain/ACM.GraphCL.GCN.hid128.np100.pth \
+  --ckpt artifacts/checkpoints/hgmp/pretrain/ACM.GraphCL.GCN.hid512.np500.pth \
   --benchmark_defaults
 
 # 新版
@@ -56,7 +62,7 @@ python scripts/protocol_pretrain.py \
   --dataset ACM \
   --device cuda \
   --epochs 200 \
-  --hgnn_type GCN
+  --hgnn_type GCN \
 ```
 ```bash
 python scripts/protocol_pretrain.py \
@@ -70,32 +76,32 @@ python scripts/protocol_pretrain.py \
 ```bash
 python scripts/protocol_fewshot_eval.py \
   --method hgmp \
-  --ckpt artifacts/checkpoints/hgmp/pretrain/ACM.GraphCL.GCN.hid128.np100.pth \
+  --ckpt artifacts/checkpoints/hgmp/pretrain/ACM.GraphCL.GCN.hid512.np500.pth \
   --dataset ACM \
   --device cpu \
   --shot 10 \
   --seed 0 \
   --num_class 3 \
   --classification_type NIG \
-  --hidden_dim 128 \
-  --num_heads 2 \
+  --hidden_dim 512 \
+  --num_heads 8 \
   --num_layers 2 \
   --hgnn_type GCN
 ```
 
 
-```bash
+```bash 
 python scripts/protocol_fewshot_eval.py \
   --method typepair \
-  --ckpt artifacts/checkpoints/hgmp/pretrain/ACM.GraphCL.GCN.hid128.np100.pth \
+  --ckpt artifacts/checkpoints/hgmp/pretrain/ACM.GraphCL.GCN.hid512.np500.pth \
   --dataset ACM \
   --device cuda \
   --shot 10 \
   --seed 0 \
   --num_class 3 \
   --classification_type NIG \
-  --hidden_dim 128 \
-  --num_heads 2 \
+  --hidden_dim 512 \
+  --num_heads 8 \
   --num_layers 2 \
   --hgnn_type GCN
 ```
@@ -104,15 +110,15 @@ python scripts/protocol_fewshot_eval.py \
 
 python scripts/protocol_fewshot_eval.py \
   --method hgmp_prompt \
-  --ckpt artifacts/checkpoints/hgmp/pretrain/ACM.GraphCL.GCN.hid128.np100.pth \
+  --ckpt artifacts/checkpoints/hgmp/pretrain/ACM.GraphCL.GCN.hid512.np500.pth \
   --dataset ACM \
   --device cuda \
   --shot 10 \
   --seed 0 \
   --num_class 3 \
   --classification_type NIG \
-  --hidden_dim 128 \
-  --num_heads 2 \
+  --hidden_dim 512 \
+  --num_heads 8 \
   --num_layers 2 \
   --hgnn_type GCN \
   --epochs 200 \
@@ -134,6 +140,8 @@ pip install torch_scatter torch_sparse torch_cluster torch_spline_conv pyg_lib -
 pip install torch_geometric
 
 pip install dgl==2.4.0 -f https://data.dgl.ai/wheels/torch-2.4/cu121/repo.html
+
+pip install scikit-learn
 
 # hgprompt 
 ## pretrain
@@ -168,18 +176,31 @@ python scripts/protocol_benchmark_v2.py \
   --methods hgmp typepair hgprompt \
   --seeds 0 1 2 3 4 \
   --hgnn_type GCN \
+  --hidden_dim 512 \
+  --num_heads 8 \
+  --num_samples 500 \
   --repeats 2 \
-  --hgmp_ckpt artifacts/checkpoints/hgmp/pretrain/ACM.GraphCL.GCN.hid128.np100.pth \
-  --typepair_ckpt artifacts/checkpoints/hgmp/pretrain/ACM.GraphCL.GCN.hid128.np100.pth \
+  --hgmp_ckpt artifacts/checkpoints/hgmp/pretrain/ACM.GraphCL.GCN.hid512.np500.pth \
+  --typepair_ckpt artifacts/checkpoints/hgmp/pretrain/ACM.GraphCL.GCN.hid512.np500.pth \
   --hgprompt_ckpt artifacts/checkpoints/hgprompt/pretrain/ACM.gcn.ft2.hop1.seed0.best.pt
 
 python scripts/protocol_benchmark_v2.py \
   --dataset ACM \
   --shot 10 \
   --methods typepair \
-  --seeds 0 1 2 3 4 \
+  --seeds 0 \
   --hgnn_type GCN \
-  --repeats 2 \
-  --hgmp_ckpt artifacts/checkpoints/hgmp/pretrain/ACM.GraphCL.GCN.hid128.np100.pth \
-  --typepair_ckpt artifacts/checkpoints/hgmp/pretrain/ACM.GraphCL.GCN.hid128.np100.pth \
-  --hgprompt_ckpt artifacts/checkpoints/hgprompt/pretrain/ACM.gcn.ft2.hop1.seed0.best.pt
+  --hidden_dim 512 \
+  --num_heads 8 \
+  --num_samples 500 \
+  --repeats 1 \
+  --typepair_ckpt artifacts/checkpoints/hgmp/pretrain/ACM.GraphCL.GCN.hid512.np100.seed0.pth \
+  --use_wandb
+
+# wandb sweep 调 protocol_benchmark_v2 里的 typepair
+wandb sweep configs/wandb/typepair_downstream_sweep.yaml
+wandb agent <entity>/<project>/<sweep_id>
+
+# 有关wandb
+项目中使用了wandb， 只有传入--use_wandb 才会启用
+需要根目录创建.codex，并写入WANDB_API_KEY=XXX

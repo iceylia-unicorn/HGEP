@@ -387,7 +387,7 @@ def _encode_once(args, net, features_list, e_feat):
     return net(features_list), None
 
 
-def _run_once(args, bundle: HPromptDownstreamBundle, repeat_id: int) -> RepeatResult:
+def _run_once(args, bundle: HPromptDownstreamBundle, repeat_id: int, epoch_callback=None) -> RepeatResult:
     device = torch.device(args.device)
 
     np.random.seed(args.seed + repeat_id)
@@ -494,6 +494,18 @@ def _run_once(args, bundle: HPromptDownstreamBundle, repeat_id: int) -> RepeatRe
                 val_micro, val_macro = train_micro, train_macro
                 monitor = float(train_loss.item())
 
+            if epoch_callback is not None:
+                test_micro, test_macro = _evaluate_test(
+                    args=args,
+                    logits=logits_val,
+                    test_idx=test_idx,
+                    test_labels=test_labels,
+                    num_classes=num_classes,
+                    center=train_center,
+                )
+            else:
+                test_micro, test_macro = None, None
+
         should_stop = es.step(
             metric=monitor,
             epoch=epoch,
@@ -510,6 +522,25 @@ def _run_once(args, bundle: HPromptDownstreamBundle, repeat_id: int) -> RepeatRe
 
         if monitor <= (es.best if es.best is not None else monitor):
             best_epoch = epoch
+
+        if epoch_callback is not None:
+            epoch_callback(
+                {
+                    "epoch": epoch,
+                    "train_loss": float(train_loss.item()),
+                    "train_micro": float(train_micro),
+                    "train_macro": float(train_macro),
+                    "val_loss": float(val_loss.item()),
+                    "val_micro": float(val_micro),
+                    "val_macro": float(val_macro),
+                    "test_micro": float(test_micro),
+                    "test_macro": float(test_macro),
+                    "monitor": float(monitor),
+                    "best_epoch": int(es.best_epoch),
+                    "is_best": bool(epoch == es.best_epoch),
+                    "early_stop": bool(should_stop),
+                }
+            )
 
         print(
             f"Repeat {repeat_id:02d} | Epoch {epoch:03d} | "

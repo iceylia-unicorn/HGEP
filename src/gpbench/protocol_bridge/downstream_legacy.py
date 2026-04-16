@@ -396,6 +396,7 @@ def train_typepair_prompt_probe(
     patience: int = 30,
     early_stop_metric: str = "macro",
     save_best_path: str | None = None,
+    epoch_callback=None,
 ):
     assert early_stop_metric in {"micro", "macro"}
 
@@ -472,6 +473,20 @@ def train_typepair_prompt_probe(
 
         train_loss = epoch_loss / max(epoch_graphs, 1)
 
+        if epoch_callback is not None:
+            train_micro, train_macro = _evaluate_graph_probe(
+                train_list,
+                hgnn,
+                head,
+                targetnode,
+                args.classification_type,
+                batch_size,
+                args.device,
+                args.num_class,
+            )
+        else:
+            train_micro, train_macro = None, None
+
         val_micro, val_macro = _evaluate_graph_probe(
             valid_list,
             hgnn,
@@ -497,6 +512,7 @@ def train_typepair_prompt_probe(
         best_monitor = best_val_macro if early_stop_metric == "macro" else best_val_micro
 
         if monitor > best_monitor:
+            improved = True
             best_val_micro = val_micro
             best_val_macro = val_macro
             test_at_best_micro = test_micro
@@ -522,7 +538,31 @@ def train_typepair_prompt_probe(
                     save_best_path,
                 )
         else:
+            improved = False
             bad_epochs += 1
+
+        if epoch_callback is not None:
+            epoch_callback(
+                {
+                    "epoch": epoch,
+                    "train_loss": float(train_loss),
+                    "train_micro": float(train_micro),
+                    "train_macro": float(train_macro),
+                    "val_micro": float(val_micro),
+                    "val_macro": float(val_macro),
+                    "test_micro": float(test_micro),
+                    "test_macro": float(test_macro),
+                    "monitor": float(monitor),
+                    "best_val_micro": float(best_val_micro),
+                    "best_val_macro": float(best_val_macro),
+                    "test_at_best_micro": float(test_at_best_micro),
+                    "test_at_best_macro": float(test_at_best_macro),
+                    "best_epoch": int(best_epoch),
+                    "bad_epochs": int(bad_epochs),
+                    "is_best": bool(improved),
+                    "early_stop": bool(bad_epochs >= patience),
+                }
+            )
 
         if epoch == 1 or epoch % 10 == 0:
             print(
@@ -636,6 +676,7 @@ def train_hgmp_heteroprompt_probe(
     patience: int = 30,
     early_stop_metric: str = "macro",
     save_best_path: str | None = None,
+    epoch_callback=None,
 ):
     assert early_stop_metric in {"micro", "macro"}
 
@@ -727,6 +768,21 @@ def train_hgmp_heteroprompt_probe(
             device=args.device,
         )
 
+        if epoch_callback is not None:
+            train_micro, train_macro = _evaluate_hgmp_prompt_probe(
+                graph_list=train_list,
+                hgnn=hgnn,
+                PG=PG,
+                head=head,
+                targetnode=targetnode,
+                classification_type=args.classification_type,
+                batch_size=batch_size,
+                device=args.device,
+                num_classes=args.num_class,
+            )
+        else:
+            train_micro, train_macro = None, None
+
         val_micro, val_macro = _evaluate_hgmp_prompt_probe(
             graph_list=valid_list,
             hgnn=hgnn,
@@ -754,6 +810,7 @@ def train_hgmp_heteroprompt_probe(
         best_monitor = best_val_macro if early_stop_metric == "macro" else best_val_micro
 
         if monitor > best_monitor:
+            improved = True
             best_val_micro = val_micro
             best_val_macro = val_macro
             test_at_best_micro = test_micro
@@ -776,7 +833,33 @@ def train_hgmp_heteroprompt_probe(
                     save_best_path,
                 )
         else:
+            improved = False
             bad_epochs += 1
+
+        if epoch_callback is not None:
+            epoch_callback(
+                {
+                    "epoch": epoch,
+                    "head_loss": float(head_loss),
+                    "prompt_loss": float(prompt_loss),
+                    "train_loss": float((head_loss + prompt_loss) / 2.0),
+                    "train_micro": float(train_micro),
+                    "train_macro": float(train_macro),
+                    "val_micro": float(val_micro),
+                    "val_macro": float(val_macro),
+                    "test_micro": float(test_micro),
+                    "test_macro": float(test_macro),
+                    "monitor": float(monitor),
+                    "best_val_micro": float(best_val_micro),
+                    "best_val_macro": float(best_val_macro),
+                    "test_at_best_micro": float(test_at_best_micro),
+                    "test_at_best_macro": float(test_at_best_macro),
+                    "best_epoch": int(best_epoch),
+                    "bad_epochs": int(bad_epochs),
+                    "is_best": bool(improved),
+                    "early_stop": bool(bad_epochs >= patience),
+                }
+            )
 
         if epoch == 1 or epoch % 10 == 0:
             print(
@@ -824,6 +907,7 @@ def train_mlp_probe(
     patience: int = 30,
     early_stop_metric: str = "macro",
     save_best_path: str | None = None,
+    epoch_callback=None,
 ):
     assert early_stop_metric in {"micro", "macro"}
 
@@ -862,9 +946,11 @@ def train_mlp_probe(
 
         head.eval()
         with torch.no_grad():
+            train_logits = head(x_train)
             val_logits = head(x_val)
             test_logits = head(x_test)
 
+            train_micro, train_macro = f1_micro_macro(train_logits, y_train, num_classes)
             val_micro, val_macro = f1_micro_macro(val_logits, y_val, num_classes)
             test_micro, test_macro = f1_micro_macro(test_logits, y_test, num_classes)
 
@@ -872,6 +958,7 @@ def train_mlp_probe(
         best_monitor = best_val_macro if early_stop_metric == "macro" else best_val_micro
 
         if monitor > best_monitor:
+            improved = True
             best_val_micro = val_micro
             best_val_macro = val_macro
             test_at_best_micro = test_micro
@@ -896,7 +983,31 @@ def train_mlp_probe(
                     save_best_path,
                 )
         else:
+            improved = False
             bad_epochs += 1
+
+        if epoch_callback is not None:
+            epoch_callback(
+                {
+                    "epoch": epoch,
+                    "train_loss": float(loss.item()),
+                    "train_micro": float(train_micro),
+                    "train_macro": float(train_macro),
+                    "val_micro": float(val_micro),
+                    "val_macro": float(val_macro),
+                    "test_micro": float(test_micro),
+                    "test_macro": float(test_macro),
+                    "monitor": float(monitor),
+                    "best_val_micro": float(best_val_micro),
+                    "best_val_macro": float(best_val_macro),
+                    "test_at_best_micro": float(test_at_best_micro),
+                    "test_at_best_macro": float(test_at_best_macro),
+                    "best_epoch": int(best_epoch),
+                    "bad_epochs": int(bad_epochs),
+                    "is_best": bool(improved),
+                    "early_stop": bool(bad_epochs >= patience),
+                }
+            )
 
         if epoch == 1 or epoch % 10 == 0:
             print(

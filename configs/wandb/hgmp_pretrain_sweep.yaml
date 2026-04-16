@@ -1,0 +1,39 @@
+program: scripts/hgmp_pretrain.py
+method: bayes
+metric:
+  name: pretrain/best_train_loss
+  goal: minimize
+command:
+  - ${env}
+  - python
+  - ${program}
+  - --dataset
+  - ACM
+  - --device
+  - cuda:0
+  - --seed
+  - "0"
+  - --epochs
+  - "200"
+  - --benchmark_defaults
+  - --use_wandb
+  - ${args}
+parameters:
+  hidden_dim:
+    values: [128, 256, 512]
+  num_heads:
+    values: [2, 4, 8]
+  num_samples:
+    values: [100, 300, 500]
+  pre_lr:
+    distribution: log_uniform_values
+    min: 0.00001
+    max: 0.005
+  aug_ration:
+    values: [0.1, 0.2, 0.3]
+  dropout:
+    values: [0.2, 0.3, 0.5]
+  weight_decay:
+    distribution: log_uniform_values
+    min: 0.00001
+    max: 0.001
