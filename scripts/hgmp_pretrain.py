@@ -193,34 +193,34 @@ def main():
     ap.add_argument("--device", type=str, default="cuda" if torch.cuda.is_available() else "cpu")
     ap.add_argument("--epochs", type=int, default=200)
 
-    ap.add_argument("--feats_type", type=int, default=0)
-    ap.add_argument("--hidden_dim", type=int, default=128)
-    ap.add_argument("--num_heads", type=int, default=2)
-    ap.add_argument("--num_layers", type=int, default=2)
-    ap.add_argument("--dropout", type=float, default=0.5)
+    ap.add_argument("--feats_type", type=int, default=None)
+    ap.add_argument("--hidden_dim", type=int, default=None)
+    ap.add_argument("--num_heads", type=int, default=None)
+    ap.add_argument("--num_layers", type=int, default=None)
+    ap.add_argument("--dropout", type=float, default=None)
 
-    ap.add_argument("--pretext", type=str, default="GraphCL")
-    ap.add_argument("--hgnn_type", type=str, default="GCN")
+    ap.add_argument("--pretext", type=str, default=None)
+    ap.add_argument("--hgnn_type", type=str, default=None)
     ap.add_argument("--num_class", type=int, default=None)
 
     ap.add_argument("--seed", type=int, default=0)
     ap.add_argument("--shots", type=int, default=1)
     ap.add_argument("--classification_type", type=str, default="NIG")
 
-    ap.add_argument("--num_samples", type=int, default=100)
-    ap.add_argument("--pre_lr", type=float, default=1e-3)
-    ap.add_argument("--aug_ration", type=float, default=0.2)
+    ap.add_argument("--num_samples", type=int, default=None)
+    ap.add_argument("--pre_lr", type=float, default=None)
+    ap.add_argument("--aug_ration", type=float, default=None)
 
-    ap.add_argument("--prompt_lr", type=float, default=1e-3)
-    ap.add_argument("--head_lr", type=float, default=1e-3)
-    ap.add_argument("--weight_decay", type=float, default=5e-4)
+    ap.add_argument("--prompt_lr", type=float, default=None)
+    ap.add_argument("--head_lr", type=float, default=None)
+    ap.add_argument("--weight_decay", type=float, default=None)
 
     ap.add_argument("--edge_feats", type=int, default=None)
     ap.add_argument("--slope", type=float, default=0.05)
-    ap.add_argument("--patience", type=int, default=7)
-    ap.add_argument("--repeat", type=int, default=1)
-    ap.add_argument("--prompt_epoch", type=int, default=1)
-    ap.add_argument("--schedule_step", type=int, default=300)
+    ap.add_argument("--patience", type=int, default=None)
+    ap.add_argument("--repeat", type=int, default=None)
+    ap.add_argument("--prompt_epoch", type=int, default=None)
+    ap.add_argument("--schedule_step", type=int, default=None)
     ap.add_argument("--use_norm", action="store_true")
 
     ap.add_argument("--benchmark_defaults", action="store_true")
@@ -247,8 +247,7 @@ def main():
     exit_code = 0
 
     try:
-        if args.benchmark_defaults:
-            args = apply_benchmark_defaults(args, provided_options)
+        args = apply_benchmark_defaults(args, provided_options)
 
         if args.num_class is None:
             args.num_class = DATASET_NUM_CLASS.get(args.dataset, 3)

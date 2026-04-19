@@ -15,7 +15,6 @@ command:
   - "0"
   - --epochs
   - "200"
-  - --benchmark_defaults
   - --use_wandb
   - ${args}
 parameters:

@@ -29,6 +29,11 @@ class TypePairRelationPromptConfig:
     dropout: float = 0.1
     use_ln: bool = True
     aggr: str = "mean"         # "mean" or "sum"
+    edge_feature_dim: int = 0
+    edge_feature_name: str = "typepair_edge_feat"
+    edge_prompt_hidden: int = 128
+    edge_prompt_alpha: float = 0.5
+    edge_prompt_fusion: str = "add"  # "add", "mul", or "gate"
 
 
 class TypePairRelationPrompt(nn.Module):
@@ -48,17 +53,28 @@ class TypePairRelationPrompt(nn.Module):
         dropout: float = 0.1,
         use_ln: bool = True,
         aggr: str = "mean",
+        edge_feature_dim: int = 0,
+        edge_feature_name: str = "typepair_edge_feat",
+        edge_prompt_hidden: int = 128,
+        edge_prompt_alpha: float = 0.5,
+        edge_prompt_fusion: str = "add",
     ):
         super().__init__()
         if mode not in {"mul", "add"}:
             raise ValueError(f"Unsupported mode: {mode}")
         if aggr not in {"mean", "sum"}:
             raise ValueError(f"Unsupported aggr: {aggr}")
+        if edge_prompt_fusion not in {"add", "mul", "gate"}:
+            raise ValueError(f"Unsupported edge_prompt_fusion: {edge_prompt_fusion}")
 
         node_types, edge_types = metadata
         self.mode = mode
         self.alpha = alpha
         self.aggr = aggr
+        self.edge_feature_dim = int(edge_feature_dim or 0)
+        self.edge_feature_name = edge_feature_name
+        self.edge_prompt_alpha = edge_prompt_alpha
+        self.edge_prompt_fusion = edge_prompt_fusion
 
         pair_keys = []
         for src_t, _, dst_t in edge_types:
@@ -81,15 +97,48 @@ class TypePairRelationPrompt(nn.Module):
                 for nt in node_types
             }
         )
+        if self.edge_feature_dim > 0:
+            self.edge_prompt_mlp = nn.Sequential(
+                nn.LayerNorm(self.edge_feature_dim),
+                nn.Linear(self.edge_feature_dim, edge_prompt_hidden),
+                nn.ReLU(),
+                nn.Dropout(dropout),
+                nn.Linear(edge_prompt_hidden, dim),
+            )
+        else:
+            self.edge_prompt_mlp = None
 
     @staticmethod
     def make_pair_key(src_t: str, dst_t: str) -> str:
         return f"{src_t}__TO__{dst_t}"
 
+    @property
+    def uses_edge_features(self) -> bool:
+        return self.edge_prompt_mlp is not None
+
+    def _fuse_edge_prompt(
+        self,
+        type_prompt: torch.Tensor,
+        edge_features: torch.Tensor | None,
+    ) -> torch.Tensor:
+        if self.edge_prompt_mlp is None or edge_features is None:
+            return type_prompt.unsqueeze(0)
+
+        edge_prompt = self.edge_prompt_mlp(edge_features.to(type_prompt.device))
+        if self.edge_prompt_fusion == "add":
+            return type_prompt.unsqueeze(0) + self.edge_prompt_alpha * edge_prompt
+        if self.edge_prompt_fusion == "mul":
+            scale = 1.0 + self.edge_prompt_alpha * torch.tanh(edge_prompt)
+            return type_prompt.unsqueeze(0) * scale
+
+        gate = torch.sigmoid(edge_prompt)
+        return gate * type_prompt.unsqueeze(0) + (1.0 - gate) * edge_prompt
+
     def forward(
         self,
         x_dict: Dict[str, torch.Tensor],
         edge_index_dict: Dict[Tuple[str, str, str], torch.Tensor],
+        edge_feature_dict: Dict[Tuple[str, str, str], torch.Tensor] | None = None,
     ) -> Dict[str, torch.Tensor]:
         device = next(iter(x_dict.values())).device
 
@@ -102,7 +151,7 @@ class TypePairRelationPrompt(nn.Module):
             for ntype, x in x_dict.items()
         }
 
-        for (src_t, _, dst_t), edge_index in edge_index_dict.items():
+        for (src_t, rel_t, dst_t), edge_index in edge_index_dict.items():
             src, dst = edge_index
             if src.numel() == 0:
                 continue
@@ -111,7 +160,11 @@ class TypePairRelationPrompt(nn.Module):
             if key not in self.prompt:
                 continue
 
-            p = self.prompt[key].unsqueeze(0)
+            edge_features = None
+            if edge_feature_dict is not None:
+                edge_features = edge_feature_dict.get((src_t, rel_t, dst_t))
+
+            p = self._fuse_edge_prompt(self.prompt[key], edge_features)
 
             msg = x_dict[src_t][src]
             if self.mode == "mul":
@@ -185,6 +238,7 @@ class RelationInjectedLegacyHGT(nn.Module):
         targetnode: str,
         x_dict: Dict[str, torch.Tensor],
         edge_index_dict: Dict[Tuple[str, str, str], torch.Tensor],
+        edge_feature_dict: Dict[Tuple[str, str, str], torch.Tensor] | None = None,
     ) -> Dict[str, torch.Tensor]:
         del targetnode
 
@@ -195,7 +249,7 @@ class RelationInjectedLegacyHGT(nn.Module):
 
         for conv in self.convs:
             x_dict = conv(x_dict, edge_index_dict)
-            x_dict = self.relation_prompt(x_dict, edge_index_dict)
+            x_dict = self.relation_prompt(x_dict, edge_index_dict, edge_feature_dict)
 
         x_dict = {
             node_type: self.lin(x)
@@ -226,6 +280,7 @@ class RelationInjectedLegacyGCN(nn.Module):
         self,
         graph,
         x_dict: Dict[str, torch.Tensor],
+        edge_feature_dict: Dict[Tuple[str, str, str], torch.Tensor] | None = None,
     ) -> Dict[str, torch.Tensor]:
         keys = list(x_dict.keys())
         sizes = [x_dict[key].shape[0] for key in keys]
@@ -246,7 +301,7 @@ class RelationInjectedLegacyGCN(nn.Module):
             h = layer(homo_g, h)
 
             hidden_dict = _split_h_by_keys(h, keys, sizes)
-            hidden_dict = self.relation_prompt(hidden_dict, edge_index_dict)
+            hidden_dict = self.relation_prompt(hidden_dict, edge_index_dict, edge_feature_dict)
             h = torch.cat([hidden_dict[key] for key in keys], dim=0)
 
         return _split_h_by_keys(h, keys, sizes)
@@ -317,6 +372,11 @@ class HGMPTypePairHGNN(nn.Module):
             dropout=relation_cfg.dropout,
             use_ln=relation_cfg.use_ln,
             aggr=relation_cfg.aggr,
+            edge_feature_dim=relation_cfg.edge_feature_dim,
+            edge_feature_name=relation_cfg.edge_feature_name,
+            edge_prompt_hidden=relation_cfg.edge_prompt_hidden,
+            edge_prompt_alpha=relation_cfg.edge_prompt_alpha,
+            edge_prompt_fusion=relation_cfg.edge_prompt_fusion,
         )
 
         if self.hgnn_type == "HGT":
@@ -338,13 +398,13 @@ class HGMPTypePairHGNN(nn.Module):
     def relation_prompt(self) -> TypePairRelationPrompt:
         return self.GraphConv.relation_prompt
 
-    def forward(self, targetnode, x, edge_index=None):
+    def forward(self, targetnode, x, edge_index=None, edge_feature_dict=None):
         if self.hgnn_type == "HGT":
-            return self.GraphConv(targetnode, x, edge_index)
+            return self.GraphConv(targetnode, x, edge_index, edge_feature_dict)
         if self.hgnn_type == "GCN":
             graph = targetnode
             x_dict = x
-            return self.GraphConv(graph, x_dict)
+            return self.GraphConv(graph, x_dict, edge_feature_dict)
         raise NotImplementedError(
             f"Unsupported hgnn_type in HGMPTypePairHGNN.forward: {self.hgnn_type}"
         )
@@ -487,6 +547,11 @@ def build_typepair_relation_cfg_from_args(args) -> TypePairRelationPromptConfig:
         dropout=getattr(args, "relation_prompt_dropout", 0.1),
         use_ln=getattr(args, "relation_prompt_use_ln", True),
         aggr=getattr(args, "relation_prompt_aggr", "mean"),
+        edge_feature_dim=getattr(args, "typepair_edge_feature_dim", 0),
+        edge_feature_name=getattr(args, "typepair_edge_feature_name", "typepair_edge_feat"),
+        edge_prompt_hidden=getattr(args, "typepair_edge_prompt_hidden", 128),
+        edge_prompt_alpha=getattr(args, "typepair_edge_prompt_alpha", 0.5),
+        edge_prompt_fusion=getattr(args, "typepair_edge_prompt_fusion", "add"),
     )
 
 

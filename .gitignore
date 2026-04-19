@@ -9,3 +9,5 @@ artifacts/
 .vscode/
 data/
 .codex
+./wandb
+wandb/

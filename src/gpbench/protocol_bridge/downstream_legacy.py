@@ -76,16 +76,40 @@ def _build_edge_index_dict(g):
     return edge_index_dict
 
 
+def _build_edge_feature_dict(g, feature_name: str = "typepair_edge_feat"):
+    edge_feature_dict = {}
+    for etype in g.canonical_etypes:
+        if feature_name not in g.edges[etype].data:
+            continue
+        edge_feature_dict[etype] = g.edges[etype].data[feature_name].float()
+    return edge_feature_dict or None
+
+
+def _uses_edge_features(hgnn) -> bool:
+    relation_prompt = getattr(hgnn, "relation_prompt", None)
+    return bool(getattr(relation_prompt, "uses_edge_features", False))
+
+
 def forward_graph_batch(hgnn, batched_graph, targetnode: str) -> torch.Tensor:
     x_dict = batched_graph.ndata["x"]
     edge_index_dict = _build_edge_index_dict(batched_graph)
+    edge_feature_dict = None
+    if _uses_edge_features(hgnn):
+        edge_feature_name = getattr(hgnn.relation_prompt, "edge_feature_name", "typepair_edge_feat")
+        edge_feature_dict = _build_edge_feature_dict(batched_graph, edge_feature_name)
 
     if hgnn.hgnn_type == "HGT":
-        node_emb = hgnn(targetnode, x_dict, edge_index_dict)
+        if edge_feature_dict is None:
+            node_emb = hgnn(targetnode, x_dict, edge_index_dict)
+        else:
+            node_emb = hgnn(targetnode, x_dict, edge_index_dict, edge_feature_dict=edge_feature_dict)
     elif hgnn.hgnn_type == "SHGN":
         node_emb = hgnn(targetnode, batched_graph, x_dict)
     elif hgnn.hgnn_type == "GCN":
-        node_emb = hgnn(batched_graph, x_dict)
+        if edge_feature_dict is None:
+            node_emb = hgnn(batched_graph, x_dict)
+        else:
+            node_emb = hgnn(batched_graph, x_dict, edge_feature_dict=edge_feature_dict)
     elif hgnn.hgnn_type == "GAT":
         node_emb = hgnn(batched_graph, x_dict, False)
     else:
@@ -459,7 +483,7 @@ def train_typepair_prompt_probe(
             batched_graph = batched_graph.to(args.device)
             batched_label = batched_label.to(args.device).long()
 
-            graph_emb = encode_graph_batch(hgnn, batched_graph, targetnode)
+            graph_emb = forward_graph_batch(hgnn, batched_graph, targetnode)
             logits = head(graph_emb)
             loss = nn.functional.cross_entropy(logits, batched_label)
 
