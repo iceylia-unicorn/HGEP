@@ -2767,3 +2767,47 @@
 	weight_decay: 0.0002435864313813414
 2026-04-17 01:25:48 INFO About to run command: /usr/bin/env python scripts/protocol_benchmark_v2.py --dataset ACM --shot 10 --methods typepair --seeds 0 --repeats 1 --device cuda:0 --hgnn_type GCN --hidden_dim 512 --num_heads 8 --num_samples 500 --hgmp_ckpt artifacts/checkpoints/hgmp/pretrain/ACM.GraphCL.GCN.hid512.np500.pth --typepair_ckpt artifacts/checkpoints/hgmp/pretrain/ACM.GraphCL.GCN.hid512.np500.pth --use_wandb --head_dropout=0.3 --head_hidden=256 --lr=0.0030047780083301656 --prompt_lr=0.024381358791481057 --relation_prompt_alpha=0.8 --relation_prompt_dropout=0.1 --relation_prompt_mode=add --weight_decay=0.0002435864313813414
 2026-04-17 01:25:53 INFO Running runs: ['m4x5osho']
+2026-04-20 17:14:06 INFO Running runs: []
+2026-04-20 17:14:07 INFO Agent received command: run
+2026-04-20 17:14:07 INFO Agent starting run with config:
+	use_CommunityLabelDiff: True
+	use_DegreeDiff: False
+	use_EdgeTypeOneHot: True
+	use_NeighborAttrVariance: False
+	use_NeighborTypeOverlap: False
+	use_NodeAttrCosSim: True
+	use_NodeTypeEncoding: False
+	use_PageRankDiff: True
+	use_SpectralEmbeddingDiff: False
+2026-04-20 17:14:07 INFO About to run command: /usr/bin/env python  --use_CommunityLabelDiff=True --use_DegreeDiff=False --use_EdgeTypeOneHot=True --use_NeighborAttrVariance=False --use_NeighborTypeOverlap=False --use_NodeAttrCosSim=True --use_NodeTypeEncoding=False --use_PageRankDiff=True --use_SpectralEmbeddingDiff=False
+2026-04-20 17:14:12 INFO Running runs: ['4a1ryx1y']
+2026-04-20 17:14:12 INFO Cleaning up finished run: 4a1ryx1y
+2026-04-20 17:14:14 INFO Agent received command: run
+2026-04-20 17:14:14 INFO Agent starting run with config:
+	use_CommunityLabelDiff: True
+	use_DegreeDiff: True
+	use_EdgeTypeOneHot: True
+	use_NeighborAttrVariance: True
+	use_NeighborTypeOverlap: True
+	use_NodeAttrCosSim: True
+	use_NodeTypeEncoding: True
+	use_PageRankDiff: False
+	use_SpectralEmbeddingDiff: True
+2026-04-20 17:14:14 INFO About to run command: /usr/bin/env python  --use_CommunityLabelDiff=True --use_DegreeDiff=True --use_EdgeTypeOneHot=True --use_NeighborAttrVariance=True --use_NeighborTypeOverlap=True --use_NodeAttrCosSim=True --use_NodeTypeEncoding=True --use_PageRankDiff=False --use_SpectralEmbeddingDiff=True
+2026-04-20 17:14:19 INFO Running runs: ['ldv9adbe']
+2026-04-20 17:14:19 INFO Cleaning up finished run: ldv9adbe
+2026-04-20 17:14:20 INFO Agent received command: run
+2026-04-20 17:14:20 INFO Agent starting run with config:
+	use_CommunityLabelDiff: True
+	use_DegreeDiff: False
+	use_EdgeTypeOneHot: True
+	use_NeighborAttrVariance: True
+	use_NeighborTypeOverlap: True
+	use_NodeAttrCosSim: True
+	use_NodeTypeEncoding: True
+	use_PageRankDiff: False
+	use_SpectralEmbeddingDiff: False
+2026-04-20 17:14:20 INFO About to run command: /usr/bin/env python  --use_CommunityLabelDiff=True --use_DegreeDiff=False --use_EdgeTypeOneHot=True --use_NeighborAttrVariance=True --use_NeighborTypeOverlap=True --use_NodeAttrCosSim=True --use_NodeTypeEncoding=True --use_PageRankDiff=False --use_SpectralEmbeddingDiff=False
+2026-04-20 17:14:25 INFO Running runs: ['fztj6gj3']
+2026-04-20 17:14:25 ERROR Detected 3 failed runs in the first 60 seconds, shutting down.
+2026-04-20 17:14:25 INFO To disable this check set WANDB_AGENT_DISABLE_FLAPPING=true

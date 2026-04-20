@@ -182,3 +182,27 @@ sweep配置卸载configs/wandb中
 wandb sweep configs/wandb/XXXX.yaml
 然后会返回运行需要的指令大概
 大概是 wandb agent 
+
+
+python scripts/typepair_edge_feature_sweep.py \
+  --dataset ACM \
+  --shot 1 \
+  --methods typepair \
+  --seeds 0 \
+  --hgnn_type GCN \
+  --hidden_dim 512 \
+  --num_heads 8 \
+  --num_samples 500 \
+  --repeats 1 \
+  --hgmp_ckpt artifacts/checkpoints/hgmp/pretrain/ACM.GraphCL.GCN.hid512.np500.seed0.pth \
+  --typepair_ckpt artifacts/checkpoints/hgmp/pretrain/ACM.GraphCL.GCN.hid512.np500.seed0.pth \
+  --hgprompt_ckpt artifacts/checkpoints/hgprompt/pretrain/ACM.gcn.ft2.hop1.seed0.best.pt \
+  --enable_typepair_edge_features \
+  --typepair_spectral_dim 8 \
+  --typepair_edge_prompt_fusion add \
+  --use_wandb \
+  --create_sweep \
+  --run_agent \
+  --sweep_count 80 \
+  --wandb_project HGEP \
+  --wandb_mode online

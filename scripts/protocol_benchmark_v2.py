@@ -65,6 +65,17 @@ TARGET_NODETYPE = {
 }
 
 TYPEPAIR_EDGE_FEATURE_NAME = "typepair_edge_feat"
+TYPEPAIR_EDGE_FEATURES = [
+    "NodeTypeEncoding",
+    "EdgeTypeOneHot",
+    "DegreeDiff",
+    "NeighborTypeOverlap",
+    "NodeAttrCosSim",
+    "NeighborAttrVariance",
+    "PageRankDiff",
+    "CommunityLabelDiff",
+    "SpectralEmbeddingDiff",
+]
 
 
 @dataclass
@@ -363,8 +374,65 @@ def _feature_slices(num_node_types: int, num_edge_types: int, spectral_dim: int)
     return slices
 
 
+def _coerce_feature_name_list(value) -> list[str] | None:
+    if value is None:
+        return None
+    if isinstance(value, str):
+        stripped = value.strip()
+        if not stripped:
+            return []
+        return [item.strip() for item in stripped.split(",") if item.strip()]
+    return [str(item).strip() for item in value if str(item).strip()]
+
+
+def _coerce_bool(value) -> bool:
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, (int, np.integer)):
+        return bool(value)
+    if isinstance(value, str):
+        return value.strip().lower() in {"1", "true", "yes", "y", "on"}
+    return bool(value)
+
+
+def get_selected_typepair_edge_feature_names(args, feature_slices: dict[str, tuple[int, int]] | None = None) -> list[str]:
+    available = list(feature_slices.keys()) if feature_slices is not None else list(TYPEPAIR_EDGE_FEATURES)
+    available_set = set(available)
+
+    configured = _coerce_feature_name_list(getattr(args, "typepair_edge_feature_names", None))
+    if configured is not None:
+        unknown = [name for name in configured if name not in available_set]
+        if unknown:
+            raise ValueError(f"Unknown typepair edge feature names: {unknown}. Available: {available}")
+        return configured
+
+    selected = []
+    saw_bool_flag = False
+    for name in available:
+        flag_value = None
+        for attr in (f"use_{name}", f"edge_feat_{name}", f"typepair_use_{name}"):
+            if hasattr(args, attr):
+                flag_value = getattr(args, attr)
+                break
+        if flag_value is None:
+            continue
+        saw_bool_flag = True
+        if _coerce_bool(flag_value):
+            selected.append(name)
+
+    if saw_bool_flag:
+        return selected
+    return available
+
+
 def _summarize_edge_features(edge_feature_table: dict, feature_slices: dict[str, tuple[int, int]]) -> dict:
-    matrix = torch.cat([value.float().cpu() for value in edge_feature_table.values() if value.numel() > 0], dim=0)
+    matrices = [value.float().cpu() for value in edge_feature_table.values()]
+    if not matrices:
+        return {}
+    matrix = torch.cat(matrices, dim=0)
+    if matrix.numel() == 0:
+        return {"all": {"mean": 0.0, "var": 0.0, "max": 0.0, "min": 0.0}}
+
     stats = {}
     for name, (start, end) in feature_slices.items():
         if end <= start:
@@ -383,6 +451,45 @@ def _summarize_edge_features(edge_feature_table: dict, feature_slices: dict[str,
         "min": float(matrix.min().item()),
     }
     return stats
+
+
+def _subset_typepair_edge_feature_payload(payload: dict, args) -> dict:
+    selected_names = get_selected_typepair_edge_feature_names(args, payload["feature_slices"])
+    full_slices = payload["feature_slices"]
+
+    index_parts = []
+    selected_slices = {}
+    cursor = 0
+    for name in selected_names:
+        start, end = full_slices[name]
+        width = end - start
+        if width <= 0:
+            continue
+        index_parts.append(torch.arange(start, end, dtype=torch.long))
+        selected_slices[name] = (cursor, cursor + width)
+        cursor += width
+
+    if index_parts:
+        indices = torch.cat(index_parts)
+    else:
+        indices = torch.empty(0, dtype=torch.long)
+
+    selected_table = {}
+    for etype, table in payload["edge_feature_table"].items():
+        if indices.numel() == 0:
+            selected_table[etype] = table.new_zeros((table.size(0), 0))
+        else:
+            selected_table[etype] = table[:, indices].contiguous()
+
+    out = dict(payload)
+    out["edge_feature_table"] = selected_table
+    out["feature_dim"] = int(indices.numel())
+    out["feature_slices"] = selected_slices
+    out["feature_stats"] = _summarize_edge_features(selected_table, selected_slices)
+    out["selected_feature_names"] = selected_names
+    out["selected_feature_count"] = int(len(selected_names))
+    out["full_feature_dim"] = int(payload.get("feature_dim", 0))
+    return out
 
 
 def _compute_typepair_edge_feature_table(graph, args) -> dict:
@@ -549,12 +656,19 @@ def _compute_typepair_edge_feature_table(graph, args) -> dict:
 
 
 def _write_edge_feature_stats_json(cache_path: Path, payload: dict):
-    stats_path = cache_path.with_suffix(".stats.json")
+    selected_names = payload.get("selected_feature_names")
+    if selected_names is None:
+        stats_path = cache_path.with_suffix(".stats.json")
+    else:
+        suffix = "none" if len(selected_names) == 0 else "-".join(selected_names)
+        stats_path = cache_path.with_name(f"{cache_path.stem}.selected-{suffix}.stats.json")
     stats_payload = {
         "cache_path": str(cache_path),
         "feature_dim": payload["feature_dim"],
         "feature_slices": {key: list(value) for key, value in payload["feature_slices"].items()},
         "feature_stats": payload["feature_stats"],
+        "selected_feature_names": payload.get("selected_feature_names", list(payload["feature_slices"].keys())),
+        "selected_feature_count": payload.get("selected_feature_count", len(payload["feature_slices"])),
         "node_types": payload["node_types"],
         "edge_types": [_edge_type_key(etype) for etype in payload["edge_types"]],
         "total_nodes": payload["total_nodes"],
@@ -615,7 +729,9 @@ def prepare_typepair_edge_feature_table(args, wandb_run=None) -> dict | None:
         payload = _compute_typepair_edge_feature_table(graph, args)
         torch.save(payload, cache_path)
 
-    _write_edge_feature_stats_json(cache_path, payload)
+    payload = _subset_typepair_edge_feature_payload(payload, args)
+    if getattr(args, "typepair_write_edge_feature_stats", True):
+        _write_edge_feature_stats_json(cache_path, payload)
     setattr(args, "typepair_edge_feature_dim", int(payload["feature_dim"]))
     _log_edge_feature_payload(wandb_run, payload, cache_path, cache_hit)
     return payload
@@ -809,8 +925,10 @@ def _make_legacy_args(cli_args, method: str, ckpt_path: str, split_seed: int, re
         relation_prompt_use_ln=cli_args.relation_prompt_use_ln,
         enable_typepair_edge_features=cli_args.enable_typepair_edge_features,
         typepair_edge_feature_dim=cli_args.typepair_edge_feature_dim,
+        typepair_edge_feature_names=cli_args.typepair_edge_feature_names,
         typepair_edge_feature_name=cli_args.typepair_edge_feature_name,
         typepair_edge_feature_cache_dir=cli_args.typepair_edge_feature_cache_dir,
+        typepair_write_edge_feature_stats=cli_args.typepair_write_edge_feature_stats,
         typepair_edge_attr_dim_cap=cli_args.typepair_edge_attr_dim_cap,
         typepair_pagerank_damping=cli_args.typepair_pagerank_damping,
         typepair_pagerank_max_iter=cli_args.typepair_pagerank_max_iter,
@@ -1155,12 +1273,14 @@ def build_parser():
 
     ap.add_argument("--enable_typepair_edge_features", action="store_true")
     ap.add_argument("--typepair_edge_feature_dim", type=int, default=0)
+    ap.add_argument("--typepair_edge_feature_names", nargs="*", default=None, choices=TYPEPAIR_EDGE_FEATURES)
     ap.add_argument("--typepair_edge_feature_name", type=str, default=TYPEPAIR_EDGE_FEATURE_NAME)
     ap.add_argument(
         "--typepair_edge_feature_cache_dir",
         type=Path,
         default=ROOT / "artifacts" / "cache" / "typepair_edge_features",
     )
+    ap.add_argument("--typepair_write_edge_feature_stats", action=argparse.BooleanOptionalAction, default=True)
     ap.add_argument("--typepair_edge_attr_dim_cap", type=int, default=256)
     ap.add_argument("--typepair_pagerank_damping", type=float, default=0.85)
     ap.add_argument("--typepair_pagerank_max_iter", type=int, default=50)
