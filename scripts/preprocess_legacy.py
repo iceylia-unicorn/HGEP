@@ -27,6 +27,15 @@ os.environ['HTTPS_PROXY'] = "http://10.14.117.235:7890"
 import dgl
 import numpy as np
 
+
+HOP_NUM_DICT = {
+    'ACM': 1,
+    'DBLP': 2,
+    'IMDB': 2,
+    'Freebase': 1,
+    'oldfreebase': 2,
+}
+
 def nodes_split(data: Data, dataname: str = None, node_classes=3, targetnode=None):
     if dataname is None:
         raise KeyError("dataname is None!")
@@ -525,20 +534,11 @@ def subgraph_from_nodes(g, sampled_nodes):
     return subgraph
 
 
+def run_legacy_preprocess(dataname: str = 'ACM', feats_type: int = 0, hop_num_override: int | None = None):
+    if dataname not in HOP_NUM_DICT:
+        raise ValueError(f"Unsupported dataname for legacy preprocess: {dataname}")
 
-if __name__ == '__main__':
-
-    #heco,dmgi分别为预训练好的embedding
-    #6就是HeCo的embeding 7就是DMGI, -1指的是freebase的无向图情况 8 就是hdmi 9 HGMAE
-    hop_num_dict = {'ACM': 1,
-               'DBLP': 2,
-               'IMDB': 2,
-               'Freebase': 1,
-               'oldfreebase': 2}
-    feats_type=0
-
-    dataname = 'ACM' #'IMDB'  'ACM'  'DBLP'  'Freebase'
-    hop_num=hop_num_dict[dataname]
+    hop_num = HOP_NUM_DICT[dataname] if hop_num_override is None else int(hop_num_override)
 
     if(dataname=='Freebase' and feats_type==-1):
         dataset = HGBDataset(root=f'{DATA_ROOT}', name=dataname,transform=ToUndirected(merge=False))
@@ -554,7 +554,6 @@ if __name__ == '__main__':
         for attr, value in node_store.items():
             #没有节点属性的节点类型赋值对角矩阵
             if attr=='num_nodes':
-                #data[node_type]['x']=torch.eye(value)
                 data[node_type]['x'] = create_matrix(value,0.01)
                 del data[node_type][attr]
 
@@ -565,22 +564,16 @@ if __name__ == '__main__':
         features_list.append(value)
 
     if feats_type == 0 or feats_type == 6 or feats_type == 7 or feats_type == -1 or feats_type == 8 or feats_type == 9:
-        in_dims = [features.shape[1] for features in features_list]
+        _ = [features.shape[1] for features in features_list]
     elif feats_type == 1 or feats_type == 5:
         save = 0 if feats_type == 1 else 2
-        in_dims = []  # [features_list[0].shape[1]] + [10] * (len(features_list) - 1)
         for i in range(0, len(features_list)):
-            if i == save:
-                in_dims.append(features_list[i].shape[1])
-            else:
-                in_dims.append(10)
+            if i != save:
                 features_list[i] = torch.zeros((features_list[i].shape[0], 10))
     elif feats_type == 2 or feats_type == 4:
         save = feats_type - 2
-        in_dims = [features.shape[0] for features in features_list]
         for i in range(0, len(features_list)):
             if i == save:
-                in_dims[i] = features_list[i].shape[1]
                 continue
             dim = features_list[i].shape[0]
             indices = np.vstack((np.arange(dim), np.arange(dim)))
@@ -588,13 +581,14 @@ if __name__ == '__main__':
             values = torch.FloatTensor(np.ones(dim))
             features_list[i] = torch.sparse.FloatTensor(indices, values, torch.Size([dim, dim])).to_dense()
     elif feats_type == 3:
-        in_dims = [features.shape[0] for features in features_list]
         for i in range(len(features_list)):
             dim = features_list[i].shape[0]
             indices = np.vstack((np.arange(dim), np.arange(dim)))
             indices = torch.LongTensor(indices)
             values = torch.FloatTensor(np.ones(dim))
             features_list[i] = torch.sparse.FloatTensor(indices, values, torch.Size([dim, dim])).to_dense()
+    else:
+        raise ValueError(f"Unsupported feats_type={feats_type}")
 
 
     if(feats_type==6):
@@ -603,12 +597,6 @@ if __name__ == '__main__':
     elif(feats_type==7):
         embed = torch.load(DATA_ROOT + dataname.lower() + '/DMGI.pth')
         features_list[0] = embed
-    # elif (feats_type == 8):
-    #     embed = torch.load('./dataset/' + dataname.lower() + '/HDMI.pth')
-    #     features_list[0] = embed.to('cpu')
-    # elif (feats_type == 9):
-    #     embed = torch.load('./dataset/' + dataname.lower() + '/HGMAE.pth')
-    #     features_list[0] = embed
 
     value_dict={}
     i = 0
@@ -624,18 +612,13 @@ if __name__ == '__main__':
     if dataname=='IMDB':
         targetnode='movie'
         oldy=data.ndata['y'][targetnode]
-        #newy=data.ndata['y'][targetnode].argmax(axis=1)
         newy = []
         for arr in data.ndata['y'][targetnode]:
-            # 获取所有值为 1 的下标
             one_indices = np.where(arr == 1)[0]
-            # 检查是否有值为 1 的元素
             if one_indices.size > 0:
-                # 随机选择一个值为 1 的下标
                 random_index = np.random.choice(one_indices)
                 newy.append(random_index)
             else:
-                # 如果没有值为 1 的元素，可以选择填充一个特殊值（比如 -1）
                 newy.append(-1)
         newy=torch.tensor(newy)
         data.ndata['y']={targetnode:newy}
@@ -654,16 +637,29 @@ if __name__ == '__main__':
     elif dataname == 'oldfreebase':
         targetnode = 'movie'
         node_classes = torch.max(data.ndata['y'][targetnode]) + 1
+    else:
+        raise ValueError(f"Unsupported dataname={dataname}")
 
-    # step1 split node and edge
-    
     nodes_split(data, dataname=dataname, node_classes=node_classes,targetnode=targetnode)
     edge_split(data, dataname=dataname, node_classes=node_classes,targetnode=targetnode)
 
-    # step2: induced graphs
     induced_graphs_nodes(data, dataname=dataname, num_classes=node_classes, smallest_size=50,
                          largest_size=200,targetnode=targetnode,feats_type=feats_type,hop_num=hop_num)
     induced_graphs_edges(data, dataname=dataname, num_classes=node_classes, smallest_size=50,
                          largest_size=500,targetnode=targetnode,feats_type=feats_type,hop_num=hop_num)
     induced_graphs_graphs(data, dataname=dataname, num_classes=node_classes, smallest_size=50,
                           largest_size=300,targetnode=targetnode,feats_type=feats_type,hop_num=hop_num)
+
+    return {
+        "dataset": dataname,
+        "feats_type": int(feats_type),
+        "hop_num": int(hop_num),
+        "targetnode": targetnode,
+        "num_classes": int(node_classes),
+    }
+
+
+
+if __name__ == '__main__':
+    # 保持直接执行时的默认 ACM faithful 预处理行为
+    run_legacy_preprocess(dataname='ACM', feats_type=0)

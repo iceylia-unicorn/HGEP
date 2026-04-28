@@ -8,11 +8,13 @@ if str(ROOT) not in sys.path:
 
 import argparse
 import json
+import re
 import shutil
 
 import torch
 
 from protocols.hgmp.run_legacy import PRETRAIN_DIR, prompt_w_h
+from protocols.hgmp.utils_legacy import seed_everything
 
 
 DATASET_NUM_CLASS = {
@@ -21,6 +23,30 @@ DATASET_NUM_CLASS = {
     "IMDB": 5,
     "Freebase": 7,
 }
+
+LEGACY_DATASET_DOWNSTREAM_DEFAULTS = {
+    "ACM": {
+        "hidden_dim": 512,
+        "num_samples": 500,
+        "prompt_lr": 5e-2,
+        "head_lr": 5e-4,
+        "weight_decay": 5e-5,
+    },
+    "IMDB": {
+        "hidden_dim": 256,
+        "num_samples": 200,
+        "prompt_lr": 5e-2,
+        "head_lr": 5e-2,
+        "weight_decay": 1e-4,
+    },
+}
+
+CKPT_NAME_RE = re.compile(
+    r"^(?P<dataset>[^.]+)\.(?P<pretext>[^.]+)\.(?P<hgnn_type>[^.]+)\.hid(?P<hidden_dim>\d+)\.np(?P<num_samples>\d+)"
+    r"(?:\.seed(?P<seed>\d+))?\.pth$"
+)
+CORE_CKPT_KEYS = ("dataset", "pretext", "hgnn_type", "hidden_dim", "num_samples")
+OPTIONAL_CKPT_KEYS = ("num_class", "feats_type", "num_heads", "num_layers", "dropout")
 
 
 def normalize_device(raw_device: Union[str, int]) -> torch.device:
@@ -40,10 +66,20 @@ def normalize_device(raw_device: Union[str, int]) -> torch.device:
         raise ValueError(f"Unsupported device spec: {raw_device}")
 
 
+def collect_provided_options(argv: list[str]) -> set[str]:
+    provided = set()
+    for token in argv:
+        if not token.startswith("--"):
+            continue
+        option = token[2:].split("=", 1)[0].replace("-", "_")
+        provided.add(option)
+    return provided
+
+
 def apply_benchmark_defaults(args):
     args.feats_type = 0
-    args.hidden_dim = 128
-    args.num_heads = 2
+    args.hidden_dim = 512
+    args.num_heads = 8
     args.num_layers = 2
     args.dropout = 0.5
     args.pretext = "GraphCL"
@@ -57,8 +93,69 @@ def apply_benchmark_defaults(args):
     args.prompt_epoch = 200
     args.classification_type = "NIG"
     args.num_samples = 100
+    dataset_defaults = LEGACY_DATASET_DOWNSTREAM_DEFAULTS.get(args.dataset, {})
+    for key, value in dataset_defaults.items():
+        setattr(args, key, value)
     if args.dataset in DATASET_NUM_CLASS:
         args.num_class = DATASET_NUM_CLASS[args.dataset]
+    return args
+
+
+def load_ckpt_metadata(ckpt_path: str) -> dict:
+    src = Path(ckpt_path)
+    meta = {}
+
+    sidecar = Path(str(src) + ".json")
+    if sidecar.exists():
+        with open(sidecar, "r", encoding="utf-8") as f:
+            loaded = json.load(f)
+        if not isinstance(loaded, dict):
+            raise ValueError(f"Checkpoint metadata is not a JSON object: {sidecar}")
+        meta.update(loaded)
+
+    match = CKPT_NAME_RE.match(src.name)
+    if match:
+        parsed = match.groupdict()
+        meta.setdefault("dataset", parsed["dataset"])
+        meta.setdefault("pretext", parsed["pretext"])
+        meta.setdefault("hgnn_type", parsed["hgnn_type"])
+        meta.setdefault("hidden_dim", int(parsed["hidden_dim"]))
+        meta.setdefault("num_samples", int(parsed["num_samples"]))
+        if parsed.get("seed") is not None:
+            meta.setdefault("seed", int(parsed["seed"]))
+
+    return meta
+
+
+def sync_args_with_ckpt(args, provided_options: set[str], ckpt_meta: dict):
+    if not ckpt_meta:
+        return args
+
+    conflicts = []
+    for key in CORE_CKPT_KEYS:
+        if key not in ckpt_meta or ckpt_meta[key] is None:
+            continue
+        ckpt_value = ckpt_meta[key]
+        arg_value = getattr(args, key, None)
+        if key in provided_options and arg_value is not None and arg_value != ckpt_value:
+            conflicts.append((key, arg_value, ckpt_value))
+            continue
+        setattr(args, key, ckpt_value)
+
+    if conflicts and not args.allow_ckpt_mismatch:
+        details = ", ".join(f"{key}=cli:{arg_value} ckpt:{ckpt_value}" for key, arg_value, ckpt_value in conflicts)
+        raise ValueError(
+            "Checkpoint config mismatch. The downstream loader expects the checkpoint identity fields to match "
+            f"the checkpoint metadata. Conflicts: {details}. Either remove the conflicting CLI flags or pass "
+            "--allow_ckpt_mismatch if you really want to bypass this safety check."
+        )
+
+    for key in OPTIONAL_CKPT_KEYS:
+        if key not in ckpt_meta or ckpt_meta[key] is None:
+            continue
+        if key not in provided_options:
+            setattr(args, key, ckpt_meta[key])
+
     return args
 
 
@@ -94,6 +191,7 @@ def main():
     ap.add_argument("--ckpt", type=str, required=True)
     ap.add_argument("--smoke_test", action="store_true")
     ap.add_argument("--benchmark_defaults", action="store_true")
+    ap.add_argument("--allow_ckpt_mismatch", action="store_true")
     ap.add_argument("--save_dir", type=str, default="artifacts/checkpoints/hgmp/downstream")
 
     ap.add_argument("--feats_type", type=int, default=0)
@@ -117,15 +215,20 @@ def main():
     ap.add_argument("--classification_type", type=str, default="NIG")
     ap.add_argument("--num_samples", type=int, default=100)
 
+    provided_options = collect_provided_options(sys.argv[1:])
     args = ap.parse_args()
 
     if args.benchmark_defaults:
         args = apply_benchmark_defaults(args)
 
+    ckpt_meta = load_ckpt_metadata(args.ckpt)
+    args = sync_args_with_ckpt(args, provided_options, ckpt_meta)
+
     if args.num_class is None:
         args.num_class = DATASET_NUM_CLASS.get(args.dataset, 3)
 
     args.device = normalize_device(args.device)
+    seed_everything(args.seed)
     args.shots = args.shot
     args.edge_feats = args.hidden_dim if args.edge_feats is None else args.edge_feats
 
@@ -138,6 +241,10 @@ def main():
     print(
         f"[INFO] HGMP downstream | dataset={args.dataset} | shot={args.shot} | seed={args.seed} | "
         f"repeat={args.repeat} | ckpt={args.ckpt}"
+    )
+    print(
+        f"[INFO] effective ckpt config | pretext={args.pretext} | hgnn_type={args.hgnn_type} | "
+        f"hidden_dim={args.hidden_dim} | num_samples={args.num_samples}"
     )
     print(f"[INFO] legacy expected ckpt path: {expected_ckpt}")
     if copied:

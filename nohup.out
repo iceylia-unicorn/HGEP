@@ -1,0 +1,25 @@
+Traceback (most recent call last):
+  File "/home_A/yuanqilin/repos/HGEP/scripts/edgeprompt2_spectral_followup.py", line 1704, in <module>
+    main()
+  File "/home_A/yuanqilin/repos/HGEP/scripts/edgeprompt2_spectral_followup.py", line 1694, in main
+    run_stage0(args)
+  File "/home_A/yuanqilin/repos/HGEP/scripts/edgeprompt2_spectral_followup.py", line 1557, in run_stage0
+    _run_entry(entry, exp_root=exp_root, force=args.force)
+  File "/home_A/yuanqilin/repos/HGEP/scripts/edgeprompt2_spectral_followup.py", line 752, in _run_entry
+    process = subprocess.run(
+              ^^^^^^^^^^^^^^^
+  File "/home_A/yuanqilin/.conda/envs/HGEP/lib/python3.11/subprocess.py", line 550, in run
+    stdout, stderr = process.communicate(input, timeout=timeout)
+                     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home_A/yuanqilin/.conda/envs/HGEP/lib/python3.11/subprocess.py", line 1201, in communicate
+    self.wait()
+  File "/home_A/yuanqilin/.conda/envs/HGEP/lib/python3.11/subprocess.py", line 1264, in wait
+    return self._wait(timeout=timeout)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home_A/yuanqilin/.conda/envs/HGEP/lib/python3.11/subprocess.py", line 2053, in _wait
+    (pid, sts) = self._try_wait(0)
+                 ^^^^^^^^^^^^^^^^^
+  File "/home_A/yuanqilin/.conda/envs/HGEP/lib/python3.11/subprocess.py", line 2011, in _try_wait
+    (pid, sts) = os.waitpid(self.pid, wait_flags)
+                 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+KeyboardInterrupt

@@ -45,7 +45,7 @@ python scripts/hgmp_run.py \
   --shot 10 \
   --seed 0 \
   --device cuda:0 \
-  --ckpt artifacts/checkpoints/hgmp/pretrain/ACM.GraphCL.GCN.hid128.np100.pth \
+  --ckpt artifacts/checkpoints/hgmp/pretrain/ACM.GraphCL.GCN.hid512.np500.seed0.pth \
   --benchmark_defaults
 
 

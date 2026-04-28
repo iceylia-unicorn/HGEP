@@ -38,7 +38,7 @@ def model_create(input_dims,dataname, hgnn_type,pre_method, num_class,metadata,n
         else:
             hgnn=HGNN(hid_dim=hid_dim,out_dim=hid_dim,hgnn_type=hgnn_type,num_layer=num_layer,num_heads=num_heads,dropout=dropout,metadata=metadata,ntypes=ntypes,num_etypes=num_etypes,input_dims=input_dims,args=args)
         pre_train_path = '{}/{}.{}.{}.hid{}.np{}.pth'.format(PRETRAIN_DIR, dataname, pre_method, hgnn_type, hid_dim, args.num_samples)
-        hgnn.load_state_dict(torch.load(pre_train_path))
+        hgnn.load_state_dict(torch.load(pre_train_path, map_location=args.device))
         #print("successfully load pre-trained weights for hgnn! @ {}".format(pre_train_path))
         for p in hgnn.parameters():
             p.requires_grad = False
@@ -223,8 +223,8 @@ def prompt_w_h(dataname="IMDB", hgnn_type="HGT", num_class=5, task_type='multi_c
             #print('Early stopping!')
             break
     # testing stage
-    PG.load_state_dict(torch.load('{}/checkpoints/hgmp/downstream/checkpoint_PG_{}_{}.pth'.format(ARTIFACT_ROOT,args.dataset,args.hgnn_type)))
-    answering.load_state_dict(torch.load('{}/checkpoints/hgmp/downstream/checkpoint_answer_{}_{}.pth'.format(ARTIFACT_ROOT,args.dataset, args.hgnn_type)))
+    PG.load_state_dict(torch.load('{}/checkpoints/hgmp/downstream/checkpoint_PG_{}_{}.pth'.format(ARTIFACT_ROOT,args.dataset,args.hgnn_type), map_location=args.device))
+    answering.load_state_dict(torch.load('{}/checkpoints/hgmp/downstream/checkpoint_answer_{}_{}.pth'.format(ARTIFACT_ROOT,args.dataset, args.hgnn_type), map_location=args.device))
 
     acc,ma_f1=acc_f1_over_batches(test_loader, PG, hgnn, answering, num_class, task_type, device=args.device,targetnode=targetnode,dataname=dataname,classification_type=args.classification_type)
     return acc,ma_f1
