@@ -1,25 +1,14 @@
-Traceback (most recent call last):
-  File "/home_A/yuanqilin/repos/HGEP/scripts/edgeprompt2_spectral_followup.py", line 1704, in <module>
-    main()
-  File "/home_A/yuanqilin/repos/HGEP/scripts/edgeprompt2_spectral_followup.py", line 1694, in main
-    run_stage0(args)
-  File "/home_A/yuanqilin/repos/HGEP/scripts/edgeprompt2_spectral_followup.py", line 1557, in run_stage0
-    _run_entry(entry, exp_root=exp_root, force=args.force)
-  File "/home_A/yuanqilin/repos/HGEP/scripts/edgeprompt2_spectral_followup.py", line 752, in _run_entry
-    process = subprocess.run(
-              ^^^^^^^^^^^^^^^
-  File "/home_A/yuanqilin/.conda/envs/HGEP/lib/python3.11/subprocess.py", line 550, in run
-    stdout, stderr = process.communicate(input, timeout=timeout)
-                     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
-  File "/home_A/yuanqilin/.conda/envs/HGEP/lib/python3.11/subprocess.py", line 1201, in communicate
-    self.wait()
-  File "/home_A/yuanqilin/.conda/envs/HGEP/lib/python3.11/subprocess.py", line 1264, in wait
-    return self._wait(timeout=timeout)
-           ^^^^^^^^^^^^^^^^^^^^^^^^^^^
-  File "/home_A/yuanqilin/.conda/envs/HGEP/lib/python3.11/subprocess.py", line 2053, in _wait
-    (pid, sts) = self._try_wait(0)
-                 ^^^^^^^^^^^^^^^^^
-  File "/home_A/yuanqilin/.conda/envs/HGEP/lib/python3.11/subprocess.py", line 2011, in _try_wait
-    (pid, sts) = os.waitpid(self.pid, wait_flags)
-                 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
-KeyboardInterrupt
+nohup: 忽略输入
+wandb: Tracking run with wandb version 0.26.0
+wandb: W&B syncing is set to `offline` in this directory. Run `wandb online` or set WANDB_MODE=online to enable cloud syncing.
+wandb: Run data is saved locally in /home_A/yuanqilin/repos/HGEP/artifacts/wandb/wandb/offline-run-20260508_153306-tzipb45t
+/home_A/yuanqilin/.conda/envs/HGEP/lib/python3.11/site-packages/torch/storage.py:414: FutureWarning: You are using `torch.load` with `weights_only=False` (the current default value), which uses the default pickle module implicitly. It is possible to construct malicious pickle data which will execute arbitrary code during unpickling (See https://github.com/pytorch/pytorch/blob/main/SECURITY.md#untrusted-models for more details). In a future release, the default value for `weights_only` will be flipped to `True`. This limits the functions that could be executed during unpickling. Arbitrary objects will no longer be allowed to be loaded via this mode unless they are explicitly allowlisted by the user via `torch.serialization.add_safe_globals`. We recommend you start setting `weights_only=True` for any use case where you don't have full control of the loaded file. Please open an issue on GitHub for any issues related to this experimental feature.
+  return torch.load(io.BytesIO(b))
+Computing METIS partitioning...
+Done!
+/home_A/yuanqilin/repos/HGEP/src/gpbench/protocol_bridge/downstream_legacy.py:268: FutureWarning: You are using `torch.load` with `weights_only=False` (the current default value), which uses the default pickle module implicitly. It is possible to construct malicious pickle data which will execute arbitrary code during unpickling (See https://github.com/pytorch/pytorch/blob/main/SECURITY.md#untrusted-models for more details). In a future release, the default value for `weights_only` will be flipped to `True`. This limits the functions that could be executed during unpickling. Arbitrary objects will no longer be allowed to be loaded via this mode unless they are explicitly allowlisted by the user via `torch.serialization.add_safe_globals`. We recommend you start setting `weights_only=True` for any use case where you don't have full control of the loaded file. Please open an issue on GitHub for any issues related to this experimental feature.
+  state = torch.load(ckpt_path, map_location="cpu")
+Computing METIS partitioning...
+Done!
+Computing METIS partitioning...
+Done!

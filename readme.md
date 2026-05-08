@@ -45,7 +45,7 @@ python scripts/hgmp_run.py \
   --shot 10 \
   --seed 0 \
   --device cuda:0 \
-  --ckpt artifacts/checkpoints/hgmp/pretrain/ACM.GraphCL.GCN.hid512.np500.seed0.pth \
+  --ckpt artifacts/checkpoints/hgmp/pretrain/ACM.GraphCL.GCN.hid128.np100.pth \
   --benchmark_defaults
 
 
@@ -86,12 +86,13 @@ python scripts/protocol_fewshot_eval.py \
 
 # 包
 安装dgl 
+```
 Cuda 12.1
 dgl 2.4 
-
 python=3.11
 torch==2.4.1
-
+```
+```bash
 conda install pytorch==2.4.1 torchvision==0.19.1 torchaudio==2.4.1 pytorch-cuda=12.1 -c pytorch -c nvidia
 
 pip install torch_scatter torch_sparse torch_cluster torch_spline_conv pyg_lib -f https://data.pyg.org/whl/torch-2.4.1%2Bcu124.html
@@ -101,7 +102,7 @@ pip install torch_geometric
 pip install dgl==2.4.0 -f https://data.dgl.ai/wheels/torch-2.4/cu121/repo.html
 
 pip install scikit-learn
-
+```
 # hgprompt 
 ## pretrain
 python scripts/hgprompt_pretrain.py \
@@ -188,7 +189,7 @@ python scripts/typepair_edge_feature_sweep.py \
   --dataset ACM \
   --shot 1 \
   --methods typepair \
-  --seeds 0 \
+  --seeds 0 1 2 3 4 \
   --hgnn_type GCN \
   --hidden_dim 512 \
   --num_heads 8 \
@@ -205,4 +206,48 @@ python scripts/typepair_edge_feature_sweep.py \
   --run_agent \
   --sweep_count 80 \
   --wandb_project HGEP \
-  --wandb_mode online
+  --wandb_mode offline
+
+# temp 
+```bash
+python scripts/protocol_benchmark_v2.py \
+  --dataset ACM \
+  --shot 1 \
+  --methods typepair \
+  --seeds 0 1 2 3 4 \
+  --hgnn_type GCN \
+  --hidden_dim 512 \
+  --num_heads 8 \
+  --num_samples 500 \
+  --repeats 1 \
+  --hgmp_ckpt artifacts/checkpoints/hgmp/pretrain/ACM.GraphCL.GCN.hid512.np500.seed0.pth \
+  --typepair_ckpt artifacts/checkpoints/hgmp/pretrain/ACM.GraphCL.GCN.hid512.np500.seed0.pth \
+  --hgprompt_ckpt artifacts/checkpoints/hgprompt/pretrain/ACM.gcn.ft2.hop1.seed0.best.pt 
+```
+```bash
+nohup python -u scripts/protocol_benchmark_v2.py   --dataset ACM   --shot 10   --methods typepair hgmp   --seeds 0 1 2 3 4   --hgnn_type GCN   --hidden_dim 512   --num_heads 8   --num_samples 500   --repeats 10   --hgmp_ckpt artifacts/checkpoints/hgmp/pretrain/ACM.GraphCL.GCN.hid512.np500.seed0.pth   --typepair_ckpt artifacts/checkpoints/hgmp/pretrain/ACM.GraphCL.GCN.hid512.np500.seed0.pth   --hgprompt_ckpt artifacts/checkpoints/hgprompt/pretrain/ACM.gcn.ft2.hop1.seed0.best.pt   --use_wandb > artifacts/logs/baseTest.log 2>&1 &
+```
+
+```bash
+nohup /home_A/yuanqilin/.conda/envs/HGEP/bin/python scripts/protocol_multishot_eval.py \
+  --dataset ACM \
+  --methods typepair hgmp \
+  --shots 1 3 5 10 \
+  --seeds 0 1 2 3 4 \
+  --repeats 1 \
+  --hgnn_type GCN \
+  --hidden_dim 512 \
+  --num_samples 500 \
+  --typepair_ckpt artifacts/checkpoints/hgmp/pretrain/ACM.GraphCL.GCN.hid512.np500.seed0.pth \
+  --hgmp_ckpt artifacts/checkpoints/hgmp/pretrain/ACM.GraphCL.GCN.hid512.np500.seed0.pth \
+  --enable_typepair_edge_features \
+  --typepair_edge_feature_names SpectralEmbeddingDiff \
+  --typepair_spectral_dim 8 \
+  --typepair_edge_prompt_fusion gate \
+  --use_wandb \
+  --wandb_mode offline \
+  > nohup.out 2>&1 &
+
+
+
+```

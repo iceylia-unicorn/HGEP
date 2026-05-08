@@ -1,14 +1,20 @@
 from __future__ import annotations
 
 import argparse
+<<<<<<< ours
 import csv
+=======
+>>>>>>> theirs
 import json
 import os
 import shlex
 import subprocess
 import sys
+<<<<<<< ours
 import time
 from dataclasses import asdict, dataclass
+=======
+>>>>>>> theirs
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
@@ -16,6 +22,7 @@ from typing import Any
 
 ROOT = Path(__file__).resolve().parents[1]
 BENCHMARK = ROOT / "scripts" / "protocol_benchmark_v2.py"
+<<<<<<< ours
 DEFAULT_RESULTS_ROOT = ROOT / "artifacts" / "results" / "edgeprompt2_experiments"
 PREVIOUS_EXPERIMENT_ROOT = DEFAULT_RESULTS_ROOT / "acm10_typepair_edgeprompt2_controlled"
 
@@ -138,6 +145,31 @@ class ResultSummary:
     delta_seed_macro_vs_spectral_only: float | None = None
     delta_seed_micro_vs_spectral_only: float | None = None
 
+=======
+PRECOMPUTE = ROOT / "scripts" / "precompute_typepair_spectral.py"
+DEFAULT_RESULTS_ROOT = ROOT / "artifacts" / "results" / "edgeprompt2_experiments"
+DEFAULT_EXPERIMENT_NAME = "acm10_typepair_edgeprompt2_spectral_best"
+LEGACY_FOLLOWUP_ROOT = DEFAULT_RESULTS_ROOT / "acm10_typepair_edgeprompt2_spectral_followup"
+SPECTRAL_ONLY_FEATURES = ["SpectralEmbeddingDiff"]
+
+BEST_CONFIG_FALLBACK = {
+    "slot": "spectral_only_dim16_gate_alpha0p2",
+    "features": SPECTRAL_ONLY_FEATURES,
+    "spectral_dim": 16,
+    "fusion": "gate",
+    "alpha": 0.2,
+    "hidden": 128,
+    "repeats": 5,
+    "seeds": [0, 1, 2, 3, 4],
+    "seed_macro_mean": 0.879591703414917,
+    "seed_macro_std": 0.009033731884551035,
+    "seed_micro_mean": 0.8788102030754089,
+    "seed_micro_std": 0.00937113472845655,
+    "delta_seed_macro_vs_baseline_no_edge": 0.07380452394485482,
+    "delta_seed_micro_vs_baseline_no_edge": 0.07439094066619878,
+}
+
+>>>>>>> theirs
 
 def _now_iso() -> str:
     return datetime.now(timezone.utc).astimezone().isoformat(timespec="seconds")
@@ -152,6 +184,7 @@ def _read_json(path: Path) -> dict[str, Any]:
     return json.loads(path.read_text(encoding="utf-8"))
 
 
+<<<<<<< ours
 def _write_csv(path: Path, rows: list[dict[str, Any]], fieldnames: list[str] | None = None):
     path.parent.mkdir(parents=True, exist_ok=True)
     names = fieldnames or (list(rows[0].keys()) if rows else [])
@@ -199,10 +232,50 @@ def _benchmark_output_dir(save_dir: Path, dataset: str, shot: int) -> Path:
     return save_dir / dataset / f"{shot}-shot"
 
 
+=======
+>>>>>>> theirs
 def _command_string(cmd: list[str]) -> str:
     return shlex.join(cmd)
 
 
+<<<<<<< ours
+=======
+def _load_best_config() -> dict[str, Any]:
+    stage3 = LEGACY_FOLLOWUP_ROOT / "stage3_final_analysis.json"
+    if stage3.exists():
+        payload = _read_json(stage3)
+        best = payload.get("best_final_config") or {}
+        if best:
+            return {
+                "slot": best.get("slot", BEST_CONFIG_FALLBACK["slot"]),
+                "features": [item for item in str(best.get("features", "")).split(",") if item] or list(SPECTRAL_ONLY_FEATURES),
+                "spectral_dim": int(best.get("spectral_dim", BEST_CONFIG_FALLBACK["spectral_dim"])),
+                "fusion": str(best.get("fusion", BEST_CONFIG_FALLBACK["fusion"])),
+                "alpha": float(best.get("alpha", BEST_CONFIG_FALLBACK["alpha"])),
+                "hidden": int(best.get("hidden", BEST_CONFIG_FALLBACK["hidden"])),
+                "repeats": int(best.get("repeats", BEST_CONFIG_FALLBACK["repeats"])),
+                "seeds": [int(item) for item in str(best.get("seeds", "")).split(",") if item] or list(BEST_CONFIG_FALLBACK["seeds"]),
+                "seed_macro_mean": float(best.get("seed_macro_mean", BEST_CONFIG_FALLBACK["seed_macro_mean"])),
+                "seed_macro_std": float(best.get("seed_macro_std", BEST_CONFIG_FALLBACK["seed_macro_std"])),
+                "seed_micro_mean": float(best.get("seed_micro_mean", BEST_CONFIG_FALLBACK["seed_micro_mean"])),
+                "seed_micro_std": float(best.get("seed_micro_std", BEST_CONFIG_FALLBACK["seed_micro_std"])),
+                "delta_seed_macro_vs_baseline_no_edge": float(
+                    best.get(
+                        "delta_seed_macro_vs_baseline_no_edge",
+                        BEST_CONFIG_FALLBACK["delta_seed_macro_vs_baseline_no_edge"],
+                    )
+                ),
+                "delta_seed_micro_vs_baseline_no_edge": float(
+                    best.get(
+                        "delta_seed_micro_vs_baseline_no_edge",
+                        BEST_CONFIG_FALLBACK["delta_seed_micro_vs_baseline_no_edge"],
+                    )
+                ),
+            }
+    return dict(BEST_CONFIG_FALLBACK)
+
+
+>>>>>>> theirs
 def _base_args(args) -> list[str]:
     base = [
         "--dataset",
@@ -251,6 +324,7 @@ def _base_args(args) -> list[str]:
         str(args.weight_decay),
         "--early_stop_metric",
         args.early_stop_metric,
+<<<<<<< ours
         "--hgmp_ckpt",
         args.hgmp_ckpt,
         "--typepair_ckpt",
@@ -260,6 +334,19 @@ def _base_args(args) -> list[str]:
         "--wandb_mode",
         args.wandb_mode,
     ]
+=======
+        "--typepair_ckpt",
+        args.typepair_ckpt,
+        "--typepair_spectral_cache_dir",
+        str(args.typepair_spectral_cache_dir),
+        "--wandb_mode",
+        args.wandb_mode,
+    ]
+    if args.hgmp_ckpt:
+        base.extend(["--hgmp_ckpt", args.hgmp_ckpt])
+    if args.hgprompt_ckpt:
+        base.extend(["--hgprompt_ckpt", args.hgprompt_ckpt])
+>>>>>>> theirs
     if args.prompt_lr is not None:
         base.extend(["--prompt_lr", str(args.prompt_lr)])
     if args.use_wandb:
@@ -273,6 +360,7 @@ def _base_args(args) -> list[str]:
     return base
 
 
+<<<<<<< ours
 def _wandb_note(stage: str, hypothesis: str, compare_to: str, decision_rule: str) -> str:
     return (
         f"stage={stage}; hypothesis={hypothesis}; baseline={compare_to}; "
@@ -303,12 +391,36 @@ def _build_run_entry(
     wandb_name = f"{args.experiment_name}-{slot}"
     wandb_notes = _wandb_note(stage, hypothesis, compare_to, decision_rule)
     cmd = [
+=======
+def _build_precompute_cmd(args, best: dict[str, Any]) -> list[str]:
+    return [
+        args.python_exec,
+        str(PRECOMPUTE),
+        "--dataset",
+        args.dataset,
+        "--root",
+        args.root,
+        "--feats_type",
+        str(args.feats_type),
+        "--typepair_spectral_cache_dir",
+        str(args.typepair_spectral_cache_dir),
+        "--typepair_spectral_dim",
+        str(best["spectral_dim"]),
+        "--typepair_spectral_max_nodes",
+        str(args.typepair_spectral_max_nodes),
+    ]
+
+
+def _build_benchmark_cmd(args, best: dict[str, Any], save_dir: Path) -> list[str]:
+    return [
+>>>>>>> theirs
         args.python_exec,
         str(BENCHMARK),
         *_base_args(args),
         "--save_dir",
         str(save_dir),
         "--repeats",
+<<<<<<< ours
         str(repeats),
         "--seeds",
         *[str(seed) for seed in seeds],
@@ -548,12 +660,47 @@ def _placeholder_manifest(stage: str, objective: str, reason: str) -> dict[str, 
         "objective": objective,
         "pending_reason": reason,
         "runs": [],
+=======
+        str(best["repeats"]),
+        "--seeds",
+        *[str(seed) for seed in best["seeds"]],
+        "--feats_type",
+        str(args.feats_type),
+        "--typepair_spectral_dim",
+        str(best["spectral_dim"]),
+        "--typepair_spectral_max_nodes",
+        str(args.typepair_spectral_max_nodes),
+        "--typepair_edge_prompt_hidden",
+        str(best["hidden"]),
+        "--typepair_edge_prompt_alpha",
+        str(best["alpha"]),
+        "--typepair_edge_prompt_fusion",
+        str(best["fusion"]),
+        "--enable_typepair_edge_features",
+        "--typepair_edge_feature_names",
+        *best["features"],
+    ]
+
+
+def _manifest(args, best: dict[str, Any], save_dir: Path) -> dict[str, Any]:
+    precompute_cmd = _build_precompute_cmd(args, best)
+    benchmark_cmd = _build_benchmark_cmd(args, best, save_dir)
+    return {
+        "experiment_name": args.experiment_name,
+        "created_at": _now_iso(),
+        "source_followup_root": str(LEGACY_FOLLOWUP_ROOT),
+        "best_config": best,
+        "precompute_command": _command_string(precompute_cmd),
+        "benchmark_command": _command_string(benchmark_cmd),
+        "save_dir": str(save_dir),
+>>>>>>> theirs
     }
 
 
 def prepare(args) -> Path:
     exp_root = args.results_root / args.experiment_name
     exp_root.mkdir(parents=True, exist_ok=True)
+<<<<<<< ours
 
     initial_manifest = {
         "experiment_name": args.experiment_name,
@@ -1618,6 +1765,82 @@ def build_parser():
     parser = argparse.ArgumentParser("Spectral-centered edgeprompt2 follow-up driver")
     parser.add_argument("action", choices=["prepare", "run_stage0", "run_stage1", "run_stage2", "run_stage3", "summarize", "full"])
     parser.add_argument("--experiment_name", type=str, default="acm10_typepair_edgeprompt2_spectral_followup")
+=======
+    best = _load_best_config()
+    manifest = _manifest(args, best, exp_root / "best_config_run")
+    manifest_path = exp_root / "spectral_best_manifest.json"
+    _json_dump(manifest_path, manifest)
+    return manifest_path
+
+
+def _run_cmd(cmd: list[str], cwd: Path, env_overrides: dict[str, str] | None = None):
+    env = os.environ.copy()
+    if env_overrides:
+        env.update(env_overrides)
+    subprocess.run(cmd, cwd=str(cwd), env=env, check=True)
+
+
+def run_best(args):
+    exp_root = args.results_root / args.experiment_name
+    exp_root.mkdir(parents=True, exist_ok=True)
+    best = _load_best_config()
+    save_dir = exp_root / "best_config_run"
+    env_overrides = {"CUDA_VISIBLE_DEVICES": args.cuda_visible_devices} if args.cuda_visible_devices else None
+
+    if args.precompute_spectral:
+        _run_cmd(_build_precompute_cmd(args, best), cwd=ROOT, env_overrides=env_overrides)
+    _run_cmd(_build_benchmark_cmd(args, best, save_dir), cwd=ROOT, env_overrides=env_overrides)
+    summarize(args)
+
+
+def summarize(args) -> Path:
+    exp_root = args.results_root / args.experiment_name
+    exp_root.mkdir(parents=True, exist_ok=True)
+    best = _load_best_config()
+    output_dir = exp_root / "best_config_run" / args.dataset / f"{args.shot}-shot"
+    overall_summary_path = output_dir / "overall_summary.json"
+
+    lines = [
+        "# Spectral Best Config",
+        "",
+        f"- Updated: `{_now_iso()}`",
+        f"- Source experiment: `{LEGACY_FOLLOWUP_ROOT.name}`",
+        f"- Features: `{','.join(best['features'])}`",
+        f"- Best prompt config: `spectral_dim={best['spectral_dim']}`, `fusion={best['fusion']}`, `alpha={best['alpha']}`, `hidden={best['hidden']}`",
+        f"- Reference score: `macro={best['seed_macro_mean']:.4f} +/- {best['seed_macro_std']:.4f}`, `micro={best['seed_micro_mean']:.4f} +/- {best['seed_micro_std']:.4f}`",
+        f"- Delta vs no-edge: `macro={best['delta_seed_macro_vs_baseline_no_edge']:+.4f}`, `micro={best['delta_seed_micro_vs_baseline_no_edge']:+.4f}`",
+        "",
+        "## Commands",
+        "",
+        f"- Precompute spectral cache: `{_command_string(_build_precompute_cmd(args, best))}`",
+        f"- Reproduce benchmark: `{_command_string(_build_benchmark_cmd(args, best, exp_root / 'best_config_run'))}`",
+    ]
+
+    if overall_summary_path.exists():
+        summary = _read_json(overall_summary_path)
+        pooled = summary["pooled_runs"]["typepair"]
+        seed = summary["seed_mean_then_std"]["typepair"]
+        lines.extend(
+            [
+                "",
+                "## Local Run",
+                "",
+                f"- Output dir: `{output_dir}`",
+                f"- Pooled macro/micro: `{pooled['macro_mean']:.4f}` / `{pooled['micro_mean']:.4f}`",
+                f"- Seed macro/micro: `{seed['macro_mean']:.4f} +/- {seed['macro_std']:.4f}` / `{seed['micro_mean']:.4f} +/- {seed['micro_std']:.4f}`",
+            ]
+        )
+
+    report_path = exp_root / "spectral_best_summary.md"
+    report_path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+    return report_path
+
+
+def build_parser():
+    parser = argparse.ArgumentParser("Spectral-only follow-up runner for typepair edge prompts")
+    parser.add_argument("action", choices=["prepare", "run_best", "summarize"])
+    parser.add_argument("--experiment_name", type=str, default=DEFAULT_EXPERIMENT_NAME)
+>>>>>>> theirs
     parser.add_argument("--results_root", type=Path, default=DEFAULT_RESULTS_ROOT)
     parser.add_argument("--python_exec", type=str, default=sys.executable)
 
@@ -1628,6 +1851,10 @@ def build_parser():
     parser.add_argument("--pretrain_seed", type=int, default=0)
     parser.add_argument("--device", type=str, default="cuda:0")
     parser.add_argument("--cuda_visible_devices", type=str, default=None)
+<<<<<<< ours
+=======
+    parser.add_argument("--feats_type", type=int, default=0)
+>>>>>>> theirs
 
     parser.add_argument("--hgnn_type", type=str, default="GCN")
     parser.add_argument("--hidden_dim", type=int, default=512)
@@ -1647,11 +1874,37 @@ def build_parser():
     parser.add_argument("--weight_decay", type=float, default=1e-4)
     parser.add_argument("--early_stop_metric", type=str, default="macro")
 
+<<<<<<< ours
     parser.add_argument("--hgmp_ckpt", type=str, default="artifacts/checkpoints/hgmp/pretrain/ACM.GraphCL.GCN.hid512.np500.seed0.pth")
     parser.add_argument("--typepair_ckpt", type=str, default="artifacts/checkpoints/hgmp/pretrain/ACM.GraphCL.GCN.hid512.np500.seed0.pth")
     parser.add_argument("--hgprompt_ckpt", type=str, default="artifacts/checkpoints/hgprompt/pretrain/ACM.gcn.ft2.hop1.seed0.best.pt")
 
     parser.add_argument("--stage_seeds", nargs="+", type=int, default=[0, 1, 2, 3, 4])
+=======
+    parser.add_argument(
+        "--typepair_ckpt",
+        type=str,
+        default="artifacts/checkpoints/hgmp/pretrain/ACM.GraphCL.GCN.hid512.np500.seed0.pth",
+    )
+    parser.add_argument(
+        "--hgmp_ckpt",
+        type=str,
+        default="artifacts/checkpoints/hgmp/pretrain/ACM.GraphCL.GCN.hid512.np500.seed0.pth",
+    )
+    parser.add_argument(
+        "--hgprompt_ckpt",
+        type=str,
+        default="artifacts/checkpoints/hgprompt/pretrain/ACM.gcn.ft2.hop1.seed0.best.pt",
+    )
+    parser.add_argument(
+        "--typepair_spectral_cache_dir",
+        type=Path,
+        default=ROOT / "artifacts" / "cache" / "typepair_spectral_embeddings",
+    )
+    parser.add_argument("--typepair_spectral_max_nodes", type=int, default=50000)
+
+    parser.add_argument("--precompute_spectral", action=argparse.BooleanOptionalAction, default=True)
+>>>>>>> theirs
     parser.add_argument("--use_wandb", action=argparse.BooleanOptionalAction, default=True)
     parser.add_argument("--wandb_project", type=str, default="HGEP")
     parser.add_argument("--wandb_entity", type=str, default=None)
@@ -1659,15 +1912,21 @@ def build_parser():
     parser.add_argument(
         "--wandb_tags",
         nargs="*",
+<<<<<<< ours
         default=["ACM", "10-shot", "typepair", "edgeprompt2", "followup", "spectral"],
     )
     parser.add_argument("--force", action="store_true")
+=======
+        default=["ACM", "10-shot", "typepair", "spectral-only"],
+    )
+>>>>>>> theirs
     return parser
 
 
 def main():
     args = build_parser().parse_args()
     if args.action == "prepare":
+<<<<<<< ours
         prepare(args)
         return
 
@@ -1696,6 +1955,17 @@ def main():
         run_stage2(args)
         run_stage3(args)
         summarize_all(args)
+=======
+        path = prepare(args)
+        print(path)
+        return
+    if args.action == "run_best":
+        run_best(args)
+        return
+    if args.action == "summarize":
+        path = summarize(args)
+        print(path)
+>>>>>>> theirs
         return
     raise ValueError(f"Unsupported action: {args.action}")
 

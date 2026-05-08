@@ -21,7 +21,6 @@ from types import SimpleNamespace
 import dgl
 import numpy as np
 import torch
-import torch.nn.functional as F
 from torch_geometric.datasets import HGBDataset
 from torch_geometric.transforms import ToUndirected
 from torch_geometric.utils import to_dgl
@@ -65,17 +64,7 @@ TARGET_NODETYPE = {
 }
 
 TYPEPAIR_EDGE_FEATURE_NAME = "typepair_edge_feat"
-TYPEPAIR_EDGE_FEATURES = [
-    "NodeTypeEncoding",
-    "EdgeTypeOneHot",
-    "DegreeDiff",
-    "NeighborTypeOverlap",
-    "NodeAttrCosSim",
-    "NeighborAttrVariance",
-    "PageRankDiff",
-    "CommunityLabelDiff",
-    "SpectralEmbeddingDiff",
-]
+TYPEPAIR_EDGE_FEATURES = ["SpectralEmbeddingDiff"]
 
 
 @dataclass
@@ -185,46 +174,26 @@ def _load_raw_heterograph(root: str, dataset: str, feats_type: int):
     return graph, TARGET_NODETYPE[dataset]
 
 
-def _typepair_edge_feature_cache_path(args) -> Path:
-    cache_dir = Path(getattr(args, "typepair_edge_feature_cache_dir", ROOT / "artifacts" / "cache" / "typepair_edge_features"))
+def _typepair_spectral_cache_path(args) -> Path:
+    cache_dir = Path(
+        getattr(
+            args,
+            "typepair_spectral_cache_dir",
+            ROOT / "artifacts" / "cache" / "typepair_spectral_embeddings",
+        )
+    )
     spectral_dim = int(getattr(args, "typepair_spectral_dim", 8))
-    attr_cap = int(getattr(args, "typepair_edge_attr_dim_cap", 256))
-    pagerank_damping = str(getattr(args, "typepair_pagerank_damping", 0.85)).replace(".", "p")
-    pagerank_iter = int(getattr(args, "typepair_pagerank_max_iter", 50))
+    max_nodes = int(getattr(args, "typepair_spectral_max_nodes", 50000))
     return (
         cache_dir
         / args.dataset
         / f"ft{args.feats_type}"
-        / f"attr{attr_cap}.spec{spectral_dim}.pr{pagerank_damping}.pit{pagerank_iter}.pt"
+        / f"spec{spectral_dim}.mn{max_nodes}.pt"
     )
 
 
 def _edge_type_key(etype) -> str:
     return "__".join(str(part) for part in etype)
-
-
-def _align_node_attrs(graph, attr_dim_cap: int) -> dict[str, torch.Tensor]:
-    raw_attrs = {}
-    max_dim = 1
-    for ntype in graph.ntypes:
-        x = graph.ndata["x"][ntype].detach().cpu()
-        if x.is_sparse:
-            x = x.to_dense()
-        x = x.float()
-        if x.dim() == 1:
-            x = x.unsqueeze(-1)
-        raw_attrs[ntype] = x
-        max_dim = max(max_dim, int(x.size(1)))
-
-    width = max_dim if attr_dim_cap <= 0 else min(max_dim, int(attr_dim_cap))
-    aligned = {}
-    for ntype, x in raw_attrs.items():
-        out = torch.zeros((x.size(0), width), dtype=torch.float32)
-        take = min(width, x.size(1))
-        if take > 0:
-            out[:, :take] = x[:, :take]
-        aligned[ntype] = out
-    return aligned
 
 
 def _collect_global_edges(graph, offsets: dict[str, int]) -> tuple[torch.Tensor, torch.Tensor]:
@@ -237,68 +206,6 @@ def _collect_global_edges(graph, offsets: dict[str, int]) -> tuple[torch.Tensor,
     if not src_all:
         return torch.empty(0, dtype=torch.long), torch.empty(0, dtype=torch.long)
     return torch.cat(src_all), torch.cat(dst_all)
-
-
-def _pagerank_power_iteration(
-    num_nodes: int,
-    src: torch.Tensor,
-    dst: torch.Tensor,
-    damping: float,
-    max_iter: int,
-    tol: float,
-) -> torch.Tensor:
-    if num_nodes == 0:
-        return torch.empty(0, dtype=torch.float32)
-    if src.numel() == 0:
-        return torch.full((num_nodes,), 1.0 / max(num_nodes, 1), dtype=torch.float32)
-
-    src = src.long()
-    dst = dst.long()
-    out_degree = torch.bincount(src, minlength=num_nodes).float()
-    rank = torch.full((num_nodes,), 1.0 / num_nodes, dtype=torch.float32)
-    teleport = (1.0 - damping) / num_nodes
-
-    for _ in range(max_iter):
-        new_rank = torch.full_like(rank, teleport)
-        valid = out_degree[src] > 0
-        contrib = rank[src[valid]] / out_degree[src[valid]]
-        new_rank.index_add_(0, dst[valid], damping * contrib)
-
-        dangling_mass = rank[out_degree == 0].sum()
-        if dangling_mass > 0:
-            new_rank += damping * dangling_mass / num_nodes
-
-        if torch.norm(new_rank - rank, p=1).item() < tol:
-            rank = new_rank
-            break
-        rank = new_rank
-    return rank
-
-
-def _community_labels(num_nodes: int, src: torch.Tensor, dst: torch.Tensor, seed: int) -> torch.Tensor:
-    labels = torch.zeros(num_nodes, dtype=torch.long)
-    if num_nodes == 0 or src.numel() == 0:
-        return labels
-
-    try:
-        import networkx as nx
-    except ImportError:
-        warnings.warn("networkx is not available; CommunityLabelDiff falls back to a single community.")
-        return labels
-
-    nx_graph = nx.Graph()
-    nx_graph.add_nodes_from(range(num_nodes))
-    nx_graph.add_edges_from(zip(src.tolist(), dst.tolist()))
-
-    try:
-        communities = nx.community.louvain_communities(nx_graph, seed=seed)
-    except Exception as exc:
-        warnings.warn(f"networkx louvain failed ({exc}); falling back to connected components.")
-        communities = list(nx.connected_components(nx_graph))
-
-    for label, nodes in enumerate(communities):
-        labels[list(nodes)] = int(label)
-    return labels
 
 
 def _spectral_embeddings(
@@ -354,24 +261,9 @@ def _spectral_embeddings(
 
 
 def _feature_slices(num_node_types: int, num_edge_types: int, spectral_dim: int) -> dict[str, tuple[int, int]]:
-    cursor = 0
-    slices = {}
-
-    def add(name: str, width: int):
-        nonlocal cursor
-        slices[name] = (cursor, cursor + width)
-        cursor += width
-
-    add("NodeTypeEncoding", 3 * num_node_types)
-    add("EdgeTypeOneHot", num_edge_types)
-    add("DegreeDiff", 1)
-    add("NeighborTypeOverlap", 1)
-    add("NodeAttrCosSim", 1)
-    add("NeighborAttrVariance", 1)
-    add("PageRankDiff", 1)
-    add("CommunityLabelDiff", 1)
-    add("SpectralEmbeddingDiff", spectral_dim)
-    return slices
+    del num_node_types
+    del num_edge_types
+    return {"SpectralEmbeddingDiff": (0, spectral_dim)}
 
 
 def _coerce_feature_name_list(value) -> list[str] | None:
@@ -385,44 +277,20 @@ def _coerce_feature_name_list(value) -> list[str] | None:
     return [str(item).strip() for item in value if str(item).strip()]
 
 
-def _coerce_bool(value) -> bool:
-    if isinstance(value, bool):
-        return value
-    if isinstance(value, (int, np.integer)):
-        return bool(value)
-    if isinstance(value, str):
-        return value.strip().lower() in {"1", "true", "yes", "y", "on"}
-    return bool(value)
-
-
 def get_selected_typepair_edge_feature_names(args, feature_slices: dict[str, tuple[int, int]] | None = None) -> list[str]:
     available = list(feature_slices.keys()) if feature_slices is not None else list(TYPEPAIR_EDGE_FEATURES)
-    available_set = set(available)
-
     configured = _coerce_feature_name_list(getattr(args, "typepair_edge_feature_names", None))
-    if configured is not None:
-        unknown = [name for name in configured if name not in available_set]
-        if unknown:
-            raise ValueError(f"Unknown typepair edge feature names: {unknown}. Available: {available}")
-        return configured
-
-    selected = []
-    saw_bool_flag = False
-    for name in available:
-        flag_value = None
-        for attr in (f"use_{name}", f"edge_feat_{name}", f"typepair_use_{name}"):
-            if hasattr(args, attr):
-                flag_value = getattr(args, attr)
-                break
-        if flag_value is None:
-            continue
-        saw_bool_flag = True
-        if _coerce_bool(flag_value):
-            selected.append(name)
-
-    if saw_bool_flag:
-        return selected
-    return available
+    if configured is None:
+        return available
+    if not configured:
+        return []
+    unknown = [name for name in configured if name not in set(available)]
+    if unknown:
+        raise ValueError(
+            f"Unsupported typepair edge feature names: {unknown}. "
+            f"Only spectral edge prompts remain enabled: {available}."
+        )
+    return configured
 
 
 def _summarize_edge_features(edge_feature_table: dict, feature_slices: dict[str, tuple[int, int]]) -> dict:
@@ -492,12 +360,10 @@ def _subset_typepair_edge_feature_payload(payload: dict, args) -> dict:
     return out
 
 
-def _compute_typepair_edge_feature_table(graph, args) -> dict:
+def _compute_typepair_spectral_payload(graph, args) -> dict:
     start_time = time.perf_counter()
     ntypes = list(graph.ntypes)
     etypes = list(graph.canonical_etypes)
-    node_type_to_idx = {ntype: i for i, ntype in enumerate(ntypes)}
-    edge_type_to_idx = {etype: i for i, etype in enumerate(etypes)}
 
     offsets = {}
     total_nodes = 0
@@ -505,76 +371,7 @@ def _compute_typepair_edge_feature_table(graph, args) -> dict:
         offsets[ntype] = total_nodes
         total_nodes += graph.num_nodes(ntype)
 
-    aligned_attrs = _align_node_attrs(graph, int(getattr(args, "typepair_edge_attr_dim_cap", 256)))
-    attr_width = next(iter(aligned_attrs.values())).size(1) if aligned_attrs else 0
-
-    degree = {ntype: torch.zeros(graph.num_nodes(ntype), dtype=torch.float32) for ntype in ntypes}
-    neighbor_type_hist = {
-        ntype: torch.zeros((graph.num_nodes(ntype), len(ntypes)), dtype=torch.float32)
-        for ntype in ntypes
-    }
-    neigh_sum = {
-        ntype: torch.zeros((graph.num_nodes(ntype), attr_width), dtype=torch.float32)
-        for ntype in ntypes
-    }
-    neigh_sq_sum = {
-        ntype: torch.zeros((graph.num_nodes(ntype), attr_width), dtype=torch.float32)
-        for ntype in ntypes
-    }
-    neigh_count = {
-        ntype: torch.zeros((graph.num_nodes(ntype), 1), dtype=torch.float32)
-        for ntype in ntypes
-    }
-
-    for src_t, rel_t, dst_t in etypes:
-        src, dst = graph.edges(etype=(src_t, rel_t, dst_t))
-        src = src.detach().cpu().long()
-        dst = dst.detach().cpu().long()
-        if src.numel() == 0:
-            continue
-
-        ones = torch.ones(src.numel(), dtype=torch.float32)
-        degree[src_t].index_add_(0, src, ones)
-        degree[dst_t].index_add_(0, dst, ones)
-
-        dst_type_msg = torch.zeros((src.numel(), len(ntypes)), dtype=torch.float32)
-        dst_type_msg[:, node_type_to_idx[dst_t]] = 1.0
-        src_type_msg = torch.zeros((dst.numel(), len(ntypes)), dtype=torch.float32)
-        src_type_msg[:, node_type_to_idx[src_t]] = 1.0
-        neighbor_type_hist[src_t].index_add_(0, src, dst_type_msg)
-        neighbor_type_hist[dst_t].index_add_(0, dst, src_type_msg)
-
-        dst_attr = aligned_attrs[dst_t][dst]
-        src_attr = aligned_attrs[src_t][src]
-        neigh_sum[src_t].index_add_(0, src, dst_attr)
-        neigh_sq_sum[src_t].index_add_(0, src, dst_attr * dst_attr)
-        neigh_count[src_t].index_add_(0, src, torch.ones((src.numel(), 1), dtype=torch.float32))
-        neigh_sum[dst_t].index_add_(0, dst, src_attr)
-        neigh_sq_sum[dst_t].index_add_(0, dst, src_attr * src_attr)
-        neigh_count[dst_t].index_add_(0, dst, torch.ones((dst.numel(), 1), dtype=torch.float32))
-
-    neighbor_attr_var = {}
-    for ntype in ntypes:
-        count = neigh_count[ntype].clamp_min(1.0)
-        mean = neigh_sum[ntype] / count
-        var = (neigh_sq_sum[ntype] / count - mean * mean).clamp_min(0.0)
-        neighbor_attr_var[ntype] = var.mean(dim=1)
-
     global_src, global_dst = _collect_global_edges(graph, offsets)
-    pagerank = _pagerank_power_iteration(
-        total_nodes,
-        global_src,
-        global_dst,
-        damping=float(getattr(args, "typepair_pagerank_damping", 0.85)),
-        max_iter=int(getattr(args, "typepair_pagerank_max_iter", 50)),
-        tol=float(getattr(args, "typepair_pagerank_tol", 1e-6)),
-    )
-    community = _community_labels(
-        total_nodes,
-        global_src,
-        global_dst,
-        seed=int(getattr(args, "split_seed", 0)),
-    )
     spectral_dim = int(getattr(args, "typepair_spectral_dim", 8))
     spectral = _spectral_embeddings(
         total_nodes,
@@ -583,9 +380,25 @@ def _compute_typepair_edge_feature_table(graph, args) -> dict:
         dim=spectral_dim,
         max_nodes=int(getattr(args, "typepair_spectral_max_nodes", 50000)),
     )
+    generation_seconds = float(time.perf_counter() - start_time)
+    return {
+        "spectral_embeddings": spectral,
+        "spectral_dim": spectral_dim,
+        "node_types": ntypes,
+        "edge_types": etypes,
+        "node_offsets": offsets,
+        "total_nodes": int(total_nodes),
+        "total_edges": int(global_src.numel()),
+        "generation_seconds": generation_seconds,
+    }
 
-    node_eye = torch.eye(len(ntypes), dtype=torch.float32)
-    edge_eye = torch.eye(len(etypes), dtype=torch.float32)
+
+def _build_spectral_edge_feature_payload(graph, spectral_payload: dict) -> dict:
+    ntypes = list(graph.ntypes)
+    etypes = list(graph.canonical_etypes)
+    spectral = spectral_payload["spectral_embeddings"]
+    offsets = spectral_payload["node_offsets"]
+    spectral_dim = int(spectral_payload["spectral_dim"])
     feature_slices = _feature_slices(len(ntypes), len(etypes), spectral_dim)
     edge_feature_table = {}
 
@@ -594,54 +407,13 @@ def _compute_typepair_edge_feature_table(graph, args) -> dict:
         src, dst = graph.edges(etype=etype)
         src = src.detach().cpu().long()
         dst = dst.detach().cpu().long()
-        edge_count = src.numel()
-
-        src_type = node_eye[node_type_to_idx[src_t]].unsqueeze(0).expand(edge_count, -1)
-        dst_type = node_eye[node_type_to_idx[dst_t]].unsqueeze(0).expand(edge_count, -1)
-        node_type_encoding = torch.cat([src_type, dst_type, src_type - dst_type], dim=1)
-        edge_type_onehot = edge_eye[edge_type_to_idx[etype]].unsqueeze(0).expand(edge_count, -1)
-
-        degree_diff = (degree[src_t][src] - degree[dst_t][dst]).unsqueeze(1)
-
-        src_hist = neighbor_type_hist[src_t][src]
-        dst_hist = neighbor_type_hist[dst_t][dst]
-        overlap_num = torch.minimum(src_hist, dst_hist).sum(dim=1)
-        overlap_den = torch.maximum(src_hist, dst_hist).sum(dim=1).clamp_min(1.0)
-        neighbor_type_overlap = (overlap_num / overlap_den).unsqueeze(1)
-
-        node_attr_cos = F.cosine_similarity(
-            aligned_attrs[src_t][src],
-            aligned_attrs[dst_t][dst],
-            dim=1,
-            eps=1e-8,
-        ).unsqueeze(1)
-
-        neighbor_var_diff = (neighbor_attr_var[src_t][src] - neighbor_attr_var[dst_t][dst]).unsqueeze(1)
-
         src_global = src + offsets[src_t]
         dst_global = dst + offsets[dst_t]
-        pagerank_diff = (pagerank[src_global] - pagerank[dst_global]).unsqueeze(1)
-        community_diff = (community[src_global] != community[dst_global]).float().unsqueeze(1)
         spectral_diff = spectral[src_global] - spectral[dst_global]
-
-        edge_feature_table[etype] = torch.cat(
-            [
-                node_type_encoding,
-                edge_type_onehot,
-                degree_diff,
-                neighbor_type_overlap,
-                node_attr_cos,
-                neighbor_var_diff,
-                pagerank_diff,
-                community_diff,
-                spectral_diff,
-            ],
-            dim=1,
-        ).float()
+        edge_feature_table[etype] = spectral_diff.float()
 
     total_edges = int(sum(value.size(0) for value in edge_feature_table.values()))
     stats = _summarize_edge_features(edge_feature_table, feature_slices)
-    generation_seconds = float(time.perf_counter() - start_time)
     return {
         "edge_feature_table": edge_feature_table,
         "feature_dim": int(next(iter(edge_feature_table.values())).size(1)) if edge_feature_table else 0,
@@ -649,9 +421,10 @@ def _compute_typepair_edge_feature_table(graph, args) -> dict:
         "feature_stats": stats,
         "node_types": ntypes,
         "edge_types": etypes,
-        "total_nodes": int(total_nodes),
+        "total_nodes": int(spectral_payload["total_nodes"]),
         "total_edges": total_edges,
-        "generation_seconds": generation_seconds,
+        "generation_seconds": float(spectral_payload["generation_seconds"]),
+        "spectral_cache_path": spectral_payload.get("spectral_cache_path"),
     }
 
 
@@ -703,8 +476,8 @@ def _log_edge_feature_payload(wandb_run, payload: dict, cache_path: Path, cache_
     upload_file_artifact(
         wandb_run,
         cache_path,
-        name=f"{payload['total_edges']}-edge-feature-table-{cache_path.stem}",
-        artifact_type="edge-feature-table",
+        name=f"{payload['total_nodes']}-typepair-spectral-cache-{cache_path.stem}",
+        artifact_type="typepair-spectral-cache",
     )
 
 
@@ -715,20 +488,28 @@ def _load_torch_payload(path: Path):
         return torch.load(path, map_location="cpu")
 
 
-def prepare_typepair_edge_feature_table(args, wandb_run=None) -> dict | None:
-    if not getattr(args, "enable_typepair_edge_features", False):
-        return None
-
-    cache_path = _typepair_edge_feature_cache_path(args)
+def prepare_typepair_spectral_payload(args) -> tuple[dict, Path, bool]:
+    cache_path = _typepair_spectral_cache_path(args)
     cache_path.parent.mkdir(parents=True, exist_ok=True)
     cache_hit = cache_path.exists()
     if cache_hit:
         payload = _load_torch_payload(cache_path)
     else:
         graph, _ = _load_raw_heterograph(args.root, args.dataset, args.feats_type)
-        payload = _compute_typepair_edge_feature_table(graph, args)
+        payload = _compute_typepair_spectral_payload(graph, args)
         torch.save(payload, cache_path)
+    payload = dict(payload)
+    payload["spectral_cache_path"] = str(cache_path)
+    return payload, cache_path, cache_hit
 
+
+def prepare_typepair_edge_feature_table(args, wandb_run=None) -> dict | None:
+    if not getattr(args, "enable_typepair_edge_features", False):
+        return None
+
+    graph, _ = _load_raw_heterograph(args.root, args.dataset, args.feats_type)
+    spectral_payload, cache_path, cache_hit = prepare_typepair_spectral_payload(args)
+    payload = _build_spectral_edge_feature_payload(graph, spectral_payload)
     payload = _subset_typepair_edge_feature_payload(payload, args)
     if getattr(args, "typepair_write_edge_feature_stats", True):
         _write_edge_feature_stats_json(cache_path, payload)
@@ -927,12 +708,8 @@ def _make_legacy_args(cli_args, method: str, ckpt_path: str, split_seed: int, re
         typepair_edge_feature_dim=cli_args.typepair_edge_feature_dim,
         typepair_edge_feature_names=cli_args.typepair_edge_feature_names,
         typepair_edge_feature_name=cli_args.typepair_edge_feature_name,
-        typepair_edge_feature_cache_dir=cli_args.typepair_edge_feature_cache_dir,
+        typepair_spectral_cache_dir=cli_args.typepair_spectral_cache_dir,
         typepair_write_edge_feature_stats=cli_args.typepair_write_edge_feature_stats,
-        typepair_edge_attr_dim_cap=cli_args.typepair_edge_attr_dim_cap,
-        typepair_pagerank_damping=cli_args.typepair_pagerank_damping,
-        typepair_pagerank_max_iter=cli_args.typepair_pagerank_max_iter,
-        typepair_pagerank_tol=cli_args.typepair_pagerank_tol,
         typepair_spectral_dim=cli_args.typepair_spectral_dim,
         typepair_spectral_max_nodes=cli_args.typepair_spectral_max_nodes,
         typepair_edge_prompt_hidden=cli_args.typepair_edge_prompt_hidden,
@@ -1251,10 +1028,10 @@ def build_parser():
     ap.add_argument("--num_heads", type=int, default=2)
     ap.add_argument("--num_layers", type=int, default=2)
     ap.add_argument("--dropout", type=float, default=0.5)
-    ap.add_argument("--hgnn_type", type=str, default="HGT")
-    ap.add_argument("--num_samples", type=int, default=100)
+    ap.add_argument("--hgnn_type", type=str, default="GCN")
+    ap.add_argument("--num_samples", type=int, default=500)
     ap.add_argument("--num_class", type=int, default=3)
-    ap.add_argument("--classification_type", type=str, default="NIG")
+    ap.add_argument("--classification_type", type=str, default="NIG")   # Node classification by default, can be changed to "EIG" for edge classification
     ap.add_argument("--embed_batch_size", type=int, default=32)
     ap.add_argument("--head_hidden", type=int, default=128)
     ap.add_argument("--head_dropout", type=float, default=0.3)
@@ -1266,7 +1043,7 @@ def build_parser():
     ap.add_argument("--early_stop_metric", type=str, default="macro", choices=["micro", "macro"])
 
     ap.add_argument("--relation_prompt_mode", type=str, default="mul", choices=["mul", "add"])
-    ap.add_argument("--relation_prompt_alpha", type=float, default=0.5)
+    ap.add_argument("--relation_prompt_alpha", type=float, default=0.5) # The alpha for fusing relation prompts, used when relation_prompt_mode is "mul" or "add"
     ap.add_argument("--relation_prompt_dropout", type=float, default=0.1)
     ap.add_argument("--relation_prompt_aggr", type=str, default="mean", choices=["mean", "sum"])
     ap.add_argument("--relation_prompt_use_ln", action="store_true")
@@ -1276,20 +1053,16 @@ def build_parser():
     ap.add_argument("--typepair_edge_feature_names", nargs="*", default=None, choices=TYPEPAIR_EDGE_FEATURES)
     ap.add_argument("--typepair_edge_feature_name", type=str, default=TYPEPAIR_EDGE_FEATURE_NAME)
     ap.add_argument(
-        "--typepair_edge_feature_cache_dir",
+        "--typepair_spectral_cache_dir",
         type=Path,
-        default=ROOT / "artifacts" / "cache" / "typepair_edge_features",
+        default=ROOT / "artifacts" / "cache" / "typepair_spectral_embeddings",
     )
     ap.add_argument("--typepair_write_edge_feature_stats", action=argparse.BooleanOptionalAction, default=True)
-    ap.add_argument("--typepair_edge_attr_dim_cap", type=int, default=256)
-    ap.add_argument("--typepair_pagerank_damping", type=float, default=0.85)
-    ap.add_argument("--typepair_pagerank_max_iter", type=int, default=50)
-    ap.add_argument("--typepair_pagerank_tol", type=float, default=1e-6)
-    ap.add_argument("--typepair_spectral_dim", type=int, default=8)
+    ap.add_argument("--typepair_spectral_dim", type=int, default=16)
     ap.add_argument("--typepair_spectral_max_nodes", type=int, default=50000)
     ap.add_argument("--typepair_edge_prompt_hidden", type=int, default=128)
-    ap.add_argument("--typepair_edge_prompt_alpha", type=float, default=0.5)
-    ap.add_argument("--typepair_edge_prompt_fusion", type=str, default="add", choices=["add", "mul", "gate"])
+    ap.add_argument("--typepair_edge_prompt_alpha", type=float, default=0.5) # The alpha for fusing edge features into prompts, used when typepair_edge_prompt_fusion is "mul" or "add" ，由于默认是"gate"，这个参数默认不生效
+    ap.add_argument("--typepair_edge_prompt_fusion", type=str, default="gate", choices=["add", "mul", "gate"])
 
     ap.add_argument("--hgprompt_feats_type", type=int, default=2)
     ap.add_argument("--hgprompt_hidden_dim", type=int, default=64)
@@ -1337,8 +1110,7 @@ def build_parser():
     return ap
 
 
-def main():
-    args = build_parser().parse_args()
+def run_benchmark(args):
     wandb_run = None
     try:
         records: list[RunRecord] = []
@@ -1451,12 +1223,31 @@ def main():
         )
 
         print("####################################################")
-        print(json.dumps({"pooled_runs": pooled_summary, "seed_mean_then_std": seedmean_summary}, indent=2, ensure_ascii=False))
+        final_summary = {
+            "pooled_runs": pooled_summary,
+            "seed_mean_then_std": seedmean_summary,
+        }
+        print(json.dumps(final_summary, indent=2, ensure_ascii=False))
     except Exception:
         finish_wandb_run(wandb_run, exit_code=1)
         raise
     else:
         finish_wandb_run(wandb_run, exit_code=0)
+    return {
+        "records": records,
+        "per_run_rows": per_run_rows,
+        "seed_rows": seed_row_dicts,
+        "config": config,
+        "pooled_runs": pooled_summary,
+        "seed_mean_then_std": seedmean_summary,
+        "out_dir": out_dir,
+        "resolved_ckpt_by_method": ckpt_by_method,
+    }
+
+
+def main():
+    args = build_parser().parse_args()
+    run_benchmark(args)
 
 
 if __name__ == "__main__":
