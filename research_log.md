@@ -12,10 +12,11 @@
 
 - [ ] PEPrompt时间较多，需要评估并想办法不用特征分解的方式
 - [ ] 对比的基线HGMP没有达到论文84的水平，只有80
-- [ ] 有一个alpha没有生效，现在预计可能是代码导致的
 - [ ] **消融**，目前没有验证typepair是否也是噪声
 - [ ] **离线处理** 可以将生成Laplacian PE以及subgraph的部分预处理
 - [ ] **多数据集验证** 当前只验证了ACM以及10shots的情况
+- [ ] **预训练与子图采样方法** 原hgmp的预训练方法以及子图构建方式可能并不适用边提示
+- [ ] **hgprompt的比较** 无论是在hgmp还是hgprompt的论文，hgprompt方法在1至5shot下有着较大优势。
 
 ---
 
@@ -86,17 +87,41 @@ h = self.ln[ntype](h)
 K-Hop Ego-Network 采用的dgl的`khop_in_subgraph`函数，直接采样目标节点的K阶邻居以内
 #### 预训练阶段
 预训练阶段会进行子图分割，在子图上进行预训练，根据METIS算法将大图分割为500个社区子图
+#### 下游阶段
+khop_in_subgraph,每个数据集拥有不同的跳数。
+
+## 划分方式
+`k-shot pretrain`/ `官方val`/ `官方test`
+
+hgmp原始划分: 每类最多先随机选400个节点，再从这400个节点里面进行划分。`k-shot pretrain`/ `k-shot val`/ `rest test`
+
+
 
 
 > # 26.5.5 HGMP复现水平提升
-初始typepair的水平为80%
+初始hgmp的水平为80%
 **当前水平**： 0.8264 std=0.0246 | macro_f1 mean=0.8254 std=0.0241
 与论文相比可能存在的问题：
-1. **划分不同** HGMP采用的划分方式不同
+1. **划分不同** HGMP采用的划分方式不同，hgmp通过k-shot pretrain/k-shot 
 2. **早停机制** HGMP采用loss早停，而typepair采用macro/micro
 3. **文件缺失** github代码缺少两个文件，我的补齐代码可能与原论文有一定差距
 
-- [x] 添加environment.yml用于生成代码
+- [x] 添加environment.yml用于追踪环境
+- [x] 添加research_log.md 用于写实验记录
 
-> # 26.5.8 
+> # 26.5.8 hgmp与hgmp_prompt历史命名问题
+发现有两个历史遗留问题
+1. 之前methods分为hgmp与hgmp_prompt但我忘记了这一点。
+2. 下游中也会调用METIS，但按理来说这是上游预训练出现的东西
 
+第二点已经解决了，实际上METIS是为了在构建HGNN的时候获取输入，由于之前是预处理好的，现在不行，因此进行了修改，单独拿一个函数get_graph_metadata_lightweight获取
+
+第一点出现了问题，通过实验表明hgmp_prompt的性能还在hgmp之下，按理来说脚本中的代码是hgmp拥有node prompt接近原文设计的。
+- 当只运行一次时，hgmp是82，hgmp_prompt是72
+
+**hgmp_prompt训练逻辑** 双轮训练：先训练一轮head,再一轮prompt，因此有三个loss，head_loss、prompt_loss以及val_loss。
+
+待解决问题：
+- [ ] 下游中我设计的early_stop采用的val_macro_f1,hgmp采用的loss；hgmp采用双轮训练，单次epoch中先训练一轮head，再训练一轮prompt。哪种方式更优呢
+
+hgmp若不使用离线处理子图速度极慢，并且采用双轮loss机制导致一直难以收敛

@@ -1,14 +1,648 @@
 nohup: 忽略输入
+================ MULTI-SHOT | shot=1 ================
+wandb: [wandb.login()] Loaded credentials for https://api.wandb.ai from WANDB_API_KEY.
+wandb: Currently logged in as: iceylia (iceylia-southwest-petroleum) to https://api.wandb.ai. Use `wandb login --relogin` to force relogin
+wandb: setting up run cmvz3k00
 wandb: Tracking run with wandb version 0.26.0
-wandb: W&B syncing is set to `offline` in this directory. Run `wandb online` or set WANDB_MODE=online to enable cloud syncing.
-wandb: Run data is saved locally in /home_A/yuanqilin/repos/HGEP/artifacts/wandb/wandb/offline-run-20260508_153306-tzipb45t
+wandb: Run data is saved locally in /home_A/yuanqilin/repos/HGEP/artifacts/wandb/wandb/run-20260508_195833-cmvz3k00
+wandb: Run `wandb offline` to turn off syncing.
+wandb: Syncing run copper-microwave-189
+wandb: ⭐️ View project at https://wandb.ai/iceylia-southwest-petroleum/HGEP
+wandb: 🚀 View run at https://wandb.ai/iceylia-southwest-petroleum/HGEP/runs/cmvz3k00
+================ method=typepair | ckpt=artifacts/checkpoints/hgmp/pretrain/ACM.GraphCL.GCN.hid512.np500.seed0.pth ================
 /home_A/yuanqilin/.conda/envs/HGEP/lib/python3.11/site-packages/torch/storage.py:414: FutureWarning: You are using `torch.load` with `weights_only=False` (the current default value), which uses the default pickle module implicitly. It is possible to construct malicious pickle data which will execute arbitrary code during unpickling (See https://github.com/pytorch/pytorch/blob/main/SECURITY.md#untrusted-models for more details). In a future release, the default value for `weights_only` will be flipped to `True`. This limits the functions that could be executed during unpickling. Arbitrary objects will no longer be allowed to be loaded via this mode unless they are explicitly allowlisted by the user via `torch.serialization.add_safe_globals`. We recommend you start setting `weights_only=True` for any use case where you don't have full control of the loaded file. Please open an issue on GitHub for any issues related to this experimental feature.
   return torch.load(io.BytesIO(b))
-Computing METIS partitioning...
-Done!
-/home_A/yuanqilin/repos/HGEP/src/gpbench/protocol_bridge/downstream_legacy.py:268: FutureWarning: You are using `torch.load` with `weights_only=False` (the current default value), which uses the default pickle module implicitly. It is possible to construct malicious pickle data which will execute arbitrary code during unpickling (See https://github.com/pytorch/pytorch/blob/main/SECURITY.md#untrusted-models for more details). In a future release, the default value for `weights_only` will be flipped to `True`. This limits the functions that could be executed during unpickling. Arbitrary objects will no longer be allowed to be loaded via this mode unless they are explicitly allowlisted by the user via `torch.serialization.add_safe_globals`. We recommend you start setting `weights_only=True` for any use case where you don't have full control of the loaded file. Please open an issue on GitHub for any issues related to this experimental feature.
+wandb: WARNING Artifact "10942-typepair-spectral-cache-spec8.mn50000" already exists with the same content. No new version will be created.
+/home_A/yuanqilin/repos/HGEP/src/gpbench/protocol_bridge/downstream_legacy.py:307: FutureWarning: You are using `torch.load` with `weights_only=False` (the current default value), which uses the default pickle module implicitly. It is possible to construct malicious pickle data which will execute arbitrary code during unpickling (See https://github.com/pytorch/pytorch/blob/main/SECURITY.md#untrusted-models for more details). In a future release, the default value for `weights_only` will be flipped to `True`. This limits the functions that could be executed during unpickling. Arbitrary objects will no longer be allowed to be loaded via this mode unless they are explicitly allowlisted by the user via `torch.serialization.add_safe_globals`. We recommend you start setting `weights_only=True` for any use case where you don't have full control of the loaded file. Please open an issue on GitHub for any issues related to this experimental feature.
   state = torch.load(ckpt_path, map_location="cpu")
-Computing METIS partitioning...
-Done!
-Computing METIS partitioning...
-Done!
+[load_state_dict] remapped 11 plain HGMP keys to TypePair wrapper keys.
+[load_state_dict] typepair prompt keys were missing from ckpt (expected when loading a plain hgmp checkpoint).
+Epoch 001 | loss=1.3069 | val_f1(micro/macro)=0.4667/0.3627 | test_f1(micro/macro)=0.4263/0.3368 | monitor(macro)=0.3627
+Epoch 010 | loss=0.0447 | val_f1(micro/macro)=0.6000/0.5556 | test_f1(micro/macro)=0.5817/0.5189 | monitor(macro)=0.5556
+Epoch 020 | loss=0.0023 | val_f1(micro/macro)=0.6000/0.5556 | test_f1(micro/macro)=0.5996/0.5472 | monitor(macro)=0.5556
+Epoch 030 | loss=0.0009 | val_f1(micro/macro)=0.6000/0.5556 | test_f1(micro/macro)=0.6010/0.5492 | monitor(macro)=0.5556
+Early stop at epoch 34, best_epoch=4 | best_val_f1(micro/macro)=0.6000/0.5556 | test@best_f1(micro/macro)=0.5666/0.5024 | monitor=macro
+[RUN] method=typepair | split_seed=0 | repeat=0 | run_seed=0 | ckpt=artifacts/checkpoints/hgmp/pretrain/ACM.GraphCL.GCN.hid512.np500.seed0.pth | micro=0.5666 | macro=0.5024 | best_epoch=4
+[load_state_dict] remapped 11 plain HGMP keys to TypePair wrapper keys.
+[load_state_dict] typepair prompt keys were missing from ckpt (expected when loading a plain hgmp checkpoint).
+Epoch 001 | loss=1.0972 | val_f1(micro/macro)=0.4667/0.3757 | test_f1(micro/macro)=0.4197/0.3143 | monitor(macro)=0.3757
+Epoch 010 | loss=0.1208 | val_f1(micro/macro)=0.5333/0.4461 | test_f1(micro/macro)=0.5552/0.5213 | monitor(macro)=0.4461
+Epoch 020 | loss=0.0052 | val_f1(micro/macro)=0.8667/0.8611 | test_f1(micro/macro)=0.7507/0.7433 | monitor(macro)=0.8611
+Epoch 030 | loss=0.0029 | val_f1(micro/macro)=0.8667/0.8611 | test_f1(micro/macro)=0.7904/0.7855 | monitor(macro)=0.8611
+Epoch 040 | loss=0.0015 | val_f1(micro/macro)=0.8667/0.8611 | test_f1(micro/macro)=0.7653/0.7487 | monitor(macro)=0.8611
+Early stop at epoch 49, best_epoch=19 | best_val_f1(micro/macro)=0.8667/0.8611 | test@best_f1(micro/macro)=0.7384/0.7285 | monitor=macro
+[RUN] method=typepair | split_seed=1 | repeat=0 | run_seed=1000 | ckpt=artifacts/checkpoints/hgmp/pretrain/ACM.GraphCL.GCN.hid512.np500.seed0.pth | micro=0.7384 | macro=0.7285 | best_epoch=19
+[load_state_dict] remapped 11 plain HGMP keys to TypePair wrapper keys.
+[load_state_dict] typepair prompt keys were missing from ckpt (expected when loading a plain hgmp checkpoint).
+Epoch 001 | loss=1.3791 | val_f1(micro/macro)=0.3333/0.1667 | test_f1(micro/macro)=0.3371/0.1681 | monitor(macro)=0.1667
+Epoch 010 | loss=0.1550 | val_f1(micro/macro)=0.6667/0.5411 | test_f1(micro/macro)=0.6105/0.5340 | monitor(macro)=0.5411
+Epoch 020 | loss=0.0094 | val_f1(micro/macro)=0.6667/0.5411 | test_f1(micro/macro)=0.6563/0.6162 | monitor(macro)=0.5411
+Epoch 030 | loss=0.0030 | val_f1(micro/macro)=0.7333/0.6825 | test_f1(micro/macro)=0.6449/0.6133 | monitor(macro)=0.6825
+Epoch 040 | loss=0.0018 | val_f1(micro/macro)=0.6667/0.5411 | test_f1(micro/macro)=0.6195/0.5699 | monitor(macro)=0.5411
+Epoch 050 | loss=0.0002 | val_f1(micro/macro)=0.6667/0.5342 | test_f1(micro/macro)=0.6506/0.5851 | monitor(macro)=0.5342
+Early stop at epoch 55, best_epoch=25 | best_val_f1(micro/macro)=0.7333/0.6825 | test@best_f1(micro/macro)=0.6615/0.6322 | monitor=macro
+[RUN] method=typepair | split_seed=2 | repeat=0 | run_seed=2000 | ckpt=artifacts/checkpoints/hgmp/pretrain/ACM.GraphCL.GCN.hid512.np500.seed0.pth | micro=0.6615 | macro=0.6322 | best_epoch=25
+[load_state_dict] remapped 11 plain HGMP keys to TypePair wrapper keys.
+[load_state_dict] typepair prompt keys were missing from ckpt (expected when loading a plain hgmp checkpoint).
+Epoch 001 | loss=1.4689 | val_f1(micro/macro)=0.6000/0.4889 | test_f1(micro/macro)=0.5571/0.4584 | monitor(macro)=0.4889
+Epoch 010 | loss=0.1281 | val_f1(micro/macro)=0.5333/0.4461 | test_f1(micro/macro)=0.5420/0.5241 | monitor(macro)=0.4461
+Epoch 020 | loss=0.0068 | val_f1(micro/macro)=0.5333/0.4741 | test_f1(micro/macro)=0.6303/0.6316 | monitor(macro)=0.4741
+Epoch 030 | loss=0.0024 | val_f1(micro/macro)=0.4667/0.4167 | test_f1(micro/macro)=0.6043/0.6109 | monitor(macro)=0.4167
+Early stop at epoch 32, best_epoch=2 | best_val_f1(micro/macro)=0.6000/0.5767 | test@best_f1(micro/macro)=0.5567/0.4753 | monitor=macro
+[RUN] method=typepair | split_seed=3 | repeat=0 | run_seed=3000 | ckpt=artifacts/checkpoints/hgmp/pretrain/ACM.GraphCL.GCN.hid512.np500.seed0.pth | micro=0.5567 | macro=0.4753 | best_epoch=2
+[load_state_dict] remapped 11 plain HGMP keys to TypePair wrapper keys.
+[load_state_dict] typepair prompt keys were missing from ckpt (expected when loading a plain hgmp checkpoint).
+Epoch 001 | loss=1.2788 | val_f1(micro/macro)=0.3333/0.1667 | test_f1(micro/macro)=0.3602/0.2141 | monitor(macro)=0.1667
+Epoch 010 | loss=0.2326 | val_f1(micro/macro)=0.6667/0.5342 | test_f1(micro/macro)=0.5000/0.4449 | monitor(macro)=0.5342
+Epoch 020 | loss=0.0167 | val_f1(micro/macro)=0.9333/0.9327 | test_f1(micro/macro)=0.6530/0.6358 | monitor(macro)=0.9327
+Epoch 030 | loss=0.0082 | val_f1(micro/macro)=0.7333/0.7157 | test_f1(micro/macro)=0.4995/0.4522 | monitor(macro)=0.7157
+Epoch 040 | loss=0.0007 | val_f1(micro/macro)=0.6667/0.5556 | test_f1(micro/macro)=0.4825/0.4129 | monitor(macro)=0.5556
+Epoch 050 | loss=0.0003 | val_f1(micro/macro)=0.6667/0.5556 | test_f1(micro/macro)=0.4901/0.4170 | monitor(macro)=0.5556
+Early stop at epoch 50, best_epoch=20 | best_val_f1(micro/macro)=0.9333/0.9327 | test@best_f1(micro/macro)=0.6530/0.6358 | monitor=macro
+[RUN] method=typepair | split_seed=4 | repeat=0 | run_seed=4000 | ckpt=artifacts/checkpoints/hgmp/pretrain/ACM.GraphCL.GCN.hid512.np500.seed0.pth | micro=0.6530 | macro=0.6358 | best_epoch=20
+wandb: Adding directory to artifact (/home_A/yuanqilin/repos/HGEP/artifacts/results/protocol_benchmark/ACM/1-shot)... Done. 0.0s
+####################################################
+{
+  "pooled_runs": {
+    "typepair": {
+      "count": 5,
+      "micro_mean": 0.6352218985557556,
+      "micro_std": 0.06714445348461617,
+      "macro_mean": 0.5948150992393494,
+      "macro_std": 0.0935692203897975
+    }
+  },
+  "seed_mean_then_std": {
+    "typepair": {
+      "count": 5,
+      "micro_mean": 0.6352218985557556,
+      "micro_std": 0.06714445348461617,
+      "macro_mean": 0.5948150992393494,
+      "macro_std": 0.0935692203897975
+    }
+  }
+}
+wandb: uploading artifact run-cmvz3k00-per_run_table; uploading artifact run-cmvz3k00-per_seed_summary_table; updating run metadata; uploading history steps 221-228, summary, console lines 48-51; uploading artifact ACM-1shot-protocol-benchmark-v2-0
+wandb: uploading artifact run-cmvz3k00-per_run_table; uploading artifact run-cmvz3k00-per_seed_summary_table; uploading history steps 221-228, summary, console lines 48-51; uploading artifact ACM-1shot-protocol-benchmark-v2-0
+wandb: uploading artifact run-cmvz3k00-per_run_table; uploading artifact run-cmvz3k00-per_seed_summary_table; uploading artifact ACM-1shot-protocol-benchmark-v2-0
+wandb: uploading artifact ACM-1shot-protocol-benchmark-v2-0
+wandb: uploading output.log; uploading wandb-summary.json; uploading config.yaml; uploading media/table/per_run_table_227_9ae77da80482f6b184fd.table.json; uploading media/table/per_seed_summary_table_228_b05e7289b7343bd02475.table.json
+wandb: uploading media/table/per_run_table_227_9ae77da80482f6b184fd.table.json
+wandb: uploading summary, console lines 52-72
+wandb: 
+wandb: Run history:
+wandb:     downstream/bad_epochs ▂▃▄▅▆▁▄▁▂▂▃▄▆▇▇▂▄▅▃▅▇██▁▁▂▅██▁▁▁▂▂▃▃▄▄▅█
+wandb:     downstream/best_epoch ▁▂▂▂▂▂▂▁▁▁▆▆▆▆▁▁▁▁▁▁▁█████▁▁▁▁▁▂▂▂▅▆▆▆▆▆
+wandb: downstream/best_val_macro ▂▂▂▂▅▅▅▇▇▇▇▇▇▇▇▂▂▂▄▄▄▄▄▄▄▂▂▂▂▂▁▂▂▂▆█████
+wandb: downstream/best_val_micro ▁▁▁▁▁▁▄▄▄▄▄▇▇▇▇▇▇▇▁▁▁▁▁▁▄▄▄▄▄▄▁▁▁▁▂█████
+wandb:          downstream/epoch ▁▃▆▁▂▃▃▃▄▅▇█▂▂▂▃▃▄▅▅▆▆▇▇▇▁▁▂▅▅▃▃▄▄▅▆▇▇▇█
+wandb:        downstream/monitor ▃▄▄▄▄▂▄▆▄▅██████▇▁▂▃▄▄▄▄▄▆▄▅▃▃▃▃▃▃▃▄▆▆▄▄
+wandb:  downstream/pretrain_seed ▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁
+wandb:      downstream/repeat_id ▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁
+wandb:       downstream/run_seed ▁▁▁▁▁▁▁▁▁▁▃▃▃▃▃▃▃▃▅▅▅▅▅▅▅▆▆▆▆▆██████████
+wandb:           downstream/shot ▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁
+wandb:                       +30 ...
+wandb: 
+wandb: Run summary:
+wandb:     downstream/bad_epochs 30
+wandb:     downstream/best_epoch 20
+wandb: downstream/best_val_macro 0.93266
+wandb: downstream/best_val_micro 0.93333
+wandb:        downstream/dataset ACM
+wandb:     downstream/early_stop True
+wandb:          downstream/epoch 50
+wandb:        downstream/is_best False
+wandb:         downstream/method typepair
+wandb:        downstream/monitor 0.55556
+wandb:                       +47 ...
+wandb: 
+wandb: 🚀 View run copper-microwave-189 at: https://wandb.ai/iceylia-southwest-petroleum/HGEP/runs/cmvz3k00
+wandb: ⭐️ View project at: https://wandb.ai/iceylia-southwest-petroleum/HGEP
+wandb: Synced 5 W&B file(s), 3 media file(s), 11 artifact file(s) and 0 other file(s)
+wandb: Find logs at: ./artifacts/wandb/wandb/run-20260508_195833-cmvz3k00/logs
+================ MULTI-SHOT | shot=3 ================
+wandb: setting up run gwli5kf2
+wandb: Tracking run with wandb version 0.26.0
+wandb: Run data is saved locally in /home_A/yuanqilin/repos/HGEP/artifacts/wandb/wandb/run-20260508_202254-gwli5kf2
+wandb: Run `wandb offline` to turn off syncing.
+wandb: Syncing run apricot-aardvark-190
+wandb: ⭐️ View project at https://wandb.ai/iceylia-southwest-petroleum/HGEP
+wandb: 🚀 View run at https://wandb.ai/iceylia-southwest-petroleum/HGEP/runs/gwli5kf2
+================ method=typepair | ckpt=artifacts/checkpoints/hgmp/pretrain/ACM.GraphCL.GCN.hid512.np500.seed0.pth ================
+/home_A/yuanqilin/.conda/envs/HGEP/lib/python3.11/site-packages/torch/storage.py:414: FutureWarning: You are using `torch.load` with `weights_only=False` (the current default value), which uses the default pickle module implicitly. It is possible to construct malicious pickle data which will execute arbitrary code during unpickling (See https://github.com/pytorch/pytorch/blob/main/SECURITY.md#untrusted-models for more details). In a future release, the default value for `weights_only` will be flipped to `True`. This limits the functions that could be executed during unpickling. Arbitrary objects will no longer be allowed to be loaded via this mode unless they are explicitly allowlisted by the user via `torch.serialization.add_safe_globals`. We recommend you start setting `weights_only=True` for any use case where you don't have full control of the loaded file. Please open an issue on GitHub for any issues related to this experimental feature.
+  return torch.load(io.BytesIO(b))
+/home_A/yuanqilin/repos/HGEP/src/gpbench/protocol_bridge/downstream_legacy.py:307: FutureWarning: You are using `torch.load` with `weights_only=False` (the current default value), which uses the default pickle module implicitly. It is possible to construct malicious pickle data which will execute arbitrary code during unpickling (See https://github.com/pytorch/pytorch/blob/main/SECURITY.md#untrusted-models for more details). In a future release, the default value for `weights_only` will be flipped to `True`. This limits the functions that could be executed during unpickling. Arbitrary objects will no longer be allowed to be loaded via this mode unless they are explicitly allowlisted by the user via `torch.serialization.add_safe_globals`. We recommend you start setting `weights_only=True` for any use case where you don't have full control of the loaded file. Please open an issue on GitHub for any issues related to this experimental feature.
+  state = torch.load(ckpt_path, map_location="cpu")
+[load_state_dict] remapped 11 plain HGMP keys to TypePair wrapper keys.
+[load_state_dict] typepair prompt keys were missing from ckpt (expected when loading a plain hgmp checkpoint).
+Epoch 001 | loss=1.2307 | val_f1(micro/macro)=0.3333/0.1667 | test_f1(micro/macro)=0.3376/0.1691 | monitor(macro)=0.1667
+Epoch 010 | loss=0.1621 | val_f1(micro/macro)=0.6667/0.6742 | test_f1(micro/macro)=0.7441/0.7446 | monitor(macro)=0.6742
+Epoch 020 | loss=0.0366 | val_f1(micro/macro)=0.7333/0.7387 | test_f1(micro/macro)=0.7823/0.7762 | monitor(macro)=0.7387
+Epoch 030 | loss=0.0049 | val_f1(micro/macro)=0.7333/0.7194 | test_f1(micro/macro)=0.7790/0.7683 | monitor(macro)=0.7194
+Epoch 040 | loss=0.0011 | val_f1(micro/macro)=0.8000/0.7963 | test_f1(micro/macro)=0.8168/0.8150 | monitor(macro)=0.7963
+Epoch 050 | loss=0.0003 | val_f1(micro/macro)=0.8000/0.7802 | test_f1(micro/macro)=0.7904/0.7812 | monitor(macro)=0.7802
+Epoch 060 | loss=0.0003 | val_f1(micro/macro)=0.8000/0.7802 | test_f1(micro/macro)=0.7805/0.7684 | monitor(macro)=0.7802
+Epoch 070 | loss=0.0024 | val_f1(micro/macro)=0.8000/0.7802 | test_f1(micro/macro)=0.7786/0.7670 | monitor(macro)=0.7802
+Early stop at epoch 73, best_epoch=43 | best_val_f1(micro/macro)=0.8667/0.8611 | test@best_f1(micro/macro)=0.8083/0.8052 | monitor=macro
+[RUN] method=typepair | split_seed=0 | repeat=0 | run_seed=0 | ckpt=artifacts/checkpoints/hgmp/pretrain/ACM.GraphCL.GCN.hid512.np500.seed0.pth | micro=0.8083 | macro=0.8052 | best_epoch=43
+[load_state_dict] remapped 11 plain HGMP keys to TypePair wrapper keys.
+[load_state_dict] typepair prompt keys were missing from ckpt (expected when loading a plain hgmp checkpoint).
+Epoch 001 | loss=1.1162 | val_f1(micro/macro)=0.5333/0.4861 | test_f1(micro/macro)=0.4976/0.4320 | monitor(macro)=0.4861
+Epoch 010 | loss=0.0703 | val_f1(micro/macro)=0.8000/0.7963 | test_f1(micro/macro)=0.7776/0.7829 | monitor(macro)=0.7963
+Epoch 020 | loss=0.0051 | val_f1(micro/macro)=0.8667/0.8611 | test_f1(micro/macro)=0.8267/0.8298 | monitor(macro)=0.8611
+Epoch 030 | loss=0.0017 | val_f1(micro/macro)=0.8667/0.8660 | test_f1(micro/macro)=0.8343/0.8343 | monitor(macro)=0.8660
+Early stop at epoch 36, best_epoch=6 | best_val_f1(micro/macro)=0.8667/0.8660 | test@best_f1(micro/macro)=0.7899/0.7951 | monitor=macro
+[RUN] method=typepair | split_seed=1 | repeat=0 | run_seed=1000 | ckpt=artifacts/checkpoints/hgmp/pretrain/ACM.GraphCL.GCN.hid512.np500.seed0.pth | micro=0.7899 | macro=0.7951 | best_epoch=6
+[load_state_dict] remapped 11 plain HGMP keys to TypePair wrapper keys.
+[load_state_dict] typepair prompt keys were missing from ckpt (expected when loading a plain hgmp checkpoint).
+Epoch 001 | loss=1.2445 | val_f1(micro/macro)=0.4000/0.3247 | test_f1(micro/macro)=0.4079/0.3108 | monitor(macro)=0.3247
+Epoch 010 | loss=0.1014 | val_f1(micro/macro)=0.6667/0.6667 | test_f1(micro/macro)=0.7063/0.6937 | monitor(macro)=0.6667
+Epoch 020 | loss=0.0085 | val_f1(micro/macro)=0.6667/0.6572 | test_f1(micro/macro)=0.6577/0.6297 | monitor(macro)=0.6572
+Epoch 030 | loss=0.0017 | val_f1(micro/macro)=0.7333/0.7194 | test_f1(micro/macro)=0.6808/0.6511 | monitor(macro)=0.7194
+Epoch 040 | loss=0.0011 | val_f1(micro/macro)=0.6667/0.6296 | test_f1(micro/macro)=0.6813/0.6374 | monitor(macro)=0.6296
+Early stop at epoch 41, best_epoch=11 | best_val_f1(micro/macro)=0.7333/0.7194 | test@best_f1(micro/macro)=0.6931/0.6695 | monitor=macro
+[RUN] method=typepair | split_seed=2 | repeat=0 | run_seed=2000 | ckpt=artifacts/checkpoints/hgmp/pretrain/ACM.GraphCL.GCN.hid512.np500.seed0.pth | micro=0.6931 | macro=0.6695 | best_epoch=11
+[load_state_dict] remapped 11 plain HGMP keys to TypePair wrapper keys.
+[load_state_dict] typepair prompt keys were missing from ckpt (expected when loading a plain hgmp checkpoint).
+Epoch 001 | loss=1.1134 | val_f1(micro/macro)=0.5333/0.4461 | test_f1(micro/macro)=0.4348/0.3397 | monitor(macro)=0.4461
+Epoch 010 | loss=0.1427 | val_f1(micro/macro)=0.8000/0.7944 | test_f1(micro/macro)=0.8234/0.8223 | monitor(macro)=0.7944
+Epoch 020 | loss=0.0177 | val_f1(micro/macro)=0.8667/0.8660 | test_f1(micro/macro)=0.8366/0.8368 | monitor(macro)=0.8660
+Epoch 030 | loss=0.0048 | val_f1(micro/macro)=0.7333/0.7136 | test_f1(micro/macro)=0.8031/0.7950 | monitor(macro)=0.7136
+Epoch 040 | loss=0.0006 | val_f1(micro/macro)=0.8667/0.8660 | test_f1(micro/macro)=0.8470/0.8471 | monitor(macro)=0.8660
+Epoch 050 | loss=0.0005 | val_f1(micro/macro)=0.8000/0.7963 | test_f1(micro/macro)=0.8329/0.8317 | monitor(macro)=0.7963
+Early stop at epoch 52, best_epoch=22 | best_val_f1(micro/macro)=0.9333/0.9327 | test@best_f1(micro/macro)=0.8451/0.8436 | monitor=macro
+[RUN] method=typepair | split_seed=3 | repeat=0 | run_seed=3000 | ckpt=artifacts/checkpoints/hgmp/pretrain/ACM.GraphCL.GCN.hid512.np500.seed0.pth | micro=0.8451 | macro=0.8436 | best_epoch=22
+[load_state_dict] remapped 11 plain HGMP keys to TypePair wrapper keys.
+[load_state_dict] typepair prompt keys were missing from ckpt (expected when loading a plain hgmp checkpoint).
+Epoch 001 | loss=1.2693 | val_f1(micro/macro)=0.3333/0.1667 | test_f1(micro/macro)=0.3466/0.1773 | monitor(macro)=0.1667
+Epoch 010 | loss=0.3840 | val_f1(micro/macro)=0.6000/0.6033 | test_f1(micro/macro)=0.6506/0.6459 | monitor(macro)=0.6033
+Epoch 020 | loss=0.0231 | val_f1(micro/macro)=0.8000/0.7955 | test_f1(micro/macro)=0.7927/0.7904 | monitor(macro)=0.7955
+Epoch 030 | loss=0.0084 | val_f1(micro/macro)=0.7333/0.7407 | test_f1(micro/macro)=0.8234/0.8260 | monitor(macro)=0.7407
+Epoch 040 | loss=0.0021 | val_f1(micro/macro)=0.7333/0.7407 | test_f1(micro/macro)=0.8296/0.8288 | monitor(macro)=0.7407
+Early stop at epoch 46, best_epoch=16 | best_val_f1(micro/macro)=0.8000/0.8054 | test@best_f1(micro/macro)=0.8144/0.8174 | monitor=macro
+[RUN] method=typepair | split_seed=4 | repeat=0 | run_seed=4000 | ckpt=artifacts/checkpoints/hgmp/pretrain/ACM.GraphCL.GCN.hid512.np500.seed0.pth | micro=0.8144 | macro=0.8174 | best_epoch=16
+wandb: Adding directory to artifact (/home_A/yuanqilin/repos/HGEP/artifacts/results/protocol_benchmark/ACM/3-shot)... Done. 0.0s
+####################################################
+{
+  "pooled_runs": {
+    "typepair": {
+      "count": 5,
+      "micro_mean": 0.7901794195175171,
+      "micro_std": 0.051693659411173445,
+      "macro_mean": 0.7861560463905335,
+      "macro_std": 0.060547151950131016
+    }
+  },
+  "seed_mean_then_std": {
+    "typepair": {
+      "count": 5,
+      "micro_mean": 0.7901794195175171,
+      "micro_std": 0.051693659411173445,
+      "macro_mean": 0.7861560463905335,
+      "macro_std": 0.060547151950131016
+    }
+  }
+}
+wandb: uploading artifact run-gwli5kf2-per_run_table; uploading artifact run-gwli5kf2-per_seed_summary_table; updating run metadata; uploading artifact ACM-3shot-protocol-benchmark-v2-0
+wandb: uploading artifact run-gwli5kf2-per_run_table; uploading artifact run-gwli5kf2-per_seed_summary_table; uploading artifact ACM-3shot-protocol-benchmark-v2-0
+wandb: uploading config.yaml; uploading media/table/per_run_table_255_2da37703670f79eefe7a.table.json; uploading media/table/per_seed_summary_table_256_386c65894788004ec39f.table.json; uploading output.log
+wandb: uploading history steps 252-256, summary, console lines 51-74
+wandb: 
+wandb: Run history:
+wandb:     downstream/bad_epochs ▁▂▃▁▁▂▃▄▅▆▃▄▄▅▆▇▇█▁▁▂▂▆▇▂▂▂▃▁▂▃▇▁▁▁▂▄▄▄▆
+wandb:     downstream/best_epoch ▂▂▂▃▃▅▅▅▆▆███▂▂▂▂▂▃▃▃▃▃▁▁▂▄▄▄▄▁▂▂▂▃▃▃▃▃▃
+wandb: downstream/best_val_macro ▂▄▄▄▄▅▅▆▆▇▇▇▇▇▇▇▇▇▇▄▅▅▅▅▅▁▇██████▆▆▆▆▆▆▆
+wandb: downstream/best_val_micro ▃▆▆▆▆▆▇▇▇▇▇▇▇▇▇▇▂▆▆▆▅▅▆▆▇▇▇███████▁▆▆▆▆▆
+wandb:          downstream/epoch ▁▁▂▃▃▄▅▅▅▅▆▇▇▇█▁▂▂▃▃▄▁▂▂▄▅▅▁▁▁▃▃▄▅▅▅▂▂▅▅
+wandb:        downstream/monitor ▃▂▄▅▅▆▆▆▆▆▆▆▆▆▆▆▆▃▆▆▇▆▇▆▁▅▂▅▆▇▇█▇▅▇▆▆▆▆▆
+wandb:  downstream/pretrain_seed ▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁
+wandb:      downstream/repeat_id ▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁
+wandb:       downstream/run_seed ▁▁▁▁▁▁▁▁▁▁▁▁▁▁▃▃▃▃▃▃▃▅▅▅▅▅▅▅▆▆▆▆▆▆▆█████
+wandb:           downstream/shot ▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁
+wandb:                       +30 ...
+wandb: 
+wandb: Run summary:
+wandb:     downstream/bad_epochs 30
+wandb:     downstream/best_epoch 16
+wandb: downstream/best_val_macro 0.80539
+wandb: downstream/best_val_micro 0.8
+wandb:        downstream/dataset ACM
+wandb:     downstream/early_stop True
+wandb:          downstream/epoch 46
+wandb:        downstream/is_best False
+wandb:         downstream/method typepair
+wandb:        downstream/monitor 0.74074
+wandb:                       +47 ...
+wandb: 
+wandb: 🚀 View run apricot-aardvark-190 at: https://wandb.ai/iceylia-southwest-petroleum/HGEP/runs/gwli5kf2
+wandb: ⭐️ View project at: https://wandb.ai/iceylia-southwest-petroleum/HGEP
+wandb: Synced 5 W&B file(s), 3 media file(s), 11 artifact file(s) and 0 other file(s)
+wandb: Find logs at: ./artifacts/wandb/wandb/run-20260508_202254-gwli5kf2/logs
+================ MULTI-SHOT | shot=5 ================
+wandb: setting up run c2utzaq5
+wandb: Tracking run with wandb version 0.26.0
+wandb: Run data is saved locally in /home_A/yuanqilin/repos/HGEP/artifacts/wandb/wandb/run-20260508_205119-c2utzaq5
+wandb: Run `wandb offline` to turn off syncing.
+wandb: Syncing run swift-oath-191
+wandb: ⭐️ View project at https://wandb.ai/iceylia-southwest-petroleum/HGEP
+wandb: 🚀 View run at https://wandb.ai/iceylia-southwest-petroleum/HGEP/runs/c2utzaq5
+================ method=typepair | ckpt=artifacts/checkpoints/hgmp/pretrain/ACM.GraphCL.GCN.hid512.np500.seed0.pth ================
+/home_A/yuanqilin/.conda/envs/HGEP/lib/python3.11/site-packages/torch/storage.py:414: FutureWarning: You are using `torch.load` with `weights_only=False` (the current default value), which uses the default pickle module implicitly. It is possible to construct malicious pickle data which will execute arbitrary code during unpickling (See https://github.com/pytorch/pytorch/blob/main/SECURITY.md#untrusted-models for more details). In a future release, the default value for `weights_only` will be flipped to `True`. This limits the functions that could be executed during unpickling. Arbitrary objects will no longer be allowed to be loaded via this mode unless they are explicitly allowlisted by the user via `torch.serialization.add_safe_globals`. We recommend you start setting `weights_only=True` for any use case where you don't have full control of the loaded file. Please open an issue on GitHub for any issues related to this experimental feature.
+  return torch.load(io.BytesIO(b))
+/home_A/yuanqilin/repos/HGEP/src/gpbench/protocol_bridge/downstream_legacy.py:307: FutureWarning: You are using `torch.load` with `weights_only=False` (the current default value), which uses the default pickle module implicitly. It is possible to construct malicious pickle data which will execute arbitrary code during unpickling (See https://github.com/pytorch/pytorch/blob/main/SECURITY.md#untrusted-models for more details). In a future release, the default value for `weights_only` will be flipped to `True`. This limits the functions that could be executed during unpickling. Arbitrary objects will no longer be allowed to be loaded via this mode unless they are explicitly allowlisted by the user via `torch.serialization.add_safe_globals`. We recommend you start setting `weights_only=True` for any use case where you don't have full control of the loaded file. Please open an issue on GitHub for any issues related to this experimental feature.
+  state = torch.load(ckpt_path, map_location="cpu")
+[load_state_dict] remapped 11 plain HGMP keys to TypePair wrapper keys.
+[load_state_dict] typepair prompt keys were missing from ckpt (expected when loading a plain hgmp checkpoint).
+Epoch 001 | loss=1.1901 | val_f1(micro/macro)=0.3333/0.1667 | test_f1(micro/macro)=0.3376/0.1691 | monitor(macro)=0.1667
+Epoch 010 | loss=0.1677 | val_f1(micro/macro)=0.8667/0.8611 | test_f1(micro/macro)=0.7814/0.7862 | monitor(macro)=0.8611
+Epoch 020 | loss=0.0131 | val_f1(micro/macro)=0.6667/0.6546 | test_f1(micro/macro)=0.8395/0.8387 | monitor(macro)=0.6546
+Epoch 030 | loss=0.0021 | val_f1(micro/macro)=0.8000/0.7802 | test_f1(micro/macro)=0.8352/0.8330 | monitor(macro)=0.7802
+Early stop at epoch 39, best_epoch=9 | best_val_f1(micro/macro)=0.8667/0.8611 | test@best_f1(micro/macro)=0.7611/0.7677 | monitor=macro
+[RUN] method=typepair | split_seed=0 | repeat=0 | run_seed=0 | ckpt=artifacts/checkpoints/hgmp/pretrain/ACM.GraphCL.GCN.hid512.np500.seed0.pth | micro=0.7611 | macro=0.7677 | best_epoch=9
+[load_state_dict] remapped 11 plain HGMP keys to TypePair wrapper keys.
+[load_state_dict] typepair prompt keys were missing from ckpt (expected when loading a plain hgmp checkpoint).
+Epoch 001 | loss=1.0709 | val_f1(micro/macro)=0.4667/0.3757 | test_f1(micro/macro)=0.5165/0.4563 | monitor(macro)=0.3757
+Epoch 010 | loss=0.0426 | val_f1(micro/macro)=0.8667/0.8667 | test_f1(micro/macro)=0.7559/0.7582 | monitor(macro)=0.8667
+Epoch 020 | loss=0.0059 | val_f1(micro/macro)=0.8000/0.7802 | test_f1(micro/macro)=0.8144/0.8155 | monitor(macro)=0.7802
+Epoch 030 | loss=0.0011 | val_f1(micro/macro)=0.8000/0.7802 | test_f1(micro/macro)=0.8031/0.8014 | monitor(macro)=0.7802
+Epoch 040 | loss=0.0025 | val_f1(micro/macro)=0.8000/0.7802 | test_f1(micro/macro)=0.8097/0.8078 | monitor(macro)=0.7802
+Early stop at epoch 40, best_epoch=10 | best_val_f1(micro/macro)=0.8667/0.8667 | test@best_f1(micro/macro)=0.7559/0.7582 | monitor=macro
+[RUN] method=typepair | split_seed=1 | repeat=0 | run_seed=1000 | ckpt=artifacts/checkpoints/hgmp/pretrain/ACM.GraphCL.GCN.hid512.np500.seed0.pth | micro=0.7559 | macro=0.7582 | best_epoch=10
+[load_state_dict] remapped 11 plain HGMP keys to TypePair wrapper keys.
+[load_state_dict] typepair prompt keys were missing from ckpt (expected when loading a plain hgmp checkpoint).
+Epoch 001 | loss=1.2367 | val_f1(micro/macro)=0.4000/0.2865 | test_f1(micro/macro)=0.4259/0.3288 | monitor(macro)=0.2865
+Epoch 010 | loss=0.2029 | val_f1(micro/macro)=0.6000/0.5767 | test_f1(micro/macro)=0.7960/0.7948 | monitor(macro)=0.5767
+Epoch 020 | loss=0.0067 | val_f1(micro/macro)=0.6000/0.5767 | test_f1(micro/macro)=0.8036/0.7994 | monitor(macro)=0.5767
+Epoch 030 | loss=0.0029 | val_f1(micro/macro)=0.6667/0.6548 | test_f1(micro/macro)=0.7890/0.7766 | monitor(macro)=0.6548
+Epoch 040 | loss=0.0009 | val_f1(micro/macro)=0.6667/0.6548 | test_f1(micro/macro)=0.7753/0.7591 | monitor(macro)=0.6548
+Epoch 050 | loss=0.0005 | val_f1(micro/macro)=0.6667/0.6548 | test_f1(micro/macro)=0.7767/0.7621 | monitor(macro)=0.6548
+Early stop at epoch 52, best_epoch=22 | best_val_f1(micro/macro)=0.7333/0.7286 | test@best_f1(micro/macro)=0.8244/0.8222 | monitor=macro
+[RUN] method=typepair | split_seed=2 | repeat=0 | run_seed=2000 | ckpt=artifacts/checkpoints/hgmp/pretrain/ACM.GraphCL.GCN.hid512.np500.seed0.pth | micro=0.8244 | macro=0.8222 | best_epoch=22
+[load_state_dict] remapped 11 plain HGMP keys to TypePair wrapper keys.
+[load_state_dict] typepair prompt keys were missing from ckpt (expected when loading a plain hgmp checkpoint).
+Epoch 001 | loss=1.2168 | val_f1(micro/macro)=0.4667/0.4024 | test_f1(micro/macro)=0.4948/0.4530 | monitor(macro)=0.4024
+Epoch 010 | loss=0.1535 | val_f1(micro/macro)=0.8667/0.8660 | test_f1(micro/macro)=0.8673/0.8696 | monitor(macro)=0.8660
+Epoch 020 | loss=0.0083 | val_f1(micro/macro)=0.8000/0.7919 | test_f1(micro/macro)=0.8536/0.8490 | monitor(macro)=0.7919
+Epoch 030 | loss=0.0027 | val_f1(micro/macro)=0.8667/0.8660 | test_f1(micro/macro)=0.8650/0.8660 | monitor(macro)=0.8660
+Early stop at epoch 39, best_epoch=9 | best_val_f1(micro/macro)=0.8667/0.8660 | test@best_f1(micro/macro)=0.8593/0.8612 | monitor=macro
+[RUN] method=typepair | split_seed=3 | repeat=0 | run_seed=3000 | ckpt=artifacts/checkpoints/hgmp/pretrain/ACM.GraphCL.GCN.hid512.np500.seed0.pth | micro=0.8593 | macro=0.8612 | best_epoch=9
+[load_state_dict] remapped 11 plain HGMP keys to TypePair wrapper keys.
+[load_state_dict] typepair prompt keys were missing from ckpt (expected when loading a plain hgmp checkpoint).
+Epoch 001 | loss=1.2051 | val_f1(micro/macro)=0.3333/0.1667 | test_f1(micro/macro)=0.3461/0.1763 | monitor(macro)=0.1667
+Epoch 010 | loss=0.5791 | val_f1(micro/macro)=0.6667/0.6296 | test_f1(micro/macro)=0.7578/0.7609 | monitor(macro)=0.6296
+Epoch 020 | loss=0.1046 | val_f1(micro/macro)=0.8000/0.8027 | test_f1(micro/macro)=0.8362/0.8372 | monitor(macro)=0.8027
+Epoch 030 | loss=0.0078 | val_f1(micro/macro)=0.8667/0.8611 | test_f1(micro/macro)=0.8314/0.8290 | monitor(macro)=0.8611
+Epoch 040 | loss=0.0094 | val_f1(micro/macro)=0.8000/0.7963 | test_f1(micro/macro)=0.8258/0.8262 | monitor(macro)=0.7963
+Epoch 050 | loss=0.0010 | val_f1(micro/macro)=0.7333/0.7387 | test_f1(micro/macro)=0.8220/0.8193 | monitor(macro)=0.7387
+Early stop at epoch 51, best_epoch=21 | best_val_f1(micro/macro)=0.9333/0.9327 | test@best_f1(micro/macro)=0.8381/0.8358 | monitor=macro
+[RUN] method=typepair | split_seed=4 | repeat=0 | run_seed=4000 | ckpt=artifacts/checkpoints/hgmp/pretrain/ACM.GraphCL.GCN.hid512.np500.seed0.pth | micro=0.8381 | macro=0.8358 | best_epoch=21
+wandb: Adding directory to artifact (/home_A/yuanqilin/repos/HGEP/artifacts/results/protocol_benchmark/ACM/5-shot)... Done. 0.0s
+####################################################
+{
+  "pooled_runs": {
+    "typepair": {
+      "count": 5,
+      "micro_mean": 0.8077431559562683,
+      "micro_std": 0.0417535084931367,
+      "macro_mean": 0.8090115427970886,
+      "macro_std": 0.03974768265655932
+    }
+  },
+  "seed_mean_then_std": {
+    "typepair": {
+      "count": 5,
+      "micro_mean": 0.8077431559562683,
+      "micro_std": 0.0417535084931367,
+      "macro_mean": 0.8090115427970886,
+      "macro_std": 0.03974768265655932
+    }
+  }
+}
+wandb: uploading artifact run-c2utzaq5-per_run_table; uploading artifact run-c2utzaq5-per_seed_summary_table; updating run metadata; uploading artifact ACM-5shot-protocol-benchmark-v2-0
+wandb: uploading artifact run-c2utzaq5-per_run_table; updating run metadata; uploading artifact ACM-5shot-protocol-benchmark-v2-0
+wandb: updating run metadata
+wandb: updating run metadata; uploading output.log
+wandb: updating run metadata
+wandb: uploading config.yaml
+wandb: uploading history steps 229-229, summary, console lines 50-71
+wandb: 
+wandb: Run history:
+wandb:     downstream/bad_epochs ▁▃▃▆▆▁▄▅▆▇▁▂▃▄▄▇▁▂▂▂▃▄▅▅▅▆▇███▁▁▁▂▁▂▃▄▅▆
+wandb:     downstream/best_epoch ▃▃▃▃▃▃▃▄▄▄▄▄▄▄▄▂▂▂███████▁▁▃▃▃▃▃▃▆██████
+wandb: downstream/best_val_macro ▁▆▆▇▇▇▇▇▇▇▇▇▇▇▇▃▃▅▅▅▆▆▆▆▆▃▅▇▇▇▇▄▄▅▅█████
+wandb: downstream/best_val_micro ▃▃▆▇▇▇▆▆▇▇▇▇▇▃▃▃▃▅▅▅▅▅▅▅▅▅▇▇▇▇▇▇▁▃▆█████
+wandb:          downstream/epoch ▂▂▃▃▄▄▁▂▂▃▄▄▄▆▆▁▂▃▄▆██▁▁▁▃▃▅▆▂▂▃▃▄▅▆▆▇▇█
+wandb:        downstream/monitor ▆▆▅▆▆▇▇▇▇▇▇▇▇▇▁▅▅▅▅▅▆▅▄▄▅▅█▇▇▇▇████▃▅▄▇▇
+wandb:  downstream/pretrain_seed ▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁
+wandb:      downstream/repeat_id ▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁
+wandb:       downstream/run_seed ▁▁▁▁▁▁▁▃▃▃▃▃▃▃▃▅▅▅▅▅▆▆▆▆▆▆▆▆▆▆██████████
+wandb:           downstream/shot ▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁
+wandb:                       +30 ...
+wandb: 
+wandb: Run summary:
+wandb:     downstream/bad_epochs 30
+wandb:     downstream/best_epoch 21
+wandb: downstream/best_val_macro 0.93266
+wandb: downstream/best_val_micro 0.93333
+wandb:        downstream/dataset ACM
+wandb:     downstream/early_stop True
+wandb:          downstream/epoch 51
+wandb:        downstream/is_best False
+wandb:         downstream/method typepair
+wandb:        downstream/monitor 0.73872
+wandb:                       +47 ...
+wandb: 
+wandb: 🚀 View run swift-oath-191 at: https://wandb.ai/iceylia-southwest-petroleum/HGEP/runs/c2utzaq5
+wandb: ⭐️ View project at: https://wandb.ai/iceylia-southwest-petroleum/HGEP
+wandb: Synced 5 W&B file(s), 3 media file(s), 11 artifact file(s) and 0 other file(s)
+wandb: Find logs at: ./artifacts/wandb/wandb/run-20260508_205119-c2utzaq5/logs
+================ MULTI-SHOT | shot=10 ================
+wandb: setting up run f0908yzm
+wandb: Tracking run with wandb version 0.26.0
+wandb: Run data is saved locally in /home_A/yuanqilin/repos/HGEP/artifacts/wandb/wandb/run-20260508_211232-f0908yzm
+wandb: Run `wandb offline` to turn off syncing.
+wandb: Syncing run charmed-eon-192
+wandb: ⭐️ View project at https://wandb.ai/iceylia-southwest-petroleum/HGEP
+wandb: 🚀 View run at https://wandb.ai/iceylia-southwest-petroleum/HGEP/runs/f0908yzm
+================ method=typepair | ckpt=artifacts/checkpoints/hgmp/pretrain/ACM.GraphCL.GCN.hid512.np500.seed0.pth ================
+/home_A/yuanqilin/.conda/envs/HGEP/lib/python3.11/site-packages/torch/storage.py:414: FutureWarning: You are using `torch.load` with `weights_only=False` (the current default value), which uses the default pickle module implicitly. It is possible to construct malicious pickle data which will execute arbitrary code during unpickling (See https://github.com/pytorch/pytorch/blob/main/SECURITY.md#untrusted-models for more details). In a future release, the default value for `weights_only` will be flipped to `True`. This limits the functions that could be executed during unpickling. Arbitrary objects will no longer be allowed to be loaded via this mode unless they are explicitly allowlisted by the user via `torch.serialization.add_safe_globals`. We recommend you start setting `weights_only=True` for any use case where you don't have full control of the loaded file. Please open an issue on GitHub for any issues related to this experimental feature.
+  return torch.load(io.BytesIO(b))
+/home_A/yuanqilin/repos/HGEP/src/gpbench/protocol_bridge/downstream_legacy.py:307: FutureWarning: You are using `torch.load` with `weights_only=False` (the current default value), which uses the default pickle module implicitly. It is possible to construct malicious pickle data which will execute arbitrary code during unpickling (See https://github.com/pytorch/pytorch/blob/main/SECURITY.md#untrusted-models for more details). In a future release, the default value for `weights_only` will be flipped to `True`. This limits the functions that could be executed during unpickling. Arbitrary objects will no longer be allowed to be loaded via this mode unless they are explicitly allowlisted by the user via `torch.serialization.add_safe_globals`. We recommend you start setting `weights_only=True` for any use case where you don't have full control of the loaded file. Please open an issue on GitHub for any issues related to this experimental feature.
+  state = torch.load(ckpt_path, map_location="cpu")
+[load_state_dict] remapped 11 plain HGMP keys to TypePair wrapper keys.
+[load_state_dict] typepair prompt keys were missing from ckpt (expected when loading a plain hgmp checkpoint).
+Epoch 001 | loss=1.2185 | val_f1(micro/macro)=0.3333/0.1667 | test_f1(micro/macro)=0.3376/0.1691 | monitor(macro)=0.1667
+Epoch 010 | loss=0.3643 | val_f1(micro/macro)=0.8333/0.8341 | test_f1(micro/macro)=0.8480/0.8465 | monitor(macro)=0.8341
+Epoch 020 | loss=0.0632 | val_f1(micro/macro)=0.8333/0.8364 | test_f1(micro/macro)=0.8725/0.8724 | monitor(macro)=0.8364
+Epoch 030 | loss=0.0078 | val_f1(micro/macro)=0.8333/0.8341 | test_f1(micro/macro)=0.8810/0.8805 | monitor(macro)=0.8341
+Epoch 040 | loss=0.0021 | val_f1(micro/macro)=0.8667/0.8682 | test_f1(micro/macro)=0.8886/0.8897 | monitor(macro)=0.8682
+Early stop at epoch 42, best_epoch=12 | best_val_f1(micro/macro)=0.9000/0.9019 | test@best_f1(micro/macro)=0.8385/0.8424 | monitor=macro
+[RUN] method=typepair | split_seed=0 | repeat=0 | run_seed=0 | ckpt=artifacts/checkpoints/hgmp/pretrain/ACM.GraphCL.GCN.hid512.np500.seed0.pth | micro=0.8385 | macro=0.8424 | best_epoch=12
+[load_state_dict] remapped 11 plain HGMP keys to TypePair wrapper keys.
+[load_state_dict] typepair prompt keys were missing from ckpt (expected when loading a plain hgmp checkpoint).
+Epoch 001 | loss=1.0289 | val_f1(micro/macro)=0.5333/0.4468 | test_f1(micro/macro)=0.6133/0.5093 | monitor(macro)=0.4468
+Epoch 010 | loss=0.1816 | val_f1(micro/macro)=0.7667/0.7699 | test_f1(micro/macro)=0.8296/0.8333 | monitor(macro)=0.7699
+Epoch 020 | loss=0.0192 | val_f1(micro/macro)=0.8000/0.7980 | test_f1(micro/macro)=0.8258/0.8257 | monitor(macro)=0.7980
+Epoch 030 | loss=0.0030 | val_f1(micro/macro)=0.8333/0.8364 | test_f1(micro/macro)=0.8612/0.8625 | monitor(macro)=0.8364
+Epoch 040 | loss=0.0010 | val_f1(micro/macro)=0.8000/0.7996 | test_f1(micro/macro)=0.8418/0.8424 | monitor(macro)=0.7996
+Early stop at epoch 41, best_epoch=11 | best_val_f1(micro/macro)=0.8333/0.8364 | test@best_f1(micro/macro)=0.8451/0.8480 | monitor=macro
+[RUN] method=typepair | split_seed=1 | repeat=0 | run_seed=1000 | ckpt=artifacts/checkpoints/hgmp/pretrain/ACM.GraphCL.GCN.hid512.np500.seed0.pth | micro=0.8451 | macro=0.8480 | best_epoch=11
+[load_state_dict] remapped 11 plain HGMP keys to TypePair wrapper keys.
+[load_state_dict] typepair prompt keys were missing from ckpt (expected when loading a plain hgmp checkpoint).
+Epoch 001 | loss=1.1897 | val_f1(micro/macro)=0.5667/0.4498 | test_f1(micro/macro)=0.5198/0.4100 | monitor(macro)=0.4498
+Epoch 010 | loss=0.3067 | val_f1(micro/macro)=0.8000/0.7919 | test_f1(micro/macro)=0.8187/0.8146 | monitor(macro)=0.7919
+Epoch 020 | loss=0.0213 | val_f1(micro/macro)=0.8333/0.8240 | test_f1(micro/macro)=0.8291/0.8226 | monitor(macro)=0.8240
+Epoch 030 | loss=0.0032 | val_f1(micro/macro)=0.8333/0.8240 | test_f1(micro/macro)=0.8187/0.8089 | monitor(macro)=0.8240
+Epoch 040 | loss=0.0010 | val_f1(micro/macro)=0.8667/0.8624 | test_f1(micro/macro)=0.8333/0.8300 | monitor(macro)=0.8624
+Epoch 050 | loss=0.0003 | val_f1(micro/macro)=0.8667/0.8624 | test_f1(micro/macro)=0.8366/0.8314 | monitor(macro)=0.8624
+Early stop at epoch 54, best_epoch=24 | best_val_f1(micro/macro)=0.8667/0.8624 | test@best_f1(micro/macro)=0.8272/0.8234 | monitor=macro
+[RUN] method=typepair | split_seed=2 | repeat=0 | run_seed=2000 | ckpt=artifacts/checkpoints/hgmp/pretrain/ACM.GraphCL.GCN.hid512.np500.seed0.pth | micro=0.8272 | macro=0.8234 | best_epoch=24
+[load_state_dict] remapped 11 plain HGMP keys to TypePair wrapper keys.
+[load_state_dict] typepair prompt keys were missing from ckpt (expected when loading a plain hgmp checkpoint).
+Epoch 001 | loss=1.1059 | val_f1(micro/macro)=0.5333/0.4650 | test_f1(micro/macro)=0.5019/0.4091 | monitor(macro)=0.4650
+Epoch 010 | loss=0.2134 | val_f1(micro/macro)=0.7333/0.7315 | test_f1(micro/macro)=0.8579/0.8599 | monitor(macro)=0.7315
+Epoch 020 | loss=0.0155 | val_f1(micro/macro)=0.7667/0.7620 | test_f1(micro/macro)=0.8362/0.8319 | monitor(macro)=0.7620
+Epoch 030 | loss=0.0068 | val_f1(micro/macro)=0.8000/0.8054 | test_f1(micro/macro)=0.8366/0.8381 | monitor(macro)=0.8054
+Epoch 040 | loss=0.0010 | val_f1(micro/macro)=0.9000/0.8993 | test_f1(micro/macro)=0.8404/0.8395 | monitor(macro)=0.8993
+Epoch 050 | loss=0.0005 | val_f1(micro/macro)=0.9000/0.8950 | test_f1(micro/macro)=0.8466/0.8464 | monitor(macro)=0.8950
+Epoch 060 | loss=0.0004 | val_f1(micro/macro)=0.9333/0.9327 | test_f1(micro/macro)=0.8541/0.8544 | monitor(macro)=0.9327
+Epoch 070 | loss=0.0004 | val_f1(micro/macro)=0.9000/0.8982 | test_f1(micro/macro)=0.8593/0.8594 | monitor(macro)=0.8982
+Epoch 080 | loss=0.0003 | val_f1(micro/macro)=0.8667/0.8648 | test_f1(micro/macro)=0.8565/0.8563 | monitor(macro)=0.8648
+Epoch 090 | loss=0.0004 | val_f1(micro/macro)=0.8667/0.8648 | test_f1(micro/macro)=0.8565/0.8562 | monitor(macro)=0.8648
+Early stop at epoch 90, best_epoch=60 | best_val_f1(micro/macro)=0.9333/0.9327 | test@best_f1(micro/macro)=0.8541/0.8544 | monitor=macro
+[RUN] method=typepair | split_seed=3 | repeat=0 | run_seed=3000 | ckpt=artifacts/checkpoints/hgmp/pretrain/ACM.GraphCL.GCN.hid512.np500.seed0.pth | micro=0.8541 | macro=0.8544 | best_epoch=60
+[load_state_dict] remapped 11 plain HGMP keys to TypePair wrapper keys.
+[load_state_dict] typepair prompt keys were missing from ckpt (expected when loading a plain hgmp checkpoint).
+Epoch 001 | loss=1.1524 | val_f1(micro/macro)=0.3333/0.1667 | test_f1(micro/macro)=0.3447/0.1733 | monitor(macro)=0.1667
+Epoch 010 | loss=0.5975 | val_f1(micro/macro)=0.9333/0.9312 | test_f1(micro/macro)=0.8560/0.8574 | monitor(macro)=0.9312
+Epoch 020 | loss=0.1343 | val_f1(micro/macro)=0.9000/0.8995 | test_f1(micro/macro)=0.8650/0.8640 | monitor(macro)=0.8995
+Epoch 030 | loss=0.0145 | val_f1(micro/macro)=0.9333/0.9346 | test_f1(micro/macro)=0.8720/0.8697 | monitor(macro)=0.9346
+Early stop at epoch 39, best_epoch=9 | best_val_f1(micro/macro)=0.9667/0.9666 | test@best_f1(micro/macro)=0.8626/0.8627 | monitor=macro
+[RUN] method=typepair | split_seed=4 | repeat=0 | run_seed=4000 | ckpt=artifacts/checkpoints/hgmp/pretrain/ACM.GraphCL.GCN.hid512.np500.seed0.pth | micro=0.8626 | macro=0.8627 | best_epoch=9
+wandb: Adding directory to artifact (/home_A/yuanqilin/repos/HGEP/artifacts/results/protocol_benchmark/ACM/10-shot)... Done. 0.0s
+####################################################
+{
+  "pooled_runs": {
+    "typepair": {
+      "count": 5,
+      "micro_mean": 0.8455146431922913,
+      "micro_std": 0.012251742047038825,
+      "macro_mean": 0.8461976289749146,
+      "macro_std": 0.013255032730836903
+    }
+  },
+  "seed_mean_then_std": {
+    "typepair": {
+      "count": 5,
+      "micro_mean": 0.8455146431922913,
+      "micro_std": 0.012251742047038825,
+      "macro_mean": 0.8461976289749146,
+      "macro_std": 0.013255032730836903
+    }
+  }
+}
+wandb: uploading artifact run-f0908yzm-per_run_table; uploading artifact run-f0908yzm-per_seed_summary_table; updating run metadata; uploading artifact ACM-10shot-protocol-benchmark-v2-0
+wandb: uploading artifact run-f0908yzm-per_run_table; uploading artifact run-f0908yzm-per_seed_summary_table; uploading artifact ACM-10shot-protocol-benchmark-v2-0
+wandb: uploading output.log; uploading wandb-summary.json; uploading config.yaml; uploading media/table/per_run_table_273_f684921a244c99199492.table.json; uploading media/table/per_seed_summary_table_274_dc3dafa1301af9859053.table.json
+wandb: uploading history steps 271-274, summary, console lines 53-76
+wandb: 
+wandb: Run history:
+wandb:     downstream/bad_epochs ▁▁▅▆▇▄▅▅▆▇▁▂▂▂▂▅▇▇▇▁▁▁▁▄▄▁▁▂▃▄▂▄▅▂▁▃▄▆▆█
+wandb:     downstream/best_epoch ▁▁▁▂▂▂▁▂▂▂▂▂▂▂▂▂▄▄▄▄▂▃▃▅▅▅▅▅████▁▂▂▂▂▂▂▂
+wandb: downstream/best_val_macro ▆▆▆▆▆▁▁▄▄▄▄▄▅▅▅▅▅▅▅▅▆▆▆▇▇▇▇▇▇▇▇▇▇▇▇▅████
+wandb: downstream/best_val_micro ▁▃▇▇▇▇▇▇▇▇▅▅▅▅▅▅▂▅▆▆▆▆▆▄▄▇▇▇▇▇▇▇▇▇▇█████
+wandb:          downstream/epoch ▁▁▂▂▃▃▄▄▄▁▄▂▃▃▄▄▄▅▅▅▁▂▂▂▂▃▃▄▅▅▆▇██▂▃▃▃▄▄
+wandb:        downstream/monitor ▂▇▇▇▆▇▆▆▇▆▆▂▅▇▆▆▇▇▇▇▂▅▅▅▅▆█▇▇▇▇▇▇▇▇▁▇█▇▇
+wandb:  downstream/pretrain_seed ▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁
+wandb:      downstream/repeat_id ▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁
+wandb:       downstream/run_seed ▁▁▁▁▁▁▁▃▃▃▃▃▅▅▅▅▅▅▅▅▆▆▆▆▆▆▆▆▆▆▆▆████████
+wandb:           downstream/shot ▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁
+wandb:                       +30 ...
+wandb: 
+wandb: Run summary:
+wandb:     downstream/bad_epochs 30
+wandb:     downstream/best_epoch 9
+wandb: downstream/best_val_macro 0.96658
+wandb: downstream/best_val_micro 0.96667
+wandb:        downstream/dataset ACM
+wandb:     downstream/early_stop True
+wandb:          downstream/epoch 39
+wandb:        downstream/is_best False
+wandb:         downstream/method typepair
+wandb:        downstream/monitor 0.93461
+wandb:                       +47 ...
+wandb: 
+wandb: 🚀 View run charmed-eon-192 at: https://wandb.ai/iceylia-southwest-petroleum/HGEP/runs/f0908yzm
+wandb: ⭐️ View project at: https://wandb.ai/iceylia-southwest-petroleum/HGEP
+wandb: Synced 5 W&B file(s), 3 media file(s), 12 artifact file(s) and 0 other file(s)
+wandb: Find logs at: ./artifacts/wandb/wandb/run-20260508_211232-f0908yzm/logs
+wandb: setting up run la1bjf00
+wandb: Tracking run with wandb version 0.26.0
+wandb: Run data is saved locally in /home_A/yuanqilin/repos/HGEP/artifacts/wandb/wandb/run-20260508_214618-la1bjf00
+wandb: Run `wandb offline` to turn off syncing.
+wandb: Syncing run ACM-multishot-summary
+wandb: ⭐️ View project at https://wandb.ai/iceylia-southwest-petroleum/HGEP
+wandb: 🚀 View run at https://wandb.ai/iceylia-southwest-petroleum/HGEP/runs/la1bjf00
+wandb: updating run metadata; uploading artifact run-la1bjf00-multishot_compare_table; uploading artifact run-la1bjf00-multishot_run_refs; uploading artifact ACM-multishot-compare; uploading artifact ACM-multishot-summary
+wandb: uploading artifact run-la1bjf00-multishot_compare_table; uploading artifact run-la1bjf00-multishot_run_refs; uploading artifact ACM-multishot-compare; uploading artifact ACM-multishot-summary
+wandb: uploading artifact run-la1bjf00-multishot_compare_table; uploading artifact run-la1bjf00-multishot_run_refs; uploading artifact ACM-multishot-compare; uploading artifact ACM-multishot-summary; uploading media/table/multishot_run_refs_2_495430f03df556da2631.table.json (+ 5 more)
+wandb: uploading artifact run-la1bjf00-multishot_compare_table; uploading artifact run-la1bjf00-multishot_run_refs; uploading artifact ACM-multishot-compare; uploading artifact ACM-multishot-summary; uploading media/table/multishot_run_refs_2_495430f03df556da2631.table.json (+ 6 more)
+wandb: uploading artifact run-la1bjf00-multishot_compare_table; uploading artifact run-la1bjf00-multishot_run_refs; uploading artifact ACM-multishot-compare; uploading artifact ACM-multishot-summary; uploading media/table/multishot_run_refs_2_495430f03df556da2631.table.json (+ 5 more)
+wandb: uploading artifact run-la1bjf00-multishot_compare_table; uploading artifact run-la1bjf00-multishot_run_refs; uploading artifact ACM-multishot-compare; uploading artifact ACM-multishot-summary; uploading media/table/multishot_run_refs_2_495430f03df556da2631.table.json (+ 6 more)
+wandb: uploading artifact run-la1bjf00-multishot_compare_table; uploading artifact run-la1bjf00-multishot_run_refs; uploading artifact ACM-multishot-compare; uploading artifact ACM-multishot-summary; uploading media/table/multishot_run_refs_2_495430f03df556da2631.table.json (+ 5 more)
+wandb: uploading artifact run-la1bjf00-multishot_compare_table; uploading artifact run-la1bjf00-multishot_run_refs; uploading artifact ACM-multishot-compare; uploading artifact ACM-multishot-summary; uploading media/table/multishot_run_refs_2_495430f03df556da2631.table.json (+ 6 more)
+wandb: uploading artifact run-la1bjf00-multishot_compare_table; uploading artifact run-la1bjf00-multishot_run_refs; uploading artifact ACM-multishot-compare; uploading artifact ACM-multishot-summary; uploading media/table/multishot_run_refs_2_495430f03df556da2631.table.json (+ 5 more)
+wandb: uploading artifact run-la1bjf00-multishot_compare_table; uploading artifact run-la1bjf00-multishot_run_refs; uploading artifact ACM-multishot-compare; uploading artifact ACM-multishot-summary; uploading media/table/multishot_run_refs_2_495430f03df556da2631.table.json (+ 6 more)
+wandb: uploading artifact run-la1bjf00-multishot_compare_table; uploading artifact run-la1bjf00-multishot_run_refs; uploading artifact ACM-multishot-compare; uploading artifact ACM-multishot-summary; uploading media/table/multishot_run_refs_2_495430f03df556da2631.table.json (+ 5 more)
+wandb: uploading artifact run-la1bjf00-multishot_compare_table; uploading artifact run-la1bjf00-multishot_run_refs; uploading artifact ACM-multishot-compare; uploading artifact ACM-multishot-summary; uploading data
+wandb: uploading artifact run-la1bjf00-multishot_compare_table; uploading artifact run-la1bjf00-multishot_run_refs; uploading artifact ACM-multishot-compare; uploading artifact ACM-multishot-summary
+wandb: uploading artifact run-la1bjf00-multishot_compare_table; uploading artifact ACM-multishot-compare
+wandb: uploading data
+wandb: 
+wandb: Run history:
+wandb:   multishot/num_methods ▁
+wandb:     multishot/num_seeds ▁
+wandb:     multishot/num_shots ▁
+wandb: multishot/pretrain_seed ▁
+wandb:       multishot/repeats ▁
+wandb: 
+wandb: Run summary:
+wandb:           multishot/num_methods 1
+wandb:             multishot/num_seeds 5
+wandb:             multishot/num_shots 4
+wandb:         multishot/pretrain_seed 0
+wandb:               multishot/repeats 1
+wandb:       multishot_summary/dataset ACM
+wandb: multishot_summary/pretrain_seed 0
+wandb:       multishot_summary/repeats 1
+wandb:      multishot_summary/save_dir /home_A/yuanqilin/re...
+wandb: 
+wandb: 🚀 View run ACM-multishot-summary at: https://wandb.ai/iceylia-southwest-petroleum/HGEP/runs/la1bjf00
+wandb: ⭐️ View project at: https://wandb.ai/iceylia-southwest-petroleum/HGEP
+wandb: Synced 4 W&B file(s), 2 media file(s), 8 artifact file(s) and 0 other file(s)
+wandb: Find logs at: ./artifacts/wandb/wandb/run-20260508_214618-la1bjf00/logs
+####################################################
+{
+  "dataset": "ACM",
+  "shots": [
+    1,
+    3,
+    5,
+    10
+  ],
+  "methods": [
+    "typepair"
+  ],
+  "seeds": [
+    0,
+    1,
+    2,
+    3,
+    4
+  ],
+  "repeats": 1,
+  "pretrain_seed": 0,
+  "save_dir": "/home_A/yuanqilin/repos/HGEP/artifacts/results/protocol_benchmark",
+  "multi_shot_results": [
+    {
+      "shot": 1,
+      "out_dir": "/home_A/yuanqilin/repos/HGEP/artifacts/results/protocol_benchmark/ACM/1-shot",
+      "resolved_ckpt_by_method": {
+        "typepair": "artifacts/checkpoints/hgmp/pretrain/ACM.GraphCL.GCN.hid512.np500.seed0.pth"
+      },
+      "pooled_runs": {
+        "typepair": {
+          "count": 5,
+          "micro_mean": 0.6352218985557556,
+          "micro_std": 0.06714445348461617,
+          "macro_mean": 0.5948150992393494,
+          "macro_std": 0.0935692203897975
+        }
+      },
+      "seed_mean_then_std": {
+        "typepair": {
+          "count": 5,
+          "micro_mean": 0.6352218985557556,
+          "micro_std": 0.06714445348461617,
+          "macro_mean": 0.5948150992393494,
+          "macro_std": 0.0935692203897975
+        }
+      }
+    },
+    {
+      "shot": 3,
+      "out_dir": "/home_A/yuanqilin/repos/HGEP/artifacts/results/protocol_benchmark/ACM/3-shot",
+      "resolved_ckpt_by_method": {
+        "typepair": "artifacts/checkpoints/hgmp/pretrain/ACM.GraphCL.GCN.hid512.np500.seed0.pth"
+      },
+      "pooled_runs": {
+        "typepair": {
+          "count": 5,
+          "micro_mean": 0.7901794195175171,
+          "micro_std": 0.051693659411173445,
+          "macro_mean": 0.7861560463905335,
+          "macro_std": 0.060547151950131016
+        }
+      },
+      "seed_mean_then_std": {
+        "typepair": {
+          "count": 5,
+          "micro_mean": 0.7901794195175171,
+          "micro_std": 0.051693659411173445,
+          "macro_mean": 0.7861560463905335,
+          "macro_std": 0.060547151950131016
+        }
+      }
+    },
+    {
+      "shot": 5,
+      "out_dir": "/home_A/yuanqilin/repos/HGEP/artifacts/results/protocol_benchmark/ACM/5-shot",
+      "resolved_ckpt_by_method": {
+        "typepair": "artifacts/checkpoints/hgmp/pretrain/ACM.GraphCL.GCN.hid512.np500.seed0.pth"
+      },
+      "pooled_runs": {
+        "typepair": {
+          "count": 5,
+          "micro_mean": 0.8077431559562683,
+          "micro_std": 0.0417535084931367,
+          "macro_mean": 0.8090115427970886,
+          "macro_std": 0.03974768265655932
+        }
+      },
+      "seed_mean_then_std": {
+        "typepair": {
+          "count": 5,
+          "micro_mean": 0.8077431559562683,
+          "micro_std": 0.0417535084931367,
+          "macro_mean": 0.8090115427970886,
+          "macro_std": 0.03974768265655932
+        }
+      }
+    },
+    {
+      "shot": 10,
+      "out_dir": "/home_A/yuanqilin/repos/HGEP/artifacts/results/protocol_benchmark/ACM/10-shot",
+      "resolved_ckpt_by_method": {
+        "typepair": "artifacts/checkpoints/hgmp/pretrain/ACM.GraphCL.GCN.hid512.np500.seed0.pth"
+      },
+      "pooled_runs": {
+        "typepair": {
+          "count": 5,
+          "micro_mean": 0.8455146431922913,
+          "micro_std": 0.012251742047038825,
+          "macro_mean": 0.8461976289749146,
+          "macro_std": 0.013255032730836903
+        }
+      },
+      "seed_mean_then_std": {
+        "typepair": {
+          "count": 5,
+          "micro_mean": 0.8455146431922913,
+          "micro_std": 0.012251742047038825,
+          "macro_mean": 0.8461976289749146,
+          "macro_std": 0.013255032730836903
+        }
+      }
+    }
+  ]
+}

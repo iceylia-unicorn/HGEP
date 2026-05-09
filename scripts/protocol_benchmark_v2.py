@@ -724,6 +724,14 @@ def _make_legacy_args(cli_args, method: str, ckpt_path: str, split_seed: int, re
         prompt_lr=cli_args.prompt_lr,
         weight_decay=cli_args.weight_decay,
         early_stop_metric=cli_args.early_stop_metric,
+        hgmp_prompt_recipe=cli_args.hgmp_prompt_recipe,
+        hgmp_prompt_prompt_lr=cli_args.hgmp_prompt_prompt_lr,
+        hgmp_prompt_head_lr=cli_args.hgmp_prompt_head_lr,
+        hgmp_prompt_weight_decay=cli_args.hgmp_prompt_weight_decay,
+        hgmp_prompt_batch_size=cli_args.hgmp_prompt_batch_size,
+        hgmp_prompt_epochs=cli_args.hgmp_prompt_epochs,
+        hgmp_prompt_patience=cli_args.hgmp_prompt_patience,
+        hgmp_prompt_early_stop_mode=cli_args.hgmp_prompt_early_stop_mode,
         save_dir=str(cli_args.save_dir),
         root=cli_args.root,
         splits=cli_args.splits,
@@ -1041,6 +1049,26 @@ def build_parser():
     ap.add_argument("--prompt_lr", type=float, default=None)
     ap.add_argument("--weight_decay", type=float, default=1e-4)
     ap.add_argument("--early_stop_metric", type=str, default="macro", choices=["micro", "macro"])
+    ap.add_argument(
+        "--hgmp_prompt_recipe",
+        type=str,
+        default="legacy",
+        choices=["bridge", "legacy"],
+        help="Use legacy HGMP prompt training by default so the method stays close to the original paper code.",
+    )
+    ap.add_argument("--hgmp_prompt_prompt_lr", type=float, default=None)
+    ap.add_argument("--hgmp_prompt_head_lr", type=float, default=None)
+    ap.add_argument("--hgmp_prompt_weight_decay", type=float, default=None)
+    ap.add_argument("--hgmp_prompt_batch_size", type=int, default=None)
+    ap.add_argument("--hgmp_prompt_epochs", type=int, default=None)
+    ap.add_argument("--hgmp_prompt_patience", type=int, default=None)
+    ap.add_argument(
+        "--hgmp_prompt_early_stop_mode",
+        type=str,
+        default="metric",
+        choices=["auto", "metric", "legacy_loss"],
+        help="Use validation metric selection by default so hgmp_prompt and typepair share the same model-selection protocol.",
+    )
 
     ap.add_argument("--relation_prompt_mode", type=str, default="mul", choices=["mul", "add"])
     ap.add_argument("--relation_prompt_alpha", type=float, default=0.5) # The alpha for fusing relation prompts, used when relation_prompt_mode is "mul" or "add"

@@ -212,9 +212,9 @@ python scripts/typepair_edge_feature_sweep.py \
 ```bash
 python scripts/protocol_benchmark_v2.py \
   --dataset ACM \
-  --shot 1 \
-  --methods typepair \
-  --seeds 0 1 2 3 4 \
+  --shot 10 \
+  --methods hgmp hgmp_prompt \
+  --seeds 0 \
   --hgnn_type GCN \
   --hidden_dim 512 \
   --num_heads 8 \
@@ -229,9 +229,9 @@ nohup python -u scripts/protocol_benchmark_v2.py   --dataset ACM   --shot 10   -
 ```
 
 ```bash
-nohup /home_A/yuanqilin/.conda/envs/HGEP/bin/python scripts/protocol_multishot_eval.py \
+nohup /home_A/yuanqilin/.conda/envs/HGEP/bin/python -u scripts/protocol_multishot_eval.py \
   --dataset ACM \
-  --methods typepair hgmp \
+  --methods typepair \
   --shots 1 3 5 10 \
   --seeds 0 1 2 3 4 \
   --repeats 1 \
@@ -245,7 +245,7 @@ nohup /home_A/yuanqilin/.conda/envs/HGEP/bin/python scripts/protocol_multishot_e
   --typepair_spectral_dim 8 \
   --typepair_edge_prompt_fusion gate \
   --use_wandb \
-  --wandb_mode offline \
+  --wandb_mode online \
   > nohup.out 2>&1 &
 
 

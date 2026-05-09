@@ -11,3 +11,5 @@ data/
 .codex
 ./wandb
 wandb/
+
+nohup.out

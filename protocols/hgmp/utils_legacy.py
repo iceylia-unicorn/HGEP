@@ -118,6 +118,97 @@ def dense_to_sparse(dense_tensor):
     return sparse_tensor
 # used in pre_train.py
 
+
+def _load_pretrain_heterodata(feats_type=3, dataname='IMDB', root_dir=None):
+    root_path = os.fspath(DATA_ROOT if root_dir is None else root_dir)
+    if(dataname=='Freebase' and feats_type==-1):
+        dataset = HGBDataset(root=root_path, name=dataname,transform=ToUndirected(merge=False))
+        data = dataset[0]
+    elif(dataname=='oldfreebase'):
+        data=load_freebase(osp.join(root_path, "oldfreebase"))
+    else:
+        dataset = HGBDataset(root=root_path, name=dataname)
+        data=dataset[0]
+    return data
+
+
+def _prepare_pretrain_data_and_dims(feats_type=3, dataname='IMDB', root_dir=None):
+    data = _load_pretrain_heterodata(feats_type=feats_type, dataname=dataname, root_dir=root_dir)
+
+    for node_type, node_store in data.node_items():
+        for attr, value in node_store.items():
+            #没有节点属性的节点类型赋值对角矩阵
+            if attr=='num_nodes':
+                #data[node_type]['x']=torch.eye(value)
+                data[node_type]['x'] = create_matrix(value, 0.01)
+                del data[node_type][attr]
+
+    features=data.x_dict
+    features_list=[]
+    for value in features.values():
+        features_list.append(value)
+
+    if feats_type == 0 or feats_type == -1:
+        in_dims = [features.shape[1] for features in features_list]
+    elif feats_type == 1 or feats_type == 5:
+        save = 0 if feats_type == 1 else 2
+        in_dims = []  # [features_list[0].shape[1]] + [10] * (len(features_list) - 1)
+        for i in range(0, len(features_list)):
+            if i == save:
+                in_dims.append(features_list[i].shape[1])
+            else:
+                in_dims.append(10)
+                features_list[i] = torch.zeros((features_list[i].shape[0], 10))
+    elif feats_type == 2 or feats_type == 4:
+        save = feats_type - 2
+        in_dims = [features.shape[0] for features in features_list]
+        for i in range(0, len(features_list)):
+            if i == save:
+                in_dims[i] = features_list[i].shape[1]
+                continue
+            dim = features_list[i].shape[0]
+            indices = np.vstack((np.arange(dim), np.arange(dim)))
+            indices = torch.LongTensor(indices)
+            values = torch.FloatTensor(np.ones(dim))
+            features_list[i] = torch.sparse.FloatTensor(indices, values, torch.Size([dim, dim]))
+    elif feats_type == 3:
+        in_dims = [features.shape[0] for features in features_list]
+        for i in range(len(features_list)):
+            dim = features_list[i].shape[0]
+            indices = np.vstack((np.arange(dim), np.arange(dim)))
+            indices = torch.LongTensor(indices)
+            values = torch.FloatTensor(np.ones(dim))
+            features_list[i] = torch.sparse.FloatTensor(indices, values, torch.Size([dim, dim]))
+    else:
+        raise ValueError(f"Unsupported feats_type: {feats_type}")
+
+    value_dict={}
+    i = 0
+    for ntype in data.node_types:
+        value_dict[ntype]=features_list[i]
+        i=i+1
+
+    data.set_value_dict('x',value_dict)
+    num_class=(torch.max(data[data_target[dataname]].y)+1).item()
+    in_dim_by_ntype = {
+        ntype: int(dim)
+        for ntype, dim in zip(data.node_types, in_dims)
+    }
+    return data, in_dim_by_ntype, num_class
+
+
+def get_graph_metadata_lightweight(feats_type=3, dataset='IMDB', root_dir=None):
+    data, in_dim_by_ntype, num_class = _prepare_pretrain_data_and_dims(
+        feats_type=feats_type,
+        dataname=dataset,
+        root_dir=root_dir,
+    )
+    graph = pyg_to_dgl(data)
+    ntypes = list(graph.ntypes)
+    canonical_etypes = list(graph.canonical_etypes)
+    in_dims = [in_dim_by_ntype[ntype] for ntype in ntypes]
+    return in_dims, ntypes, canonical_etypes, num_class
+
 def load_data4pretrain_metapath(feats_type=3,device=None,dataname='IMDB',batch_size=32,num_sample=128):
     if(dataname=='Freebase' and feats_type==-1):
         dataset = HGBDataset(root=DATA_ROOT, name=dataname,transform=ToUndirected(merge=False))
@@ -245,70 +336,10 @@ def load_data4pretrain_metapath(feats_type=3,device=None,dataname='IMDB',batch_s
 
     return graph_list1,in_dims,num_class
 def load_data4pretrain(feats_type=3,device=None,dataname='IMDB',batch_size=32,num_sample=128):
-    if(dataname=='Freebase' and feats_type==-1):
-        dataset = HGBDataset(root=DATA_ROOT, name=dataname,transform=ToUndirected(merge=False))
-        data = dataset[0]
-    elif(dataname=='oldfreebase'):
-        data=load_freebase(DATA_ROOT + "/oldfreebase")
-    else:
-        dataset = HGBDataset(root=DATA_ROOT, name=dataname)
-        data=dataset[0]
-
-
-    for node_type, node_store in data.node_items():
-        for attr, value in node_store.items():
-            #没有节点属性的节点类型赋值对角矩阵
-            if attr=='num_nodes':
-                #data[node_type]['x']=torch.eye(value)
-                data[node_type]['x'] = create_matrix(value, 0.01)
-                del data[node_type][attr]
-
-
-    features=data.x_dict
-    features_list=[]
-    for value in features.values():
-        features_list.append(value)
-
-    if feats_type == 0 or feats_type == -1:
-        in_dims = [features.shape[1] for features in features_list]
-    elif feats_type == 1 or feats_type == 5:
-        save = 0 if feats_type == 1 else 2
-        in_dims = []  # [features_list[0].shape[1]] + [10] * (len(features_list) - 1)
-        for i in range(0, len(features_list)):
-            if i == save:
-                in_dims.append(features_list[i].shape[1])
-            else:
-                in_dims.append(10)
-                features_list[i] = torch.zeros((features_list[i].shape[0], 10))
-    elif feats_type == 2 or feats_type == 4:
-        save = feats_type - 2
-        in_dims = [features.shape[0] for features in features_list]
-        for i in range(0, len(features_list)):
-            if i == save:
-                in_dims[i] = features_list[i].shape[1]
-                continue
-            dim = features_list[i].shape[0]
-            indices = np.vstack((np.arange(dim), np.arange(dim)))
-            indices = torch.LongTensor(indices)
-            values = torch.FloatTensor(np.ones(dim))
-            features_list[i] = torch.sparse.FloatTensor(indices, values, torch.Size([dim, dim]))
-    elif feats_type == 3:
-        in_dims = [features.shape[0] for features in features_list]
-        for i in range(len(features_list)):
-            dim = features_list[i].shape[0]
-            indices = np.vstack((np.arange(dim), np.arange(dim)))
-            indices = torch.LongTensor(indices)
-            values = torch.FloatTensor(np.ones(dim))
-            features_list[i] = torch.sparse.FloatTensor(indices, values, torch.Size([dim, dim]))
-
-    value_dict={}
-    i = 0
-    for ntype in data.node_types:
-        value_dict[ntype]=features_list[i]
-        i=i+1
-
-    data.set_value_dict('x',value_dict)
-    num_class=(torch.max(data[data_target[dataname]].y)+1).item()
+    data, in_dim_by_ntype, num_class = _prepare_pretrain_data_and_dims(
+        feats_type=feats_type,
+        dataname=dataname,
+    )
 
     # graph_loader = HGTLoader(
     #     data,
@@ -321,10 +352,7 @@ def load_data4pretrain(feats_type=3,device=None,dataname='IMDB',batch_size=32,nu
     #
     # pyg_graph_list=list(graph_loader)
 
-    node_type=data.node_types
-    name4dim={}
-    for name,dim in zip(node_type,in_dims):
-        name4dim[name]=dim
+    name4dim = dict(in_dim_by_ntype)
 
     pyg_graph_list = ClusterData(data=data.to_homogeneous(), num_parts=num_sample)
 
@@ -347,19 +375,10 @@ def load_data4pretrain(feats_type=3,device=None,dataname='IMDB',batch_size=32,nu
         graph_list1.append(pyg_to_dgl(graph))
         #graph_list.append(graph)
 
-    # pyg转dgl后节点类型顺序会被打乱
-    ACM_indices = [1, 0, 2, 3]
-    IMDB_indices = [2, 1, 3, 0]
-    Freebase_indices=[0,7,1,5,2,6,4,3]
-    oldfreebase_indices=[1,2,0,3]
-    if(dataname=='ACM'):
-        in_dims = [in_dims[i] for i in ACM_indices]
-    elif(dataname=='IMDB'):
-        in_dims = [in_dims[i] for i in IMDB_indices]
-    elif(dataname=='Freebase'):
-        in_dims = [in_dims[i] for i in Freebase_indices]
-    elif (dataname == 'oldfreebase'):
-        in_dims = [in_dims[i] for i in oldfreebase_indices]
+    if graph_list1:
+        in_dims = [name4dim[ntype] for ntype in graph_list1[0].ntypes]
+    else:
+        in_dims = [name4dim[ntype] for ntype in data.node_types]
 
     return graph_list1,in_dims,num_class
 
@@ -1123,6 +1142,5 @@ def create_matrix(size, off_diag_value=0.1):
         matrix[i, i] = 1.0
 
     return matrix
-
 
 
