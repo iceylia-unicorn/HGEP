@@ -17,6 +17,8 @@
 - [ ] **多数据集验证** 当前只验证了ACM以及10shots的情况
 - [ ] **预训练与子图采样方法** 原hgmp的预训练方法以及子图构建方式可能并不适用边提示
 - [ ] **hgprompt的比较** 无论是在hgmp还是hgprompt的论文，hgprompt方法在1至5shot下有着较大优势。
+- [ ] **子图构建** 原HGMP采用的子图构建方式大多是粗暴地用1阶邻居，部分用的2阶邻居
+
 
 ---
 
@@ -125,3 +127,74 @@ hgmp原始划分: 每类最多先随机选400个节点，再从这400个节点�
 - [ ] 下游中我设计的early_stop采用的val_macro_f1,hgmp采用的loss；hgmp采用双轮训练，单次epoch中先训练一轮head，再训练一轮prompt。哪种方式更优呢
 
 hgmp若不使用离线处理子图速度极慢，并且采用双轮loss机制导致一直难以收敛
+
+> # 26.5.9 hgmp继续优化
+
+hgmp对于不同的数据集参数不同，因此为了达到最优效果，hgmp使用默认参数。
+
+现在看typepair是否需要使用代码进行实验
+
+> # 26.5.11 测试typepair是否为噪声
+实验结果表明，这个typepair确实是噪声：{
+  "pooled_runs": {
+    "typepair::edge_only": {
+      "count": 5,
+      "micro_mean": 0.87790367603302,
+      "micro_std": 0.01592069231989516,
+      "macro_mean": 0.8782463073730469,
+      "macro_std": 0.016758606129274448
+    },
+    "typepair::full": {
+      "count": 5,
+      "micro_mean": 0.8689329743385314,
+      "micro_std": 0.015263020657882632,
+      "macro_mean": 0.8683551907539367,
+      "macro_std": 0.015857310858026625
+    },
+    "typepair::none": {
+      "count": 5,
+      "micro_mean": 0.8052879929542541,
+      "micro_std": 0.020337499889572643,
+      "macro_mean": 0.807218337059021,
+      "macro_std": 0.019532940423152168
+    },
+    "typepair::type_only": {
+      "count": 5,
+      "micro_mean": 0.806987726688385,
+      "micro_std": 0.016247219963764537,
+      "macro_mean": 0.8077319741249085,
+      "macro_std": 0.017660173171727078
+    }
+  },
+  "seed_mean_then_std": {
+    "typepair::edge_only": {
+      "count": 5,
+      "micro_mean": 0.87790367603302,
+      "micro_std": 0.01592069231989516,
+      "macro_mean": 0.8782463073730469,
+      "macro_std": 0.016758606129274448
+    },
+    "typepair::full": {
+      "count": 5,
+      "micro_mean": 0.8689329743385314,
+      "micro_std": 0.015263020657882632,
+      "macro_mean": 0.8683551907539367,
+      "macro_std": 0.015857310858026625
+    },
+    "typepair::none": {
+      "count": 5,
+      "micro_mean": 0.8052879929542541,
+      "micro_std": 0.020337499889572643,
+      "macro_mean": 0.807218337059021,
+      "macro_std": 0.019532940423152168
+    },
+    "typepair::type_only": {
+      "count": 5,
+      "micro_mean": 0.806987726688385,
+      "micro_std": 0.016247219963764537,
+      "macro_mean": 0.8077319741249085,
+      "macro_std": 0.017660173171727078
+    }
+  }
+}
+```
