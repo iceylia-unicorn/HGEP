@@ -135,7 +135,9 @@ hgmp对于不同的数据集参数不同，因此为了达到最优效果，hgmp
 现在看typepair是否需要使用代码进行实验
 
 > # 26.5.11 测试typepair是否为噪声
-实验结果表明，这个typepair确实是噪声：{
+实验结果表明，这个typepair确实是噪声：
+```json
+{
   "pooled_runs": {
     "typepair::edge_only": {
       "count": 5,
@@ -198,3 +200,6 @@ hgmp对于不同的数据集参数不同，因此为了达到最优效果，hgmp
   }
 }
 ```
+实验证明typepair确实是噪声
+
+
