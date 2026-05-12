@@ -23,6 +23,10 @@ from gpbench.protocol_bridge.hgmp_typepair import (
     HGMPTypePairHGNN,
     build_typepair_relation_cfg_from_args,
 )
+from gpbench.protocol_bridge.hgmp_peprompt import (
+    HGMPPEPromptHGNN,
+    build_peprompt_relation_cfg_from_args,
+)
 
 
 @dataclass
@@ -238,6 +242,24 @@ def _build_legacy_hgnn(args):
             relation_cfg=relation_cfg,
         )
 
+    if args.method == "peprompt":
+        relation_cfg = build_peprompt_relation_cfg_from_args(args)
+        return HGMPPEPromptHGNN(
+            ntypes=ntypes,
+            metadata=metadata,
+            hid_dim=args.hidden_dim,
+            out_dim=args.hidden_dim,
+            hgnn_type=args.hgnn_type,
+            num_layer=args.num_layers,
+            num_heads=args.num_heads,
+            device=args.device,
+            dropout=args.dropout,
+            num_etypes=num_etypes,
+            input_dims=in_dims,
+            args=args,
+            relation_cfg=relation_cfg,
+        )
+
     raise ValueError(f"Unsupported method: {args.method}")
 
 
@@ -248,8 +270,8 @@ def _set_requires_grad(module: nn.Module, flag: bool):
         p.requires_grad_(flag)
 
 
-def _remap_plain_hgmp_state_for_typepair(args, state):
-    if args.method != "typepair":
+def _remap_plain_hgmp_state_for_relation_wrapper(args, state):
+    if args.method not in {"typepair", "peprompt"}:
         return state, 0
     if not isinstance(state, dict):
         return state, 0
@@ -276,14 +298,14 @@ def _remap_plain_hgmp_state_for_typepair(args, state):
 
 
 def _log_state_dict_load(args, missing, unexpected):
-    if args.method == "typepair":
+    if args.method in {"typepair", "peprompt"}:
         expected_missing_prefixes = ("relation_prompt.", "GraphConv.relation_prompt.")
         expected_missing = [k for k in missing if k.startswith(expected_missing_prefixes)]
         other_missing = [k for k in missing if not k.startswith(expected_missing_prefixes)]
 
         if len(expected_missing) > 0:
             print(
-                "[load_state_dict] typepair prompt keys were missing from ckpt "
+                f"[load_state_dict] {args.method} prompt keys were missing from ckpt "
                 "(expected when loading a plain hgmp checkpoint)."
             )
         if len(other_missing) > 0:
@@ -308,10 +330,10 @@ def build_legacy_hgnn(
     if isinstance(state, dict) and "model_state" in state:
         state = state["model_state"]
 
-    state, remap_count = _remap_plain_hgmp_state_for_typepair(args, state)
+    state, remap_count = _remap_plain_hgmp_state_for_relation_wrapper(args, state)
     if remap_count > 0:
         print(
-            f"[load_state_dict] remapped {remap_count} plain HGMP keys to TypePair wrapper keys."
+            f"[load_state_dict] remapped {remap_count} plain HGMP keys to {args.method} wrapper keys."
         )
 
     missing, unexpected = hgnn.load_state_dict(state, strict=False)
@@ -324,8 +346,8 @@ def build_legacy_hgnn(
         _set_requires_grad(hgnn, False)
 
     if train_relation_prompt_only:
-        if args.method != "typepair":
-            raise ValueError("train_relation_prompt_only only supports method='typepair'")
+        if args.method not in {"typepair", "peprompt"}:
+            raise ValueError("train_relation_prompt_only only supports relation-prompt methods.")
         _set_requires_grad(hgnn.relation_prompt, True)
         hgnn.eval()
         hgnn.relation_prompt.train()
@@ -447,7 +469,7 @@ def _evaluate_graph_probe(
     return f1_micro_macro(all_logits, all_labels, num_classes)
 
 
-def train_typepair_prompt_probe(
+def _train_relation_prompt_probe(
     args,
     batch_size: int = 32,
     hidden_dim: int = 128,
@@ -652,6 +674,70 @@ def train_typepair_prompt_probe(
         "best_epoch": best_epoch,
         "early_stop_metric": early_stop_metric,
     }
+
+
+def train_typepair_prompt_probe(
+    args,
+    batch_size: int = 32,
+    hidden_dim: int = 128,
+    dropout: float = 0.3,
+    head_lr: float = 5e-3,
+    prompt_lr: float | None = None,
+    weight_decay: float = 1e-4,
+    epochs: int = 200,
+    patience: int = 30,
+    early_stop_metric: str = "macro",
+    save_best_path: str | None = None,
+    epoch_callback=None,
+):
+    if args.method != "typepair":
+        raise ValueError("train_typepair_prompt_probe expects args.method == 'typepair'")
+    return _train_relation_prompt_probe(
+        args=args,
+        batch_size=batch_size,
+        hidden_dim=hidden_dim,
+        dropout=dropout,
+        head_lr=head_lr,
+        prompt_lr=prompt_lr,
+        weight_decay=weight_decay,
+        epochs=epochs,
+        patience=patience,
+        early_stop_metric=early_stop_metric,
+        save_best_path=save_best_path,
+        epoch_callback=epoch_callback,
+    )
+
+
+def train_peprompt_probe(
+    args,
+    batch_size: int = 32,
+    hidden_dim: int = 128,
+    dropout: float = 0.3,
+    head_lr: float = 5e-3,
+    prompt_lr: float | None = None,
+    weight_decay: float = 1e-4,
+    epochs: int = 200,
+    patience: int = 30,
+    early_stop_metric: str = "macro",
+    save_best_path: str | None = None,
+    epoch_callback=None,
+):
+    if args.method != "peprompt":
+        raise ValueError("train_peprompt_probe expects args.method == 'peprompt'")
+    return _train_relation_prompt_probe(
+        args=args,
+        batch_size=batch_size,
+        hidden_dim=hidden_dim,
+        dropout=dropout,
+        head_lr=head_lr,
+        prompt_lr=prompt_lr,
+        weight_decay=weight_decay,
+        epochs=epochs,
+        patience=patience,
+        early_stop_metric=early_stop_metric,
+        save_best_path=save_best_path,
+        epoch_callback=epoch_callback,
+    )
 
 
 def _evaluate_hgmp_prompt_probe(

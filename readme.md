@@ -174,6 +174,21 @@ python scripts/protocol_benchmark_v2.py \
   --shot 1 \
   --typepair_ckpt /path/to/ckpt.pt
 
+# PEPrompt
+由于typoepair已被证明无效，因此直接使用PEPrompt
+```bash
+nohup python -u scripts/peprompt_benchmark.py \
+  --dataset ACM \
+  --methods peprompt \
+  --seeds 0 1 2 3 4 \
+  --repeats 1 \
+  --peprompt_ckpt artifacts/checkpoints/hgmp/pretrain/ACM.GraphCL.GCN.hid512.np500.seed0.pth \
+  --use_wandb \
+  --wandb_mode online \
+  --wandb_name peprompt_test \
+  --wandb_tags PEPrompt ACM \
+  > nohup.out 2>&1 &
+```
 # 有关wandb
 项目中使用了wandb， 只有传入--use_wandb 才会启用
 需要根目录创建.codex，并写入WANDB_API_KEY=XXX
@@ -247,7 +262,6 @@ nohup /home_A/yuanqilin/.conda/envs/HGEP/bin/python -u scripts/protocol_multisho
   --use_wandb \
   --wandb_mode online \
   > nohup.out 2>&1 &
-
-
-
 ```
+
+
