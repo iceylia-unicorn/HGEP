@@ -6,7 +6,7 @@ data/acm/raw/ACM/node.dat
 
 ### 预训练
 ```bash
-python scripts/pretrain_hgmp.py \ --root data \ --dataset ACM \ --tau_hops 2 \ --fanout 25 15 \ --batch_size 64 \ --epochs 50 \ --lr 1e-3 \ --weight_decay 1e-5 \ --backbone hgt \ --hidden_dim 128 \ --proj_dim 128 \ --num_layers 2 \ --num_heads 2 \ --dropout 0.2 \ --device cuda \ --save checkpoints/pretrain_hgmp_best.pt
+python scripts/pretrain_hgmp.py \ --root data \ --dataset ACM \ --tau_hops 2 \ --fanout 25 15 \ --batch_size 64 \ --epochs 50 \ --lr 1e-3 \ --weight_decay 1e-5 \ --backbone hgt \ --hidden_dim 128 \ --proj_dim 128 \ --num_layers 2 \ --num_heads 2 \ --dropout 0.2 \ --device cuda \ --save checkpoints/pretrain_hgmp_best.pt>
 ```
 ### 下游任务
 python scripts/finetune_fewshot.py \
@@ -175,6 +175,15 @@ python scripts/protocol_benchmark_v2.py \
   --typepair_ckpt /path/to/ckpt.pt
 
 # PEPrompt
+
+## 预处理
+python scripts/precompute_peprompt_cache.py \
+  --datasets ACM \
+  --shots 10 \
+  --seeds 0 1 2 3 4 \
+  --max_pool_size 400
+
+## 下游
 由于typoepair已被证明无效，因此直接使用PEPrompt
 ```bash
 nohup python -u scripts/peprompt_benchmark.py \
@@ -182,11 +191,12 @@ nohup python -u scripts/peprompt_benchmark.py \
   --methods peprompt \
   --seeds 0 1 2 3 4 \
   --repeats 1 \
+  --shot 10 \
   --peprompt_ckpt artifacts/checkpoints/hgmp/pretrain/ACM.GraphCL.GCN.hid512.np500.seed0.pth \
   --use_wandb \
   --wandb_mode online \
-  --wandb_name peprompt_test \
-  --wandb_tags PEPrompt ACM \
+  --wandb_name peprompt_test_precompute \
+  --wandb_tags PEPrompt ACM 1-shot \
   > nohup.out 2>&1 &
 ```
 # 有关wandb
@@ -263,5 +273,54 @@ nohup /home_A/yuanqilin/.conda/envs/HGEP/bin/python -u scripts/protocol_multisho
   --wandb_mode online \
   > nohup.out 2>&1 &
 ```
+python scripts/peprompt_benchmark.py \
+  --dataset IMDB \
+  --root data \
+  --splits splits \
+  --shot 10 \
+  --methods hgmp \
+  --seeds 0 1 2 3 4 \
+  --repeats 1 \
+  --pretrain_seed 0 \
+  --run_seed_base 0 \
+  --device cuda:0 \
+  --save_dir artifacts/results/peprompt_khop_fanout_suite \
+  --hgmp_ckpt artifacts/checkpoints/hgmp/pretrain/IMDB.GraphCL.GCN.hid256.np200.seed0.pth \
+  --feats_type 0 \
+  --hidden_dim 256 \
+  --num_heads 8 \
+  --num_layers 2 \
+  --dropout 0.5 \
+  --hgnn_type GCN \
+  --num_samples 200 \
+  --num_class 5 \
+  --classification_type NIG \
+  --embed_batch_size 32 \
+  --head_hidden 128 \
+  --head_dropout 0.3 \
+  --epochs 200 \
+  --patience 30 \
+  --lr 5e-3 \
+  --weight_decay 1e-4 \
+  --early_stop_metric macro \
+  --relation_prompt_mode mul \
+  --relation_prompt_alpha 0.5 \
+  --relation_prompt_dropout 0.1 \
+  --relation_prompt_aggr mean \
+  --peprompt_edge_feature_name peprompt_edge_feat \
+  --peprompt_offline_cache_dir artifacts/cache/peprompt_offline_splits \
+  --subgraph_type khop \
+  --peprompt_spectral_cache_dir artifacts/cache/peprompt_spectral_embeddings \
+  --peprompt_spectral_dim 16 \
+  --peprompt_spectral_max_nodes 50000 \
+  --peprompt_edge_prompt_hidden 128
 
 
+nohup python -u scripts/peprompt_benchmark.py \
+  --dataset ACM \
+  --methods peprompt \
+  --seeds 1 \
+  --repeats 1 \
+  --shot 10 \
+  --peprompt_ckpt artifacts/checkpoints/hgmp/pretrain/ACM.GraphCL.GCN.hid512.np500.seed0.pth \
+  > nohup.out 2>&1 &

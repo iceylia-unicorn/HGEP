@@ -17,7 +17,6 @@ from protocols.hgmp.utils_legacy import (
     seed_everything,
 )
 
-from gpbench.downstream.fewshot import f1_micro_macro
 from gpbench.downstream.model import MLPHead
 from gpbench.protocol_bridge.hgmp_typepair import (
     HGMPTypePairHGNN,
@@ -114,6 +113,78 @@ def _unpack_batch(batch, classification_type: str):
     return batched_graph, batched_label
 
 
+def _is_legacy_multilabel_task(dataset: str, classification_type: str) -> bool:
+    return str(dataset) == "IMDB" and str(classification_type) != "GIG"
+
+
+def _prepare_labels_for_task(
+    labels: torch.Tensor,
+    device: torch.device,
+    dataset: str,
+    classification_type: str,
+) -> torch.Tensor:
+    labels = labels.to(device)
+    if _is_legacy_multilabel_task(dataset, classification_type):
+        return labels.float()
+    return labels.long()
+
+
+def _legacy_task_loss(
+    logits: torch.Tensor,
+    labels: torch.Tensor,
+    dataset: str,
+    classification_type: str,
+) -> torch.Tensor:
+    if _is_legacy_multilabel_task(dataset, classification_type):
+        return nn.functional.binary_cross_entropy_with_logits(logits, labels.float())
+    return nn.functional.cross_entropy(logits, labels.long())
+
+
+def _to_class_ids(x: torch.Tensor) -> torch.Tensor:
+    if not isinstance(x, torch.Tensor):
+        x = torch.as_tensor(x)
+    if x.ndim == 1:
+        return x.long()
+    if x.ndim == 2:
+        if x.shape[1] == 1:
+            return x.view(-1).long()
+        return x.argmax(dim=1).long()
+    raise ValueError(f"Unsupported tensor shape for class ids: {tuple(x.shape)}")
+
+
+def _legacy_f1_micro_macro(
+    pred: torch.Tensor,
+    y: torch.Tensor,
+    num_classes: int,
+) -> tuple[float, float]:
+    pred = _to_class_ids(pred)
+    y = _to_class_ids(y)
+
+    cm = torch.zeros((num_classes, num_classes), device=pred.device, dtype=torch.long)
+    for t, p in zip(y.view(-1), pred.view(-1)):
+        if int(t) < 0 or int(p) < 0:
+            continue
+        if int(t) >= num_classes or int(p) >= num_classes:
+            continue
+        cm[t.long(), p.long()] += 1
+
+    tp = cm.diag().to(torch.float32)
+    fp = cm.sum(dim=0).to(torch.float32) - tp
+    fn = cm.sum(dim=1).to(torch.float32) - tp
+    eps = 1e-12
+
+    support = cm.sum(dim=1).to(torch.float32)
+    f1_c = (2 * tp) / (2 * tp + fp + fn + eps)
+    mask = support > 0
+    macro = float(f1_c[mask].mean().item()) if mask.any() else 0.0
+
+    TP = tp.sum()
+    FP = fp.sum()
+    FN = fn.sum()
+    micro = float((2 * TP / (2 * TP + FP + FN + eps)).item())
+    return micro, macro
+
+
 def _build_edge_index_dict(g):
     edge_index_dict = {}
     for etype in g.canonical_etypes:
@@ -124,13 +195,46 @@ def _build_edge_index_dict(g):
     return edge_index_dict
 
 
+def _prepare_edge_indices_for_device(hgnn, g, device: torch.device):
+    if hgnn.hgnn_type != "HGT" and not _uses_edge_features(hgnn):
+        return None
+    edge_index_dict = _build_edge_index_dict(g)
+    return {
+        etype: edge_index.to(device)
+        for etype, edge_index in edge_index_dict.items()
+    }
+
+
 def _build_edge_feature_dict(g, feature_name: str = "typepair_edge_feat"):
     edge_feature_dict = {}
     for etype in g.canonical_etypes:
-        if feature_name not in g.edges[etype].data:
+        edge_data = g.edges[etype].data
+        if feature_name not in set(edge_data.keys()):
             continue
-        edge_feature_dict[etype] = g.edges[etype].data[feature_name].float()
+        edge_feature_dict[etype] = edge_data[feature_name].float()
     return edge_feature_dict or None
+
+
+def _prepare_edge_features_for_device(hgnn, g, device: torch.device):
+    if not _uses_edge_features(hgnn):
+        return None
+    edge_feature_name = getattr(hgnn.relation_prompt, "edge_feature_name", "typepair_edge_feat")
+    edge_feature_dict = _build_edge_feature_dict(g, edge_feature_name)
+    if edge_feature_dict is None:
+        return None
+    return {
+        etype: feat.to(device)
+        for etype, feat in edge_feature_dict.items()
+    }
+
+
+def _prepare_homo_graph_for_device(hgnn, g, device: torch.device):
+    if hgnn.hgnn_type != "GCN":
+        return None
+    homo_g = dgl.to_homogeneous(g)
+    homo_g = dgl.remove_self_loop(homo_g)
+    homo_g = dgl.add_self_loop(homo_g)
+    return homo_g.to(device)
 
 
 def _uses_edge_features(hgnn) -> bool:
@@ -138,11 +242,18 @@ def _uses_edge_features(hgnn) -> bool:
     return bool(getattr(relation_prompt, "uses_edge_features", False))
 
 
-def forward_graph_batch(hgnn, batched_graph, targetnode: str) -> torch.Tensor:
+def forward_graph_batch(
+    hgnn,
+    batched_graph,
+    targetnode: str,
+    edge_feature_dict=None,
+    edge_index_dict=None,
+    homo_graph=None,
+) -> torch.Tensor:
     x_dict = batched_graph.ndata["x"]
-    edge_index_dict = _build_edge_index_dict(batched_graph)
-    edge_feature_dict = None
-    if _uses_edge_features(hgnn):
+    if edge_index_dict is None and hgnn.hgnn_type == "HGT":
+        edge_index_dict = _build_edge_index_dict(batched_graph)
+    if edge_feature_dict is None and _uses_edge_features(hgnn):
         edge_feature_name = getattr(hgnn.relation_prompt, "edge_feature_name", "typepair_edge_feat")
         edge_feature_dict = _build_edge_feature_dict(batched_graph, edge_feature_name)
 
@@ -154,10 +265,25 @@ def forward_graph_batch(hgnn, batched_graph, targetnode: str) -> torch.Tensor:
     elif hgnn.hgnn_type == "SHGN":
         node_emb = hgnn(targetnode, batched_graph, x_dict)
     elif hgnn.hgnn_type == "GCN":
-        if edge_feature_dict is None:
+        # Plain legacy HGMP GCN keeps the original `(graph, x_dict)` signature,
+        # while prompt-injected wrappers accept extra keyword arguments.
+        if isinstance(hgnn, GCL_GCN):
             node_emb = hgnn(batched_graph, x_dict)
+        elif edge_feature_dict is None:
+            node_emb = hgnn(
+                batched_graph,
+                x_dict,
+                edge_index=edge_index_dict,
+                homo_graph=homo_graph,
+            )
         else:
-            node_emb = hgnn(batched_graph, x_dict, edge_feature_dict=edge_feature_dict)
+            node_emb = hgnn(
+                batched_graph,
+                x_dict,
+                edge_index=edge_index_dict,
+                edge_feature_dict=edge_feature_dict,
+                homo_graph=homo_graph,
+            )
     elif hgnn.hgnn_type == "GAT":
         node_emb = hgnn(batched_graph, x_dict, False)
     else:
@@ -168,8 +294,22 @@ def forward_graph_batch(hgnn, batched_graph, targetnode: str) -> torch.Tensor:
 
 
 @torch.no_grad()
-def encode_graph_batch(hgnn, batched_graph, targetnode: str) -> torch.Tensor:
-    return forward_graph_batch(hgnn, batched_graph, targetnode)
+def encode_graph_batch(
+    hgnn,
+    batched_graph,
+    targetnode: str,
+    edge_feature_dict=None,
+    edge_index_dict=None,
+    homo_graph=None,
+) -> torch.Tensor:
+    return forward_graph_batch(
+        hgnn,
+        batched_graph,
+        targetnode,
+        edge_feature_dict=edge_feature_dict,
+        edge_index_dict=edge_index_dict,
+        homo_graph=homo_graph,
+    )
 
 
 def _build_legacy_hgnn(args):
@@ -367,6 +507,7 @@ def extract_split_embeddings(
     classification_type: str,
     batch_size: int,
     device: torch.device,
+    dataset: str,
 ):
     loader = dgl.dataloading.GraphDataLoader(graph_list, batch_size=batch_size, shuffle=False)
 
@@ -374,10 +515,25 @@ def extract_split_embeddings(
     ys = []
     for batch in loader:
         batched_graph, batched_label = _unpack_batch(batch, classification_type)
+        edge_index_dict = _prepare_edge_indices_for_device(hgnn, batched_graph, device)
+        edge_feature_dict = _prepare_edge_features_for_device(hgnn, batched_graph, device)
+        homo_graph = _prepare_homo_graph_for_device(hgnn, batched_graph, device)
         batched_graph = batched_graph.to(device)
-        batched_label = batched_label.to(device).long()
+        batched_label = _prepare_labels_for_task(
+            batched_label,
+            device,
+            dataset,
+            classification_type,
+        )
 
-        x = encode_graph_batch(hgnn, batched_graph, targetnode)
+        x = encode_graph_batch(
+            hgnn,
+            batched_graph,
+            targetnode,
+            edge_feature_dict=edge_feature_dict,
+            edge_index_dict=edge_index_dict,
+            homo_graph=homo_graph,
+        )
         xs.append(x)
         ys.append(batched_label)
 
@@ -387,12 +543,6 @@ def extract_split_embeddings(
 def _load_legacy_fewshot_splits(args):
     if args.classification_type != "NIG":
         raise NotImplementedError("v1 only supports classification_type='NIG'")
-
-    if args.dataset == "IMDB":
-        raise NotImplementedError(
-            "v1 intentionally skips IMDB because its legacy batch/label format "
-            "differs in this branch. Start with ACM/DBLP first."
-        )
 
     seed_everything(args.seed)
 
@@ -415,13 +565,13 @@ def build_legacy_fewshot_embeddings(args, batch_size: int = 32) -> LegacyFewShot
     hgnn = build_frozen_legacy_hgnn(args, args.ckpt)
 
     x_train, y_train = extract_split_embeddings(
-        train_list, hgnn, targetnode, args.classification_type, batch_size, args.device
+        train_list, hgnn, targetnode, args.classification_type, batch_size, args.device, args.dataset
     )
     x_val, y_val = extract_split_embeddings(
-        valid_list, hgnn, targetnode, args.classification_type, batch_size, args.device
+        valid_list, hgnn, targetnode, args.classification_type, batch_size, args.device, args.dataset
     )
     x_test, y_test = extract_split_embeddings(
-        test_list, hgnn, targetnode, args.classification_type, batch_size, args.device
+        test_list, hgnn, targetnode, args.classification_type, batch_size, args.device, args.dataset
     )
 
     return LegacyFewShotEmbeddings(
@@ -440,6 +590,7 @@ def _evaluate_graph_probe(
     hgnn,
     head,
     targetnode: str,
+    dataset: str,
     classification_type: str,
     batch_size: int,
     device: torch.device,
@@ -455,10 +606,25 @@ def _evaluate_graph_probe(
     with torch.no_grad():
         for batch in loader:
             batched_graph, batched_label = _unpack_batch(batch, classification_type)
+            edge_index_dict = _prepare_edge_indices_for_device(hgnn, batched_graph, device)
+            edge_feature_dict = _prepare_edge_features_for_device(hgnn, batched_graph, device)
+            homo_graph = _prepare_homo_graph_for_device(hgnn, batched_graph, device)
             batched_graph = batched_graph.to(device)
-            batched_label = batched_label.to(device).long()
+            batched_label = _prepare_labels_for_task(
+                batched_label,
+                device,
+                dataset,
+                classification_type,
+            )
 
-            graph_emb = encode_graph_batch(hgnn, batched_graph, targetnode)
+            graph_emb = encode_graph_batch(
+                hgnn,
+                batched_graph,
+                targetnode,
+                edge_feature_dict=edge_feature_dict,
+                edge_index_dict=edge_index_dict,
+                homo_graph=homo_graph,
+            )
             logits = head(graph_emb)
 
             logits_list.append(logits)
@@ -466,7 +632,7 @@ def _evaluate_graph_probe(
 
     all_logits = torch.cat(logits_list, dim=0)
     all_labels = torch.cat(labels_list, dim=0)
-    return f1_micro_macro(all_logits, all_labels, num_classes)
+    return _legacy_f1_micro_macro(all_logits, all_labels, num_classes)
 
 
 def _train_relation_prompt_probe(
@@ -541,12 +707,32 @@ def _train_relation_prompt_probe(
 
         for batch in train_loader:
             batched_graph, batched_label = _unpack_batch(batch, args.classification_type)
+            edge_index_dict = _prepare_edge_indices_for_device(hgnn, batched_graph, args.device)
+            edge_feature_dict = _prepare_edge_features_for_device(hgnn, batched_graph, args.device)
+            homo_graph = _prepare_homo_graph_for_device(hgnn, batched_graph, args.device)
             batched_graph = batched_graph.to(args.device)
-            batched_label = batched_label.to(args.device).long()
+            batched_label = _prepare_labels_for_task(
+                batched_label,
+                args.device,
+                args.dataset,
+                args.classification_type,
+            )
 
-            graph_emb = forward_graph_batch(hgnn, batched_graph, targetnode)
+            graph_emb = forward_graph_batch(
+                hgnn,
+                batched_graph,
+                targetnode,
+                edge_feature_dict=edge_feature_dict,
+                edge_index_dict=edge_index_dict,
+                homo_graph=homo_graph,
+            )
             logits = head(graph_emb)
-            loss = nn.functional.cross_entropy(logits, batched_label)
+            loss = _legacy_task_loss(
+                logits,
+                batched_label,
+                args.dataset,
+                args.classification_type,
+            )
 
             opt.zero_grad()
             loss.backward()
@@ -564,6 +750,7 @@ def _train_relation_prompt_probe(
                 hgnn,
                 head,
                 targetnode,
+                args.dataset,
                 args.classification_type,
                 batch_size,
                 args.device,
@@ -577,6 +764,7 @@ def _train_relation_prompt_probe(
             hgnn,
             head,
             targetnode,
+            args.dataset,
             args.classification_type,
             batch_size,
             args.device,
@@ -587,6 +775,7 @@ def _train_relation_prompt_probe(
             hgnn,
             head,
             targetnode,
+            args.dataset,
             args.classification_type,
             batch_size,
             args.device,
@@ -746,6 +935,7 @@ def _evaluate_hgmp_prompt_probe(
     PG,
     head,
     targetnode: str,
+    dataset: str,
     classification_type: str,
     batch_size: int,
     device: torch.device,
@@ -766,7 +956,12 @@ def _evaluate_hgmp_prompt_probe(
         for batch in loader:
             batched_graph, batched_label = _unpack_batch(batch, classification_type)
             batched_graph = batched_graph.to(device)
-            batched_label = batched_label.to(device).long()
+            batched_label = _prepare_labels_for_task(
+                batched_label,
+                device,
+                dataset,
+                classification_type,
+            )
 
             prompted_graph = PG(batched_graph)
             graph_emb = forward_graph_batch(hgnn, prompted_graph, targetnode)
@@ -777,7 +972,7 @@ def _evaluate_hgmp_prompt_probe(
 
     logits_all = torch.cat(logits_all, dim=0)
     labels_all = torch.cat(labels_all, dim=0)
-    return f1_micro_macro(logits_all, labels_all, num_classes)
+    return _legacy_f1_micro_macro(logits_all, labels_all, num_classes)
 
 
 def _run_hgmp_prompt_epoch(
@@ -787,6 +982,7 @@ def _run_hgmp_prompt_epoch(
     head,
     optimizer,
     targetnode: str,
+    dataset: str,
     classification_type: str,
     device: torch.device,
     lossfn=None,
@@ -797,13 +993,18 @@ def _run_hgmp_prompt_epoch(
     for batch in train_loader:
         batched_graph, batched_label = _unpack_batch(batch, classification_type)
         batched_graph = batched_graph.to(device)
-        batched_label = batched_label.to(device).long()
+        batched_label = _prepare_labels_for_task(
+            batched_label,
+            device,
+            dataset,
+            classification_type,
+        )
 
         prompted_graph = PG(batched_graph)
         graph_emb = forward_graph_batch(hgnn, prompted_graph, targetnode)
         logits = head(graph_emb)
         if lossfn is None:
-            loss = nn.functional.cross_entropy(logits, batched_label)
+            loss = _legacy_task_loss(logits, batched_label, dataset, classification_type)
         else:
             loss = lossfn(logits, batched_label)
 
@@ -824,6 +1025,7 @@ def _evaluate_hgmp_prompt_probe_loss(
     PG,
     head,
     targetnode: str,
+    dataset: str,
     classification_type: str,
     batch_size: int,
     device: torch.device,
@@ -845,7 +1047,12 @@ def _evaluate_hgmp_prompt_probe_loss(
         for batch in loader:
             batched_graph, batched_label = _unpack_batch(batch, classification_type)
             batched_graph = batched_graph.to(device)
-            batched_label = batched_label.to(device).long()
+            batched_label = _prepare_labels_for_task(
+                batched_label,
+                device,
+                dataset,
+                classification_type,
+            )
 
             prompted_graph = PG(batched_graph)
             graph_emb = forward_graph_batch(hgnn, prompted_graph, targetnode)
@@ -937,8 +1144,12 @@ def train_hgmp_heteroprompt_probe(
             lr=resolved_head_lr,
             weight_decay=resolved_weight_decay,
         )
-        train_lossfn = nn.CrossEntropyLoss(reduction="mean")
-        valid_lossfn = nn.CrossEntropyLoss(reduction="mean")
+        if _is_legacy_multilabel_task(args.dataset, args.classification_type):
+            train_lossfn = nn.BCEWithLogitsLoss()
+            valid_lossfn = nn.BCEWithLogitsLoss()
+        else:
+            train_lossfn = nn.CrossEntropyLoss(reduction="mean")
+            valid_lossfn = nn.CrossEntropyLoss(reduction="mean")
     else:
         head = MLPHead(
             in_dim=args.hidden_dim,
@@ -981,6 +1192,7 @@ def train_hgmp_heteroprompt_probe(
             head=head,
             optimizer=head_opt,
             targetnode=targetnode,
+            dataset=args.dataset,
             classification_type=args.classification_type,
             device=args.device,
             lossfn=train_lossfn,
@@ -998,6 +1210,7 @@ def train_hgmp_heteroprompt_probe(
             head=head,
             optimizer=prompt_opt,
             targetnode=targetnode,
+            dataset=args.dataset,
             classification_type=args.classification_type,
             device=args.device,
             lossfn=train_lossfn,
@@ -1010,6 +1223,7 @@ def train_hgmp_heteroprompt_probe(
                 PG=PG,
                 head=head,
                 targetnode=targetnode,
+                dataset=args.dataset,
                 classification_type=args.classification_type,
                 batch_size=resolved_batch_size,
                 device=args.device,
@@ -1024,6 +1238,7 @@ def train_hgmp_heteroprompt_probe(
             PG=PG,
             head=head,
             targetnode=targetnode,
+            dataset=args.dataset,
             classification_type=args.classification_type,
             batch_size=resolved_batch_size,
             device=args.device,
@@ -1035,6 +1250,7 @@ def train_hgmp_heteroprompt_probe(
             PG=PG,
             head=head,
             targetnode=targetnode,
+            dataset=args.dataset,
             classification_type=args.classification_type,
             batch_size=resolved_batch_size,
             device=args.device,
@@ -1049,6 +1265,7 @@ def train_hgmp_heteroprompt_probe(
                 PG=PG,
                 head=head,
                 targetnode=targetnode,
+                dataset=args.dataset,
                 classification_type=args.classification_type,
                 batch_size=resolved_batch_size,
                 device=args.device,
@@ -1198,6 +1415,8 @@ def train_mlp_probe(
     early_stop_metric: str = "macro",
     save_best_path: str | None = None,
     epoch_callback=None,
+    dataset: str | None = None,
+    classification_type: str = "NIG",
 ):
     assert early_stop_metric in {"micro", "macro"}
 
@@ -1210,11 +1429,11 @@ def train_mlp_probe(
     ).to(device)
 
     x_train = x_train.to(device)
-    y_train = y_train.to(device)
+    y_train = _prepare_labels_for_task(y_train, device, dataset or "", classification_type)
     x_val = x_val.to(device)
-    y_val = y_val.to(device)
+    y_val = _prepare_labels_for_task(y_val, device, dataset or "", classification_type)
     x_test = x_test.to(device)
-    y_test = y_test.to(device)
+    y_test = _prepare_labels_for_task(y_test, device, dataset or "", classification_type)
 
     opt = torch.optim.AdamW(head.parameters(), lr=lr, weight_decay=weight_decay)
 
@@ -1228,7 +1447,7 @@ def train_mlp_probe(
     for epoch in range(1, epochs + 1):
         head.train()
         logits = head(x_train)
-        loss = nn.functional.cross_entropy(logits, y_train)
+        loss = _legacy_task_loss(logits, y_train, dataset or "", classification_type)
 
         opt.zero_grad()
         loss.backward()
@@ -1240,9 +1459,9 @@ def train_mlp_probe(
             val_logits = head(x_val)
             test_logits = head(x_test)
 
-            train_micro, train_macro = f1_micro_macro(train_logits, y_train, num_classes)
-            val_micro, val_macro = f1_micro_macro(val_logits, y_val, num_classes)
-            test_micro, test_macro = f1_micro_macro(test_logits, y_test, num_classes)
+            train_micro, train_macro = _legacy_f1_micro_macro(train_logits, y_train, num_classes)
+            val_micro, val_macro = _legacy_f1_micro_macro(val_logits, y_val, num_classes)
+            test_micro, test_macro = _legacy_f1_micro_macro(test_logits, y_test, num_classes)
 
         monitor = val_macro if early_stop_metric == "macro" else val_micro
         best_monitor = best_val_macro if early_stop_metric == "macro" else best_val_micro

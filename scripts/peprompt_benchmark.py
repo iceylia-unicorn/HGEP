@@ -12,7 +12,7 @@ for p in (ROOT, SRC):
 import argparse
 import csv
 import json
-import pickle as pk
+import re
 import time
 import warnings
 from dataclasses import asdict, dataclass
@@ -32,7 +32,7 @@ from gpbench.protocol_bridge.downstream_legacy import (
     train_mlp_probe,
     train_peprompt_probe,
 )
-from gpbench.downstream.fewshot import load_split_file
+from gpbench.downstream.fewshot import load_peprompt_offline_splits
 from gpbench.utils.wandb_utils import (
     finish_wandb_run,
     init_wandb_run,
@@ -63,8 +63,22 @@ TARGET_NODETYPE = {
     "Freebase": "book",
 }
 
+DATASET_NUM_CLASS = {
+    "ACM": 3,
+    "DBLP": 4,
+    "IMDB": 5,
+    "Freebase": 7,
+}
+
 PEPROMPT_EDGE_FEATURE_NAME = "peprompt_edge_feat"
 PEPROMPT_EDGE_FEATURES = ["SpectralEmbeddingDiff"]
+LEGACY_HGMP_METHODS = {"hgmp", "peprompt", "hgmp_prompt"}
+LEGACY_CKPT_NAME_RE = re.compile(
+    r"^(?P<dataset>[^.]+)\.(?P<pretext>[^.]+)\.(?P<hgnn_type>[^.]+)\.hid(?P<hidden_dim>\d+)\.np(?P<num_samples>\d+)"
+    r"(?:\.seed(?P<seed>\d+))?\.pth$"
+)
+LEGACY_CKPT_SYNC_KEYS = ("hgnn_type", "hidden_dim", "num_samples")
+LEGACY_CKPT_OPTIONAL_SYNC_KEYS = ("num_class", "feats_type", "num_heads", "num_layers", "dropout")
 
 
 @dataclass
@@ -101,6 +115,106 @@ def _set_global_seed(seed: int):
     torch.manual_seed(int(seed))
     if torch.cuda.is_available():
         torch.cuda.manual_seed_all(int(seed))
+
+
+def _collapse_multilabel_to_single_class(label_tensor: torch.Tensor) -> torch.Tensor:
+    if label_tensor.ndim == 1:
+        return label_tensor.long()
+    if label_tensor.ndim != 2:
+        raise ValueError(f"Unsupported label tensor shape for downstream collapse: {tuple(label_tensor.shape)}")
+
+    label_tensor = label_tensor.detach().cpu()
+    collapsed = torch.full((label_tensor.size(0),), -1, dtype=torch.long)
+    for row_idx, row in enumerate(label_tensor):
+        one_indices = torch.nonzero(row > 0, as_tuple=False).view(-1).cpu().numpy()
+        if one_indices.size > 0:
+            collapsed[row_idx] = int(np.random.choice(one_indices))
+    return collapsed
+
+
+def _normalize_dataset_defaults(args):
+    if getattr(args, "num_class", None) is None:
+        args.num_class = DATASET_NUM_CLASS[args.dataset]
+    return args
+
+
+def _load_legacy_ckpt_metadata(ckpt_path: str) -> dict:
+    src = Path(ckpt_path)
+    meta = {}
+
+    sidecar = Path(str(src) + ".json")
+    if sidecar.exists():
+        with open(sidecar, "r", encoding="utf-8") as f:
+            loaded = json.load(f)
+        if not isinstance(loaded, dict):
+            raise ValueError(f"Checkpoint metadata is not a JSON object: {sidecar}")
+        meta.update(loaded)
+
+    match = LEGACY_CKPT_NAME_RE.match(src.name)
+    if match:
+        parsed = match.groupdict()
+        meta.setdefault("dataset", parsed["dataset"])
+        meta.setdefault("pretext", parsed["pretext"])
+        meta.setdefault("hgnn_type", parsed["hgnn_type"])
+        meta.setdefault("hidden_dim", int(parsed["hidden_dim"]))
+        meta.setdefault("num_samples", int(parsed["num_samples"]))
+        if parsed.get("seed") is not None:
+            meta.setdefault("seed", int(parsed["seed"]))
+    return meta
+
+
+def _sync_args_with_legacy_ckpts(args, ckpt_by_method: dict[str, str]):
+    legacy_metas = []
+    for method, ckpt_path in ckpt_by_method.items():
+        if method not in LEGACY_HGMP_METHODS:
+            continue
+        meta = _load_legacy_ckpt_metadata(ckpt_path)
+        if meta:
+            legacy_metas.append((method, ckpt_path, meta))
+
+    if not legacy_metas:
+        return args
+
+    dataset_values = {
+        str(meta["dataset"])
+        for _, _, meta in legacy_metas
+        if meta.get("dataset") is not None
+    }
+    if len(dataset_values) > 1:
+        raise RuntimeError(
+            f"Resolved legacy checkpoints disagree on dataset: {sorted(dataset_values)}"
+        )
+    if dataset_values:
+        ckpt_dataset = next(iter(dataset_values))
+        if ckpt_dataset != args.dataset:
+            raise RuntimeError(
+                f"CLI dataset={args.dataset} does not match legacy checkpoint dataset={ckpt_dataset}."
+            )
+
+    for key in LEGACY_CKPT_SYNC_KEYS + LEGACY_CKPT_OPTIONAL_SYNC_KEYS:
+        values = {
+            meta[key]
+            for _, _, meta in legacy_metas
+            if meta.get(key) is not None
+        }
+        if len(values) > 1:
+            detail = ", ".join(
+                f"{method}:{meta.get(key)}"
+                for method, _, meta in legacy_metas
+                if meta.get(key) is not None
+            )
+            raise RuntimeError(f"Resolved legacy checkpoints disagree on {key}: {detail}")
+        if not values:
+            continue
+        ckpt_value = next(iter(values))
+        old_value = getattr(args, key, None)
+        if old_value != ckpt_value:
+            print(
+                f"[ckpt-sync] overriding {key} from {old_value} to {ckpt_value} "
+                "based on legacy checkpoint metadata."
+            )
+            setattr(args, key, ckpt_value)
+    return args
 
 
 def _apply_feats_type(data, feats_type: int):
@@ -159,15 +273,9 @@ def _load_raw_heterograph(root: str, dataset: str, feats_type: int):
     if dataset == "IMDB":
         targetnode = TARGET_NODETYPE[dataset]
         oldy = data[targetnode]["y"]
-        newy = []
-        for arr in oldy:
-            one_indices = np.where(arr.cpu().numpy() == 1)[0]
-            if one_indices.size > 0:
-                newy.append(int(np.random.choice(one_indices)))
-            else:
-                newy.append(-1)
+        newy = _collapse_multilabel_to_single_class(oldy)
         data[targetnode]["oldy"] = oldy
-        data[targetnode]["y"] = torch.tensor(newy)
+        data[targetnode]["y"] = newy
 
     data = _apply_feats_type(data, feats_type)
     graph = to_dgl(data)
@@ -559,85 +667,28 @@ def _build_single_sample(graph, targetnode: str, node_id: int, label: int, datas
     return (subgraph, inverse_indices, torch.tensor(int(label)))
 
 
-def _aligned_cache_path(root: str, dataset: str, shot: int, split_seed: int, feats_type: int) -> Path:
-    return (
-        ROOT
-        / "artifacts"
-        / "cache"
-        / "protocol_aligned_splits"
-        / dataset
-        / f"{shot}-shot"
-        / f"seed{split_seed}"
-        / f"ft{feats_type}.pkl"
-    )
-
-
-def load_aligned_legacy_splits(args):
+def load_peprompt_offline_legacy_splits(args):
     if args.dataset not in HOP_NUM:
-        raise ValueError(f"Unsupported dataset for aligned legacy splits: {args.dataset}")
-    if args.dataset == "IMDB":
-        raise NotImplementedError("Aligned legacy split builder currently targets ACM/DBLP/Freebase first.")
+        raise ValueError(f"Unsupported dataset for PEPrompt offline splits: {args.dataset}")
 
-    cache_path = _aligned_cache_path(args.root, args.dataset, args.shot, args.split_seed, args.feats_type)
-    if cache_path.exists():
-        with open(cache_path, "rb") as f:
-            payload = pk.load(f)
-        train_list = payload["train"]
-        valid_list = payload["val"]
-        test_list = payload["test"]
-        targetnode = payload["targetnode"]
-    else:
-        _ = load_split_file(args.splits, args.dataset, args.shot, args.split_seed)
-        bundle = load_hgprompt_downstream_bundle(
-            root=args.root,
-            dataset=args.dataset,
-            splits=args.splits,
-            shot=args.shot,
-            seed=args.split_seed,
-        )
-
-        train_idx = np.asarray(bundle.train_val_test_idx["train_idx_local"][0], dtype=np.int64)
-        val_idx = np.asarray(bundle.train_val_test_idx["val_idx_local"][0], dtype=np.int64)
-        test_idx = np.asarray(bundle.train_val_test_idx["test_idx_local"], dtype=np.int64)
-
-        train_y = np.asarray(bundle.labels["train"][0], dtype=np.int64)
-        val_y = np.asarray(bundle.labels["val"][0], dtype=np.int64)
-        test_y = np.asarray(bundle.labels["test"], dtype=np.int64)
-
-        graph, targetnode = _load_raw_heterograph(args.root, args.dataset, args.feats_type)
-
-        train_list = [
-            _build_single_sample(graph, targetnode, int(node_id), int(label), args.dataset)
-            for node_id, label in zip(train_idx, train_y)
-        ]
-        valid_list = [
-            _build_single_sample(graph, targetnode, int(node_id), int(label), args.dataset)
-            for node_id, label in zip(val_idx, val_y)
-        ]
-        test_list = [
-            _build_single_sample(graph, targetnode, int(node_id), int(label), args.dataset)
-            for node_id, label in zip(test_idx, test_y)
-        ]
-
-        _ensure_dir(cache_path.parent)
-        with open(cache_path, "wb") as f:
-            pk.dump(
-                {
-                    "train": train_list,
-                    "val": valid_list,
-                    "test": test_list,
-                    "targetnode": targetnode,
-                },
-                f,
-            )
-
-    if "peprompt" in getattr(args, "methods", []) or getattr(args, "method", None) == "peprompt":
-        _attach_peprompt_edge_features_to_samples(args, [train_list, valid_list, test_list])
-    return train_list, valid_list, test_list, targetnode
+    payload = load_peprompt_offline_splits(
+        cache_dir=getattr(
+            args,
+            "peprompt_offline_cache_dir",
+            ROOT / "artifacts" / "cache" / "peprompt_offline_splits",
+        ),
+        dataset_name=args.dataset,
+        shot=args.shot,
+        seed=args.split_seed,
+        feats_type=args.feats_type,
+        subgraph_type=getattr(args, "subgraph_type", "khop"),
+    )
+    setattr(args, "peprompt_edge_feature_dim", int(payload.get("peprompt_edge_feature_dim", 0)))
+    return payload["train"], payload["val"], payload["test"], payload["targetnode"]
 
 
 def _patched_legacy_split_loader(args):
-    return load_aligned_legacy_splits(args)
+    return load_peprompt_offline_legacy_splits(args)
 
 
 def _resolve_ckpt(cli_args, method: str) -> str:
@@ -652,17 +703,20 @@ def _resolve_ckpt(cli_args, method: str) -> str:
             method=method,
         )
 
+    hgmp_ckpt_pattern = getattr(cli_args, "hgmp_ckpt_pattern", None)
+    hgprompt_ckpt_pattern = getattr(cli_args, "hgprompt_ckpt_pattern", None)
+
     if method == "hgmp":
-        candidate = _maybe_format(cli_args.hgmp_ckpt_pattern) or cli_args.hgmp_ckpt
+        candidate = _maybe_format(hgmp_ckpt_pattern) or cli_args.hgmp_ckpt
     elif method == "peprompt":
         candidate = (
             cli_args.peprompt_ckpt
             or cli_args.hgmp_ckpt
         )
     elif method == "hgmp_prompt":
-        candidate = _maybe_format(cli_args.hgmp_ckpt_pattern) or cli_args.hgmp_ckpt
+        candidate = _maybe_format(hgmp_ckpt_pattern) or cli_args.hgmp_ckpt
     elif method == "hgprompt":
-        candidate = _maybe_format(cli_args.hgprompt_ckpt_pattern) or cli_args.hgprompt_ckpt
+        candidate = _maybe_format(hgprompt_ckpt_pattern) or cli_args.hgprompt_ckpt
     else:
         raise ValueError(f"Unsupported method: {method}")
 
@@ -703,6 +757,8 @@ def _make_legacy_args(cli_args, method: str, ckpt_path: str, split_seed: int, re
         peprompt_edge_feature_names=cli_args.peprompt_edge_feature_names,
         peprompt_edge_feature_name=cli_args.peprompt_edge_feature_name,
         peprompt_spectral_cache_dir=cli_args.peprompt_spectral_cache_dir,
+        peprompt_offline_cache_dir=cli_args.peprompt_offline_cache_dir,
+        subgraph_type=cli_args.subgraph_type,
         peprompt_write_edge_feature_stats=cli_args.peprompt_write_edge_feature_stats,
         peprompt_spectral_dim=cli_args.peprompt_spectral_dim,
         peprompt_spectral_max_nodes=cli_args.peprompt_spectral_max_nodes,
@@ -737,11 +793,14 @@ def run_legacy_method_once(cli_args, method: str, ckpt_path: str, split_seed: in
     orig_loader = legacy_bridge._load_legacy_fewshot_splits
     legacy_bridge._load_legacy_fewshot_splits = _patched_legacy_split_loader
     try:
+        method_dir = method
+        if method == "peprompt":
+            method_dir = f"{method}.{args.subgraph_type}"
         save_dir = (
             Path(args.save_dir)
             / "aligned_protocol"
             / args.dataset
-            / method
+            / method_dir
             / f"{args.shot}-shot"
             / f"pretrainseed{cli_args.pretrain_seed}"
             / f"splitseed{split_seed}"
@@ -800,6 +859,8 @@ def run_legacy_method_once(cli_args, method: str, ckpt_path: str, split_seed: in
                 early_stop_metric=args.early_stop_metric,
                 save_best_path=best_path,
                 epoch_callback=epoch_callback,
+                dataset=args.dataset,
+                classification_type=args.classification_type,
             )
     finally:
         legacy_bridge._load_legacy_fewshot_splits = orig_loader
@@ -994,6 +1055,7 @@ def _make_downstream_epoch_logger(wandb_run, args, method: str, split_seed: int,
                 "downstream/repeat_id": repeat_id,
                 "downstream/run_seed": run_seed,
                 "downstream/pretrain_seed": args.pretrain_seed,
+                "downstream/subgraph_type": getattr(args, "subgraph_type", "na"),
             }
         )
         log_metrics(wandb_run, payload)
@@ -1014,7 +1076,7 @@ def build_parser():
     ap.add_argument("--repeats", type=int, default=50)  # 每个 split seed 下的重复次数
     ap.add_argument("--pretrain_seed", type=int, default=0)  # 预训练 checkpoint 对应的随机种子
     ap.add_argument("--run_seed_base", type=int, default=0)  # 下游运行随机种子基值
-    ap.add_argument("--device", type=str, default="cuda" if torch.cuda.is_available() else "cpu")  # 训练/评测设备
+    ap.add_argument("--device", type=str, default="cuda:1" if torch.cuda.is_available() else "cpu")  # 训练/评测设备
     ap.add_argument("--save_dir", type=Path, default=ROOT / "artifacts" / "results" / "protocol_benchmark")  # 结果输出目录
 
     # Checkpoint 设置：PEPrompt 只保留显式路径；HGMP/HGPrompt 仍兼容 pattern。
@@ -1032,7 +1094,7 @@ def build_parser():
     ap.add_argument("--dropout", type=float, default=0.5)  # 编码器 dropout
     ap.add_argument("--hgnn_type", type=str, default="GCN")  # 编码器类型，如 GCN / HGT
     ap.add_argument("--num_samples", type=int, default=500)  # 预训练采样规模或 legacy 接口所需样本数
-    ap.add_argument("--num_class", type=int, default=3)  # 下游分类类别数
+    ap.add_argument("--num_class", type=int, default=None)  # 下游分类类别数，默认按数据集自动推断
     ap.add_argument("--classification_type", type=str, default="NIG")   # 分类任务类型，默认是节点诱导子图分类
     ap.add_argument("--embed_batch_size", type=int, default=32)  # 图编码/提取 embedding 时的 batch size
     ap.add_argument("--head_hidden", type=int, default=128)  # 下游 MLP probe 的隐藏层维度
@@ -1080,6 +1142,12 @@ def build_parser():
         type=Path,
         default=ROOT / "artifacts" / "cache" / "peprompt_spectral_embeddings",
     )  # Laplacian PE 缓存目录
+    ap.add_argument(
+        "--peprompt_offline_cache_dir",
+        type=Path,
+        default=ROOT / "artifacts" / "cache" / "peprompt_offline_splits",
+    )  # 严格 k-shot + 子图 + 边特征离线缓存目录
+    ap.add_argument("--subgraph_type", type=str, default="khop", choices=["khop", "fanout"])  # 选择要加载的离线子图缓存类型
     ap.add_argument("--peprompt_write_edge_feature_stats", action=argparse.BooleanOptionalAction, default=True)  # 是否写出边特征统计信息
     ap.add_argument("--peprompt_spectral_dim", type=int, default=16)  # Laplacian PE 维度
     ap.add_argument("--peprompt_spectral_max_nodes", type=int, default=50000)  # 计算谱分解允许的最大节点数
@@ -1138,6 +1206,7 @@ def run_benchmark(args):
     try:
         records: list[RunRecord] = []
         ckpt_by_method = {method: _resolve_ckpt(args, method) for method in args.methods}
+        args = _sync_args_with_legacy_ckpts(args, ckpt_by_method)
         config = _build_run_config(args, ckpt_by_method)
 
         if args.use_wandb:
@@ -1155,14 +1224,6 @@ def run_benchmark(args):
                 dir_path=args.wandb_dir,
                 config=config,
             )
-
-        if "peprompt" in args.methods:
-            edge_feature_payload = prepare_peprompt_edge_feature_table(args, wandb_run=wandb_run)
-            if wandb_run is not None:
-                wandb_run.config.update(
-                    {"peprompt_edge_feature_dim": int(edge_feature_payload["feature_dim"])},
-                    allow_val_change=True,
-                )
 
         for method in args.methods:
             ckpt_path = ckpt_by_method[method]
@@ -1205,12 +1266,25 @@ def run_benchmark(args):
                         },
                     )
 
-        out_dir = _ensure_dir(args.save_dir / args.dataset / f"{args.shot}-shot")
-        per_run_rows = [asdict(r) for r in records]
+        run_tag = "mixed-methods"
+        if len(args.methods) == 1:
+            run_tag = args.methods[0]
+            if run_tag == "peprompt":
+                run_tag = f"{run_tag}.{args.subgraph_type}"
+        out_dir = _ensure_dir(args.save_dir / args.dataset / f"{args.shot}-shot" / run_tag)
+        per_run_rows = []
+        for record in records:
+            row = asdict(record)
+            row["subgraph_type"] = args.subgraph_type if record.method == "peprompt" else None
+            per_run_rows.append(row)
         _write_csv(out_dir / "per_run.csv", per_run_rows)
 
         seed_rows = _aggregate_by_seed(records)
-        seed_row_dicts = [asdict(r) for r in seed_rows]
+        seed_row_dicts = []
+        for row in seed_rows:
+            payload = asdict(row)
+            payload["subgraph_type"] = args.subgraph_type if row.method == "peprompt" else None
+            seed_row_dicts.append(payload)
         _write_csv(out_dir / "per_seed_summary.csv", seed_row_dicts)
 
         pooled_summary = {}
@@ -1270,6 +1344,7 @@ def run_benchmark(args):
 
 def main():
     args = build_parser().parse_args()
+    _normalize_dataset_defaults(args)
     run_benchmark(args)
 
 

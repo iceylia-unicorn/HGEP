@@ -3,6 +3,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from pathlib import Path
+import pickle as pk
 from typing import Dict
 
 import torch
@@ -366,3 +367,42 @@ def load_split_file(splits_dir: str, dataset_name: str, shot: int, seed: int):
     if hasattr(split, "__dict__"):
         return split.__dict__
     raise ValueError(f"Unknown split file format: {path}")
+
+
+def build_peprompt_offline_cache_path(
+    cache_dir: str | Path,
+    dataset_name: str,
+    shot: int,
+    seed: int,
+    feats_type: int,
+    subgraph_type: str = "khop",
+) -> Path:
+    return (
+        Path(cache_dir)
+        / str(dataset_name)
+        / f"{str(subgraph_type)}_{int(shot)}-shot"
+        / f"seed{int(seed)}"
+        / f"ft{int(feats_type)}.pkl"
+    )
+
+
+def load_peprompt_offline_splits(
+    cache_dir: str | Path,
+    dataset_name: str,
+    shot: int,
+    seed: int,
+    feats_type: int,
+    subgraph_type: str = "khop",
+):
+    path = build_peprompt_offline_cache_path(
+        cache_dir=cache_dir,
+        dataset_name=dataset_name,
+        shot=shot,
+        seed=seed,
+        feats_type=feats_type,
+        subgraph_type=subgraph_type,
+    )
+    if not path.exists():
+        raise RuntimeError("Offline cache not found, please run precompute_peprompt_cache.py first!")
+    with open(path, "rb") as f:
+        return pk.load(f)

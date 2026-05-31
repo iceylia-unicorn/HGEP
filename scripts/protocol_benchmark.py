@@ -334,6 +334,8 @@ def run_legacy_method_once(cli_args, method: str, ckpt_path: str, split_seed: in
                 patience=args.patience,
                 early_stop_metric=args.early_stop_metric,
                 save_best_path=best_path,
+                dataset=args.dataset,
+                classification_type=args.classification_type,
             )
     finally:
         legacy_bridge._load_legacy_fewshot_splits = orig_loader

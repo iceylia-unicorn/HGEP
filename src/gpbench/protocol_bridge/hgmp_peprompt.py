@@ -263,6 +263,8 @@ class RelationInjectedPEPromptLegacyGCN(nn.Module):
         graph,
         x_dict: Dict[str, torch.Tensor],
         edge_feature_dict: Dict[Tuple[str, str, str], torch.Tensor] | None = None,
+        edge_index_dict: Dict[Tuple[str, str, str], torch.Tensor] | None = None,
+        homo_graph=None,
     ) -> Dict[str, torch.Tensor]:
         keys = list(x_dict.keys())
         sizes = [x_dict[key].shape[0] for key in keys]
@@ -273,14 +275,16 @@ class RelationInjectedPEPromptLegacyGCN(nn.Module):
             h_list.append(fc(feature))
         h = torch.cat(h_list, dim=0)
 
-        edge_index_dict = _build_edge_index_dict(graph)
-        homo_g = dgl.to_homogeneous(graph)
-        homo_g = dgl.remove_self_loop(homo_g)
-        homo_g = dgl.add_self_loop(homo_g)
+        if edge_index_dict is None:
+            edge_index_dict = _build_edge_index_dict(graph)
+        if homo_graph is None:
+            homo_graph = dgl.to_homogeneous(graph)
+            homo_graph = dgl.remove_self_loop(homo_graph)
+            homo_graph = dgl.add_self_loop(homo_graph)
 
         for layer in self.layers:
             h = self.dropout(h)
-            h = layer(homo_g, h)
+            h = layer(homo_graph, h)
 
             hidden_dict = _split_h_by_keys(h, keys, sizes)
             hidden_dict = self.relation_prompt(hidden_dict, edge_index_dict, edge_feature_dict)
@@ -394,7 +398,7 @@ class HGMPPEPromptHGNN(nn.Module):
     def relation_prompt(self) -> PEPromptRelation:
         return self.GraphConv.relation_prompt
 
-    def forward(self, targetnode, x, edge_index=None, edge_feature_dict=None):
+    def forward(self, targetnode, x, edge_index=None, edge_feature_dict=None, homo_graph=None):
         """
         Args:
             targetnode: HGT 路径下的目标节点类型；GCN 路径下复用该位置传入 graph。
@@ -407,7 +411,13 @@ class HGMPPEPromptHGNN(nn.Module):
         if self.hgnn_type == "GCN":
             graph = targetnode
             x_dict = x
-            return self.GraphConv(graph, x_dict, edge_feature_dict)
+            return self.GraphConv(
+                graph,
+                x_dict,
+                edge_feature_dict,
+                edge_index_dict=edge_index,
+                homo_graph=homo_graph,
+            )
         raise NotImplementedError(
             f"Unsupported hgnn_type in HGMPPEPromptHGNN.forward: {self.hgnn_type}"
         )

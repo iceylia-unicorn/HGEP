@@ -1,0 +1,177 @@
+nohup: 忽略输入
+[INFO] HGMP pretrain | dataset=IMDB | device=cuda:0 | seed=0 | pretext=GraphCL | hgnn_type=GCN | hidden_dim=256 | num_samples=200
+[INFO] upstream best ckpt path: artifacts/checkpoints/hgmp/pretrain/IMDB.GraphCL.GCN.hid256.np200.pth
+[INFO] benchmark alias ckpt path: artifacts/checkpoints/hgmp/pretrain/IMDB.GraphCL.GCN.hid256.np200.seed0.pth
+Computing METIS partitioning...
+Done!
+===graph views: maskN and permE with aug_ratio: 0.3
+***epoch: 1/200 | train_loss: 10.203598
++++ model saved! artifacts/checkpoints/hgmp/pretrain/IMDB.GraphCL.GCN.hid256.np200.pth
+***epoch: 2/200 | train_loss: 6.8516595
++++ model saved! artifacts/checkpoints/hgmp/pretrain/IMDB.GraphCL.GCN.hid256.np200.pth
+***epoch: 3/200 | train_loss: 5.5987411
++++ model saved! artifacts/checkpoints/hgmp/pretrain/IMDB.GraphCL.GCN.hid256.np200.pth
+***epoch: 4/200 | train_loss: 4.7698245
++++ model saved! artifacts/checkpoints/hgmp/pretrain/IMDB.GraphCL.GCN.hid256.np200.pth
+***epoch: 5/200 | train_loss: 4.1639498
++++ model saved! artifacts/checkpoints/hgmp/pretrain/IMDB.GraphCL.GCN.hid256.np200.pth
+***epoch: 6/200 | train_loss: 3.7696038
++++ model saved! artifacts/checkpoints/hgmp/pretrain/IMDB.GraphCL.GCN.hid256.np200.pth
+***epoch: 7/200 | train_loss: 3.4687238
++++ model saved! artifacts/checkpoints/hgmp/pretrain/IMDB.GraphCL.GCN.hid256.np200.pth
+***epoch: 8/200 | train_loss: 3.3539454
++++ model saved! artifacts/checkpoints/hgmp/pretrain/IMDB.GraphCL.GCN.hid256.np200.pth
+***epoch: 9/200 | train_loss: 3.1757433
++++ model saved! artifacts/checkpoints/hgmp/pretrain/IMDB.GraphCL.GCN.hid256.np200.pth
+***epoch: 10/200 | train_loss: 2.88463
++++ model saved! artifacts/checkpoints/hgmp/pretrain/IMDB.GraphCL.GCN.hid256.np200.pth
+***epoch: 11/200 | train_loss: 3.0144524
+***epoch: 12/200 | train_loss: 2.6421246
++++ model saved! artifacts/checkpoints/hgmp/pretrain/IMDB.GraphCL.GCN.hid256.np200.pth
+***epoch: 13/200 | train_loss: 2.1523152
++++ model saved! artifacts/checkpoints/hgmp/pretrain/IMDB.GraphCL.GCN.hid256.np200.pth
+***epoch: 14/200 | train_loss: 2.1890776
+***epoch: 15/200 | train_loss: 2.3111914
+***epoch: 16/200 | train_loss: 2.3232879
+***epoch: 17/200 | train_loss: 2.1418782
++++ model saved! artifacts/checkpoints/hgmp/pretrain/IMDB.GraphCL.GCN.hid256.np200.pth
+***epoch: 18/200 | train_loss: 1.994889
++++ model saved! artifacts/checkpoints/hgmp/pretrain/IMDB.GraphCL.GCN.hid256.np200.pth
+***epoch: 19/200 | train_loss: 1.9232095
++++ model saved! artifacts/checkpoints/hgmp/pretrain/IMDB.GraphCL.GCN.hid256.np200.pth
+***epoch: 20/200 | train_loss: 1.8074881
++++ model saved! artifacts/checkpoints/hgmp/pretrain/IMDB.GraphCL.GCN.hid256.np200.pth
+***epoch: 21/200 | train_loss: 1.8221601
+***epoch: 22/200 | train_loss: 1.9039211
+***epoch: 23/200 | train_loss: 1.9279311
+***epoch: 24/200 | train_loss: 2.1187125
+***epoch: 25/200 | train_loss: 2.0092682
+***epoch: 26/200 | train_loss: 1.7819536
++++ model saved! artifacts/checkpoints/hgmp/pretrain/IMDB.GraphCL.GCN.hid256.np200.pth
+***epoch: 27/200 | train_loss: 1.8991235
+***epoch: 28/200 | train_loss: 1.955536
+***epoch: 29/200 | train_loss: 1.8583153
+***epoch: 30/200 | train_loss: 1.7098833
++++ model saved! artifacts/checkpoints/hgmp/pretrain/IMDB.GraphCL.GCN.hid256.np200.pth
+***epoch: 31/200 | train_loss: 1.6887495
++++ model saved! artifacts/checkpoints/hgmp/pretrain/IMDB.GraphCL.GCN.hid256.np200.pth
+***epoch: 32/200 | train_loss: 1.5263294
++++ model saved! artifacts/checkpoints/hgmp/pretrain/IMDB.GraphCL.GCN.hid256.np200.pth
+***epoch: 33/200 | train_loss: 1.4360158
++++ model saved! artifacts/checkpoints/hgmp/pretrain/IMDB.GraphCL.GCN.hid256.np200.pth
+***epoch: 34/200 | train_loss: 1.3880758
++++ model saved! artifacts/checkpoints/hgmp/pretrain/IMDB.GraphCL.GCN.hid256.np200.pth
+***epoch: 35/200 | train_loss: 1.341679
++++ model saved! artifacts/checkpoints/hgmp/pretrain/IMDB.GraphCL.GCN.hid256.np200.pth
+***epoch: 36/200 | train_loss: 1.3291186
++++ model saved! artifacts/checkpoints/hgmp/pretrain/IMDB.GraphCL.GCN.hid256.np200.pth
+***epoch: 37/200 | train_loss: 1.3312675
+***epoch: 38/200 | train_loss: 1.3303147
+***epoch: 39/200 | train_loss: 1.2517649
++++ model saved! artifacts/checkpoints/hgmp/pretrain/IMDB.GraphCL.GCN.hid256.np200.pth
+***epoch: 40/200 | train_loss: 1.1992242
++++ model saved! artifacts/checkpoints/hgmp/pretrain/IMDB.GraphCL.GCN.hid256.np200.pth
+***epoch: 41/200 | train_loss: 1.1896742
++++ model saved! artifacts/checkpoints/hgmp/pretrain/IMDB.GraphCL.GCN.hid256.np200.pth
+***epoch: 42/200 | train_loss: 1.1725664
++++ model saved! artifacts/checkpoints/hgmp/pretrain/IMDB.GraphCL.GCN.hid256.np200.pth
+***epoch: 43/200 | train_loss: 1.1707045
++++ model saved! artifacts/checkpoints/hgmp/pretrain/IMDB.GraphCL.GCN.hid256.np200.pth
+***epoch: 44/200 | train_loss: 1.1660964
++++ model saved! artifacts/checkpoints/hgmp/pretrain/IMDB.GraphCL.GCN.hid256.np200.pth
+***epoch: 45/200 | train_loss: 1.1609493
++++ model saved! artifacts/checkpoints/hgmp/pretrain/IMDB.GraphCL.GCN.hid256.np200.pth
+***epoch: 46/200 | train_loss: 1.1592413
++++ model saved! artifacts/checkpoints/hgmp/pretrain/IMDB.GraphCL.GCN.hid256.np200.pth
+***epoch: 47/200 | train_loss: 1.1539267
++++ model saved! artifacts/checkpoints/hgmp/pretrain/IMDB.GraphCL.GCN.hid256.np200.pth
+***epoch: 48/200 | train_loss: 1.1493505
++++ model saved! artifacts/checkpoints/hgmp/pretrain/IMDB.GraphCL.GCN.hid256.np200.pth
+***epoch: 49/200 | train_loss: 1.1502596
+***epoch: 50/200 | train_loss: 1.1470377
++++ model saved! artifacts/checkpoints/hgmp/pretrain/IMDB.GraphCL.GCN.hid256.np200.pth
+***epoch: 51/200 | train_loss: 1.1458161
++++ model saved! artifacts/checkpoints/hgmp/pretrain/IMDB.GraphCL.GCN.hid256.np200.pth
+***epoch: 52/200 | train_loss: 1.1458785
+***epoch: 53/200 | train_loss: 1.1473297
+***epoch: 54/200 | train_loss: 1.1465137
+***epoch: 55/200 | train_loss: 1.1497189
+***epoch: 56/200 | train_loss: 1.1568826
+***epoch: 57/200 | train_loss: 1.1608848
+***epoch: 58/200 | train_loss: 1.1636774
+***epoch: 59/200 | train_loss: 1.1732577
+***epoch: 60/200 | train_loss: 1.188603
+***epoch: 61/200 | train_loss: 1.1878136
+***epoch: 62/200 | train_loss: 1.1743494
+***epoch: 63/200 | train_loss: 1.1877997
+***epoch: 64/200 | train_loss: 1.1761033
+***epoch: 65/200 | train_loss: 1.1690263
+***epoch: 66/200 | train_loss: 1.164678
+***epoch: 67/200 | train_loss: 1.1503695
+***epoch: 68/200 | train_loss: 1.1410076
++++ model saved! artifacts/checkpoints/hgmp/pretrain/IMDB.GraphCL.GCN.hid256.np200.pth
+***epoch: 69/200 | train_loss: 1.1385658
++++ model saved! artifacts/checkpoints/hgmp/pretrain/IMDB.GraphCL.GCN.hid256.np200.pth
+***epoch: 70/200 | train_loss: 1.1353339
++++ model saved! artifacts/checkpoints/hgmp/pretrain/IMDB.GraphCL.GCN.hid256.np200.pth
+***epoch: 71/200 | train_loss: 1.1311172
++++ model saved! artifacts/checkpoints/hgmp/pretrain/IMDB.GraphCL.GCN.hid256.np200.pth
+***epoch: 72/200 | train_loss: 1.1305023
++++ model saved! artifacts/checkpoints/hgmp/pretrain/IMDB.GraphCL.GCN.hid256.np200.pth
+***epoch: 73/200 | train_loss: 1.1328466
+***epoch: 74/200 | train_loss: 1.1345237
+***epoch: 75/200 | train_loss: 1.1382332
+***epoch: 76/200 | train_loss: 1.1401026
+***epoch: 77/200 | train_loss: 1.1472681
+***epoch: 78/200 | train_loss: 1.1589912
+***epoch: 79/200 | train_loss: 1.1613201
+***epoch: 80/200 | train_loss: 1.1628436
+***epoch: 81/200 | train_loss: 1.1511882
+***epoch: 82/200 | train_loss: 1.1621344
+***epoch: 83/200 | train_loss: 1.1765341
+***epoch: 84/200 | train_loss: 1.1530941
+***epoch: 85/200 | train_loss: 1.1539224
+***epoch: 86/200 | train_loss: 1.1322999
+***epoch: 87/200 | train_loss: 1.123747
++++ model saved! artifacts/checkpoints/hgmp/pretrain/IMDB.GraphCL.GCN.hid256.np200.pth
+***epoch: 88/200 | train_loss: 1.1196167
++++ model saved! artifacts/checkpoints/hgmp/pretrain/IMDB.GraphCL.GCN.hid256.np200.pth
+***epoch: 89/200 | train_loss: 1.1179372
++++ model saved! artifacts/checkpoints/hgmp/pretrain/IMDB.GraphCL.GCN.hid256.np200.pth
+***epoch: 90/200 | train_loss: 1.1184114
+***epoch: 91/200 | train_loss: 1.1178605
++++ model saved! artifacts/checkpoints/hgmp/pretrain/IMDB.GraphCL.GCN.hid256.np200.pth
+***epoch: 92/200 | train_loss: 1.1183154
+***epoch: 93/200 | train_loss: 1.1159263
++++ model saved! artifacts/checkpoints/hgmp/pretrain/IMDB.GraphCL.GCN.hid256.np200.pth
+***epoch: 94/200 | train_loss: 1.1193121
+***epoch: 95/200 | train_loss: 1.1243123
+***epoch: 96/200 | train_loss: 1.1236735
+***epoch: 97/200 | train_loss: 1.1260187
+***epoch: 98/200 | train_loss: 1.1261263
+***epoch: 99/200 | train_loss: 1.1280474
+***epoch: 100/200 | train_loss: 1.1390235
+***epoch: 101/200 | train_loss: 1.1506117
+***epoch: 102/200 | train_loss: 1.156712
+***epoch: 103/200 | train_loss: 1.1596089
+***epoch: 104/200 | train_loss: 1.1847407
+***epoch: 105/200 | train_loss: 1.1833426
+***epoch: 106/200 | train_loss: 1.2969873
+***epoch: 107/200 | train_loss: 1.3265445
+***epoch: 108/200 | train_loss: 1.6067105
+***epoch: 109/200 | train_loss: 3.9224929
+***epoch: 110/200 | train_loss: 2.6519786
+***epoch: 111/200 | train_loss: 2.2957466
+***epoch: 112/200 | train_loss: 2.4353087
+***epoch: 113/200 | train_loss: 2.4974822
+***epoch: 114/200 | train_loss: 2.0471256
+***epoch: 115/200 | train_loss: 1.9369731
+***epoch: 116/200 | train_loss: 1.5522079
+***epoch: 117/200 | train_loss: 1.4116921
+***epoch: 118/200 | train_loss: 1.273975
+***epoch: 119/200 | train_loss: 1.2157901
+***epoch: 120/200 | train_loss: 1.1937342
+***epoch: 121/200 | train_loss: 1.1837124
+***epoch: 122/200 | train_loss: 1.1744263
+[DONE] benchmark-ready ckpt copied to: artifacts/checkpoints/hgmp/pretrain/IMDB.GraphCL.GCN.hid256.np200.seed0.pth
+[DONE] run metadata saved to: artifacts/checkpoints/hgmp/pretrain/IMDB.GraphCL.GCN.hid256.np200.seed0.pth.json
