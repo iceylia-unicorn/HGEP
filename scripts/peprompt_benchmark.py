@@ -671,6 +671,7 @@ def load_peprompt_offline_legacy_splits(args):
     if args.dataset not in HOP_NUM:
         raise ValueError(f"Unsupported dataset for PEPrompt offline splits: {args.dataset}")
 
+    subgraph_type = _peprompt_cache_subgraph_type(args)
     payload = load_peprompt_offline_splits(
         cache_dir=getattr(
             args,
@@ -681,10 +682,25 @@ def load_peprompt_offline_legacy_splits(args):
         shot=args.shot,
         seed=args.split_seed,
         feats_type=args.feats_type,
-        subgraph_type=getattr(args, "subgraph_type", "khop"),
+        subgraph_type=subgraph_type,
     )
     setattr(args, "peprompt_edge_feature_dim", int(payload.get("peprompt_edge_feature_dim", 0)))
     return payload["train"], payload["val"], payload["test"], payload["targetnode"]
+
+
+def _peprompt_cache_subgraph_type(args) -> str:
+    subgraph_type = str(getattr(args, "subgraph_type", "khop"))
+    if subgraph_type != "metapath_topk":
+        return subgraph_type
+    metric = str(getattr(args, "metapath_rank_metric", "count"))
+    suffix = (
+        f"m{int(getattr(args, 'metapath_max_hop', 3))}_"
+        f"k{int(getattr(args, 'metapath_topk', 5))}_"
+        f"{metric}"
+    )
+    if bool(getattr(args, "metapath_keep_self", False)):
+        suffix += "_self"
+    return f"metapath_topk_{suffix}"
 
 
 def _patched_legacy_split_loader(args):
@@ -759,6 +775,10 @@ def _make_legacy_args(cli_args, method: str, ckpt_path: str, split_seed: int, re
         peprompt_spectral_cache_dir=cli_args.peprompt_spectral_cache_dir,
         peprompt_offline_cache_dir=cli_args.peprompt_offline_cache_dir,
         subgraph_type=cli_args.subgraph_type,
+        metapath_max_hop=cli_args.metapath_max_hop,
+        metapath_topk=cli_args.metapath_topk,
+        metapath_rank_metric=cli_args.metapath_rank_metric,
+        metapath_keep_self=cli_args.metapath_keep_self,
         peprompt_write_edge_feature_stats=cli_args.peprompt_write_edge_feature_stats,
         peprompt_spectral_dim=cli_args.peprompt_spectral_dim,
         peprompt_spectral_max_nodes=cli_args.peprompt_spectral_max_nodes,
@@ -1147,7 +1167,11 @@ def build_parser():
         type=Path,
         default=ROOT / "artifacts" / "cache" / "peprompt_offline_splits",
     )  # 严格 k-shot + 子图 + 边特征离线缓存目录
-    ap.add_argument("--subgraph_type", type=str, default="khop", choices=["khop", "fanout"])  # 选择要加载的离线子图缓存类型
+    ap.add_argument("--subgraph_type", type=str, default="khop", choices=["khop", "fanout", "metapath_topk"])  # 选择要加载的离线子图缓存类型
+    ap.add_argument("--metapath_max_hop", type=int, default=3)  # metapath_topk 最大元路径长度 M
+    ap.add_argument("--metapath_topk", type=int, default=5)  # 每条元路径保留的 top-k 终点邻居数
+    ap.add_argument("--metapath_rank_metric", type=str, default="count", choices=["count", "degree_norm"])  # top-k 排序指标
+    ap.add_argument("--metapath_keep_self", action="store_true")  # 是否允许同类型元路径把目标节点自身纳入 top-k
     ap.add_argument("--peprompt_write_edge_feature_stats", action=argparse.BooleanOptionalAction, default=True)  # 是否写出边特征统计信息
     ap.add_argument("--peprompt_spectral_dim", type=int, default=16)  # Laplacian PE 维度
     ap.add_argument("--peprompt_spectral_max_nodes", type=int, default=50000)  # 计算谱分解允许的最大节点数
@@ -1270,12 +1294,12 @@ def run_benchmark(args):
         if len(args.methods) == 1:
             run_tag = args.methods[0]
             if run_tag == "peprompt":
-                run_tag = f"{run_tag}.{args.subgraph_type}"
+                run_tag = f"{run_tag}.{_peprompt_cache_subgraph_type(args)}"
         out_dir = _ensure_dir(args.save_dir / args.dataset / f"{args.shot}-shot" / run_tag)
         per_run_rows = []
         for record in records:
             row = asdict(record)
-            row["subgraph_type"] = args.subgraph_type if record.method == "peprompt" else None
+            row["subgraph_type"] = _peprompt_cache_subgraph_type(args) if record.method == "peprompt" else None
             per_run_rows.append(row)
         _write_csv(out_dir / "per_run.csv", per_run_rows)
 
@@ -1283,7 +1307,7 @@ def run_benchmark(args):
         seed_row_dicts = []
         for row in seed_rows:
             payload = asdict(row)
-            payload["subgraph_type"] = args.subgraph_type if row.method == "peprompt" else None
+            payload["subgraph_type"] = _peprompt_cache_subgraph_type(args) if row.method == "peprompt" else None
             seed_row_dicts.append(payload)
         _write_csv(out_dir / "per_seed_summary.csv", seed_row_dicts)
 

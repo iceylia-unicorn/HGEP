@@ -324,4 +324,122 @@ IMDB数据集出现问题，性能没有原论文那么好，并且相较于原�
 
 > # 26.5.31
 
-上一个实验出现了一点问题，实际上本身可能存在一些问题
+上一个实验出现了一点问题，实际上本身可能存在一些问题，现在开始考虑异构图子图的构建问题。
+
+所以采用元路径采样子图，m跳内所有元路径，然后做topk的截断，先对比了这么做后子图的大小差异，结果如下，其中截断采用的是同样元路径
+[dataset] ACM target=paper targets=3025 nodes=10942 edges=547872
+[khop] dataset=ACM hop=1 avg_nodes=93.30 avg_edges=376.89 max_nodes=206 max_edges=3328
+[khop] dataset=ACM hop=2 avg_nodes=3281.55 avg_edges=217934.26 max_nodes=4605 max_edges=478076
+[metapath_topk] dataset=ACM M=1 topk=5 metapaths=5 avg_nodes=12.94 avg_edges=51.05 max_nodes=22 max_edges=180
+[metapath_topk] dataset=ACM M=1 topk=10 metapaths=5 avg_nodes=18.53 avg_edges=85.13 max_nodes=35 max_edges=426
+[metapath_topk] dataset=ACM M=1 topk=20 metapaths=5 avg_nodes=28.71 avg_edges=145.99 max_nodes=53 max_edges=920
+[metapath_topk] dataset=ACM M=2 topk=5 metapaths=18 avg_nodes=38.98 avg_edges=378.25 max_nodes=72 max_edges=1166
+[metapath_topk] dataset=ACM M=2 topk=10 metapaths=18 avg_nodes=64.39 avg_edges=1014.06 max_nodes=123 max_edges=2862
+[metapath_topk] dataset=ACM M=2 topk=20 metapaths=18 avg_nodes=105.56 avg_edges=2558.96 max_nodes=197 max_edges=6522
+[metapath_topk] dataset=ACM M=3 topk=5 metapaths=59 avg_nodes=94.53 avg_edges=1390.76 max_nodes=156 max_edges=3262
+[metapath_topk] dataset=ACM M=3 topk=10 metapaths=59 avg_nodes=171.67 avg_edges=3899.24 max_nodes=276 max_edges=7854
+[metapath_topk] dataset=ACM M=3 topk=20 metapaths=59 avg_nodes=305.69 avg_edges=9546.19 max_nodes=490 max_edges=18374
+[dataset] DBLP target=author targets=4057 nodes=26128 edges=239566
+[khop] dataset=DBLP hop=1 avg_nodes=5.84 avg_edges=9.68 max_nodes=169 max_edges=336
+[khop] dataset=DBLP hop=2 avg_nodes=32.20 avg_edges=84.12 max_nodes=635 max_edges=3100
+[metapath_topk] dataset=DBLP M=1 topk=5 metapaths=1 avg_nodes=3.86 avg_edges=5.72 max_nodes=6 max_edges=10
+[metapath_topk] dataset=DBLP M=1 topk=10 metapaths=1 avg_nodes=4.67 avg_edges=7.34 max_nodes=11 max_edges=20
+[metapath_topk] dataset=DBLP M=1 topk=20 metapaths=1 avg_nodes=5.27 avg_edges=8.54 max_nodes=21 max_edges=40
+[metapath_topk] dataset=DBLP M=2 topk=5 metapaths=4 avg_nodes=12.33 avg_edges=27.75 max_nodes=21 max_edges=82
+[metapath_topk] dataset=DBLP M=2 topk=10 metapaths=4 avg_nodes=17.21 avg_edges=43.01 max_nodes=41 max_edges=154
+[metapath_topk] dataset=DBLP M=2 topk=20 metapaths=4 avg_nodes=22.59 avg_edges=58.73 max_nodes=76 max_edges=302
+[metapath_topk] dataset=DBLP M=3 topk=5 metapaths=7 avg_nodes=21.47 avg_edges=64.42 max_nodes=36 max_edges=170
+[metapath_topk] dataset=DBLP M=3 topk=10 metapaths=7 avg_nodes=37.24 avg_edges=130.34 max_nodes=71 max_edges=378
+[metapath_topk] dataset=DBLP M=3 topk=20 metapaths=7 avg_nodes=64.79 avg_edges=249.73 max_nodes=131 max_edges=806
+[dataset] IMDB target=movie targets=4573 nodes=21420 edges=86642
+[khop] dataset=IMDB hop=1 avg_nodes=9.82 avg_edges=17.64 max_nodes=10 max_edges=18
+[khop] dataset=IMDB hop=2 avg_nodes=115.08 avg_edges=235.69 max_nodes=642 max_edges=1370
+[metapath_topk] dataset=IMDB M=1 topk=5 metapaths=3 avg_nodes=9.82 avg_edges=17.64 max_nodes=10 max_edges=18
+[metapath_topk] dataset=IMDB M=1 topk=10 metapaths=3 avg_nodes=9.82 avg_edges=17.64 max_nodes=10 max_edges=18
+[metapath_topk] dataset=IMDB M=1 topk=20 metapaths=3 avg_nodes=9.82 avg_edges=17.64 max_nodes=10 max_edges=18
+[metapath_topk] dataset=IMDB M=2 topk=5 metapaths=6 avg_nodes=20.92 avg_edges=45.04 max_nodes=25 max_edges=88
+[metapath_topk] dataset=IMDB M=2 topk=10 metapaths=6 avg_nodes=29.51 avg_edges=63.38 max_nodes=40 max_edges=126
+[metapath_topk] dataset=IMDB M=2 topk=20 metapaths=6 avg_nodes=43.29 avg_edges=91.74 max_nodes=70 max_edges=182
+[metapath_topk] dataset=IMDB M=3 topk=5 metapaths=15 avg_nodes=38.29 avg_edges=69.48 max_nodes=54 max_edges=152
+[metapath_topk] dataset=IMDB M=3 topk=10 metapaths=15 avg_nodes=76.13 avg_edges=140.93 max_nodes=105 max_edges=244
+[metapath_topk] dataset=IMDB M=3 topk=20 metapaths=15 avg_nodes=142.36 avg_edges=281.83 max_nodes=208 max_edges=502
+[dataset] Freebase target=book targets=7954 nodes=180098 edges=1057688
+[khop] dataset=Freebase hop=1 avg_nodes=10.89 avg_edges=29.63 max_nodes=2446 max_edges=5589
+[khop] dataset=Freebase hop=2 avg_nodes=795.49 avg_edges=3871.76 max_nodes=18242 max_edges=86061
+[metapath_topk] dataset=Freebase M=1 topk=5 metapaths=5 avg_nodes=4.33 avg_edges=7.13 max_nodes=26 max_edges=58
+[metapath_topk] dataset=Freebase M=1 topk=10 metapaths=5 avg_nodes=5.13 avg_edges=9.31 max_nodes=51 max_edges=107
+[metapath_topk] dataset=Freebase M=1 topk=20 metapaths=5 avg_nodes=5.95 avg_edges=11.85 max_nodes=101 max_edges=221
+[metapath_topk] dataset=Freebase M=2 topk=5 metapaths=22 avg_nodes=19.70 avg_edges=44.81 max_nodes=98 max_edges=449
+[metapath_topk] dataset=Freebase M=2 topk=10 metapaths=22 avg_nodes=31.68 avg_edges=81.26 max_nodes=184 max_edges=808
+[metapath_topk] dataset=Freebase M=2 topk=20 metapaths=22 avg_nodes=51.34 avg_edges=140.51 max_nodes=346 max_edges=1695
+[metapath_topk] dataset=Freebase M=3 topk=5 metapaths=72 avg_nodes=65.19 avg_edges=268.10 max_nodes=256 max_edges=1485
+[metapath_topk] dataset=Freebase M=3 topk=10 metapaths=72 avg_nodes=118.11 avg_edges=559.37 max_nodes=510 max_edges=3530
+[metapath_topk] dataset=Freebase M=3 topk=20 metapaths=72 avg_nodes=212.79 avg_edges=1086.07 max_nodes=990 max_edges=6983
+
+发现ACM的大小与
+
+我想到一种可能，元路径实际上是语义树，如果纯粹
+
+
+conda run -n HGEP python scripts/peprompt_benchmark.py \
+  --dataset ACM \
+  --methods peprompt \
+  --shot 10 \
+  --seeds 0 1 2 3 4 \
+  --repeats 10 \
+  --peprompt_ckpt artifacts/checkpoints/hgmp/pretrain/ACM.GraphCL.GCN.hid512.np500.seed0.pth \
+  --subgraph_type metapath_topk \
+  --metapath_max_hop 3 \
+  --metapath_topk 5 \
+  --save_dir artifacts/results/peprompt_metapath_topk_suite
+
+
+
+conda run -n HGEP python scripts/peprompt_benchmark.py \
+  --dataset ACM \
+  --methods peprompt \
+  --shot 1 \
+  --seeds 0 1 2 3 4 \
+  --repeats 1 \
+  --peprompt_ckpt artifacts/checkpoints/hgmp/pretrain/ACM.GraphCL.GCN.hid512.np500.seed0.pth \
+  --subgraph_type metapath_topk \
+  --metapath_max_hop 3 \
+  --metapath_topk 5 \
+  --save_dir artifacts/results/peprompt_metapath_topk_suite
+
+
+python scripts/peprompt_benchmark.py \
+  --dataset ACM \
+  --shot 10 \
+  --seeds 0 \
+  --repeats 10 \
+  --methods peprompt \
+  --subgraph_type metapath_topk \
+  --metapath_rank_metric degree_norm \
+  --peprompt_ckpt artifacts/checkpoints/hgmp/pretrain/ACM.GraphCL.GCN.hid512.np500.seed0.pth
+# 26.6.4
+#### 元路径采样有效
+相较于直接的khop，metapath的结构是有效的，能够达到ACM 10-shot 88.6 此时的子图采样策略与prompt提示没有比较
+```json
+"pooled_runs": {
+  "peprompt": {
+    "count": 50,
+    "micro_mean": 0.8864736843109131,
+    "micro_std": 0.017332137665788987,
+    "macro_mean": 0.8858819735050202,
+    "macro_std": 0.0178124920473951
+  }
+},
+"seed_mean_then_std": {
+  "peprompt": {
+    "count": 5,
+    "micro_mean": 0.8864736843109131,
+    "micro_std": 0.011757842815277595,
+    "macro_mean": 0.8858819735050203,
+    "macro_std": 0.012037870901193072
+  }
+}
+```
+#### 元路径提示
+由于是一种截断的提示，那么如果我将截断的信息融入到提示中，那么会怎么样呢
+这种融合方式

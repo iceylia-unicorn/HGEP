@@ -28,6 +28,13 @@ from scripts.peprompt_benchmark import (
     _load_raw_heterograph,
     prepare_peprompt_spectral_payload,
 )
+from scripts.subgraph_sampling_stats import (
+    _build_csr_adjs,
+    _generate_metapaths,
+    _metapath_reachable_scores,
+    _rank_values,
+    _topk_indices,
+)
 
 
 def _ensure_dir(path: Path) -> Path:
@@ -101,6 +108,54 @@ def extract_fanout_subgraph(
         sampled_nodes[target_ntype] = seed_nodes[target_ntype]
 
     subgraph = dgl.node_subgraph(graph, sampled_nodes)
+    inverse_indices = _find_seed_inverse_indices(subgraph, seed_nodes)
+    return subgraph, inverse_indices
+
+
+def _metapath_cache_key(args) -> str:
+    if str(args.subgraph_type) != "metapath_topk":
+        return str(args.subgraph_type)
+    metric = str(args.metapath_rank_metric)
+    suffix = f"m{int(args.metapath_max_hop)}_k{int(args.metapath_topk)}_{metric}"
+    if bool(args.metapath_keep_self):
+        suffix += "_self"
+    return f"metapath_topk_{suffix}"
+
+
+def extract_metapath_topk_subgraph(
+    graph,
+    target_ntype: str,
+    target_node_id: int,
+    adjs: dict,
+    metapaths: list,
+    topk: int,
+    rank_metric: str,
+    keep_self: bool,
+    endpoint_popularity: dict,
+):
+    selected: dict[str, set[int]] = {ntype: set() for ntype in graph.ntypes}
+    selected[target_ntype].add(int(target_node_id))
+
+    for metapath in metapaths:
+        scores = _metapath_reachable_scores(
+            adjs=adjs,
+            metapath=metapath,
+            node_id=int(target_node_id),
+            target_ntype=target_ntype,
+            keep_self=bool(keep_self),
+        )
+        ranks = _rank_values(scores, endpoint_popularity.get(metapath), rank_metric)
+        keep = _topk_indices(scores, ranks, int(topk))
+        if keep.size > 0:
+            selected[metapath[-1][2]].update(int(v) for v in keep.tolist())
+
+    node_dict = {
+        ntype: torch.tensor(sorted(node_ids), dtype=torch.int64)
+        for ntype, node_ids in selected.items()
+        if node_ids
+    }
+    seed_nodes = _seed_nodes_dict(target_ntype, target_node_id)
+    subgraph = dgl.node_subgraph(graph, node_dict)
     inverse_indices = _find_seed_inverse_indices(subgraph, seed_nodes)
     return subgraph, inverse_indices
 
@@ -233,6 +288,44 @@ def _make_subgraph_extractor(graph, targetnode: str, args):
 
         return _extract, {"subgraph_type": subgraph_type, "fanout": fanout}
 
+    if subgraph_type == "metapath_topk":
+        max_hop = int(args.metapath_max_hop)
+        topk = int(args.metapath_topk)
+        rank_metric = str(args.metapath_rank_metric)
+        keep_self = bool(args.metapath_keep_self)
+        adjs = _build_csr_adjs(graph)
+        metapaths = _generate_metapaths(graph, targetnode, max_hop)
+        endpoint_popularity = {}
+        if rank_metric == "degree_norm":
+            from scripts.subgraph_sampling_stats import _endpoint_popularity
+
+            endpoint_popularity = {
+                metapath: _endpoint_popularity(adjs, metapath)
+                for metapath in metapaths
+            }
+
+        def _extract(node_id: int):
+            return extract_metapath_topk_subgraph(
+                graph=graph,
+                target_ntype=targetnode,
+                target_node_id=node_id,
+                adjs=adjs,
+                metapaths=metapaths,
+                topk=topk,
+                rank_metric=rank_metric,
+                keep_self=keep_self,
+                endpoint_popularity=endpoint_popularity,
+            )
+
+        return _extract, {
+            "subgraph_type": subgraph_type,
+            "max_hop": max_hop,
+            "topk": topk,
+            "rank_metric": rank_metric,
+            "keep_self": keep_self,
+            "num_metapaths": len(metapaths),
+        }
+
     raise ValueError(f"Unsupported subgraph_type: {subgraph_type}")
 
 
@@ -325,7 +418,7 @@ def _precompute_dataset(graph, targetnode: str, spectral_payload: dict, args):
                 shot=shot,
                 seed=split_seed,
                 feats_type=args.feats_type,
-                subgraph_type=args.subgraph_type,
+                subgraph_type=_metapath_cache_key(args),
             )
             _ensure_dir(cache_path.parent)
 
@@ -333,12 +426,18 @@ def _precompute_dataset(graph, targetnode: str, spectral_payload: dict, args):
                 "dataset": args.dataset,
                 "targetnode": targetnode,
                 "subgraph_type": str(args.subgraph_type),
+                "subgraph_cache_key": _metapath_cache_key(args),
                 "subgraph_config": dict(subgraph_config),
                 "shot": int(shot),
                 "split_seed": int(split_seed),
                 "feats_type": int(args.feats_type),
                 "hop_num": subgraph_config.get("hop_num"),
                 "fanout": subgraph_config.get("fanout"),
+                "metapath_max_hop": subgraph_config.get("max_hop"),
+                "metapath_topk": subgraph_config.get("topk"),
+                "metapath_rank_metric": subgraph_config.get("rank_metric"),
+                "metapath_keep_self": subgraph_config.get("keep_self"),
+                "metapath_count": subgraph_config.get("num_metapaths"),
                 "max_pool_size": int(args.max_pool_size),
                 "peprompt_edge_feature_name": args.peprompt_edge_feature_name,
                 "peprompt_edge_feature_names": list(PEPROMPT_EDGE_FEATURES),
@@ -363,7 +462,7 @@ def _precompute_dataset(graph, targetnode: str, spectral_payload: dict, args):
 
             elapsed = time.perf_counter() - start_time
             print(
-                f"[saved] dataset={args.dataset} subgraph={args.subgraph_type} shot={shot} seed={split_seed} "
+                f"[saved] dataset={args.dataset} subgraph={_metapath_cache_key(args)} shot={shot} seed={split_seed} "
                 f"train={len(train_list)} val={len(val_list)} test={len(test_list)} "
                 f"path={cache_path} time={elapsed:.2f}s"
             )
@@ -377,9 +476,13 @@ def build_parser():
     ap.add_argument("--seeds", nargs="+", type=int, default=[0, 1, 2, 3, 4])
     ap.add_argument("--feats_type", type=int, default=0)
     ap.add_argument("--max_pool_size", type=int, default=400)
-    ap.add_argument("--subgraph_type", type=str, default="khop", choices=["khop", "fanout"])
+    ap.add_argument("--subgraph_type", type=str, default="khop", choices=["khop", "fanout", "metapath_topk"])
     ap.add_argument("--khop_num", type=int, default=None)
     ap.add_argument("--fanouts", nargs="+", type=int, default=[15, 10])
+    ap.add_argument("--metapath_max_hop", type=int, default=3)
+    ap.add_argument("--metapath_topk", type=int, default=5)
+    ap.add_argument("--metapath_rank_metric", type=str, default="count", choices=["count", "degree_norm"])
+    ap.add_argument("--metapath_keep_self", action="store_true")
     ap.add_argument(
         "--peprompt_spectral_cache_dir",
         type=Path,
