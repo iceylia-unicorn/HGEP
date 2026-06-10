@@ -259,9 +259,9 @@ def forward_graph_batch(
 
     if hgnn.hgnn_type == "HGT":
         if edge_feature_dict is None:
-            node_emb = hgnn(targetnode, x_dict, edge_index_dict)
+            node_emb = hgnn(targetnode, x_dict, edge_index_dict, graph=batched_graph)
         else:
-            node_emb = hgnn(targetnode, x_dict, edge_index_dict, edge_feature_dict=edge_feature_dict)
+            node_emb = hgnn(targetnode, x_dict, edge_index_dict, edge_feature_dict=edge_feature_dict, graph=batched_graph)
     elif hgnn.hgnn_type == "SHGN":
         node_emb = hgnn(targetnode, batched_graph, x_dict)
     elif hgnn.hgnn_type == "GCN":
@@ -635,6 +635,60 @@ def _evaluate_graph_probe(
     return _legacy_f1_micro_macro(all_logits, all_labels, num_classes)
 
 
+def _evaluate_graph_probe_loss(
+    graph_list,
+    hgnn,
+    head,
+    targetnode: str,
+    dataset: str,
+    classification_type: str,
+    batch_size: int,
+    device: torch.device,
+):
+    loader = dgl.dataloading.GraphDataLoader(graph_list, batch_size=batch_size, shuffle=False)
+
+    total_loss = 0.0
+    total_graphs = 0
+
+    hgnn.eval()
+    head.eval()
+    with torch.no_grad():
+        for batch in loader:
+            batched_graph, batched_label = _unpack_batch(batch, classification_type)
+            edge_index_dict = _prepare_edge_indices_for_device(hgnn, batched_graph, device)
+            edge_feature_dict = _prepare_edge_features_for_device(hgnn, batched_graph, device)
+            homo_graph = _prepare_homo_graph_for_device(hgnn, batched_graph, device)
+            batched_graph = batched_graph.to(device)
+            batched_label = _prepare_labels_for_task(
+                batched_label,
+                device,
+                dataset,
+                classification_type,
+            )
+
+            graph_emb = forward_graph_batch(
+                hgnn,
+                batched_graph,
+                targetnode,
+                edge_feature_dict=edge_feature_dict,
+                edge_index_dict=edge_index_dict,
+                homo_graph=homo_graph,
+            )
+            logits = head(graph_emb)
+            loss = _legacy_task_loss(
+                logits,
+                batched_label,
+                dataset,
+                classification_type,
+            )
+
+            batch_n = batched_label.size(0)
+            total_loss += loss.item() * batch_n
+            total_graphs += batch_n
+
+    return total_loss / max(total_graphs, 1)
+
+
 def _train_relation_prompt_probe(
     args,
     batch_size: int = 32,
@@ -652,6 +706,9 @@ def _train_relation_prompt_probe(
     assert early_stop_metric in {"micro", "macro"}
 
     train_list, valid_list, test_list, targetnode = _load_legacy_fewshot_splits(args)
+    early_stop_mode = getattr(args, f"{args.method}_early_stop_mode", "metric")
+    if early_stop_mode not in {"metric", "loss"}:
+        raise ValueError(f"Unsupported {args.method}_early_stop_mode: {early_stop_mode}")
 
     hgnn = build_legacy_hgnn(
         args,
@@ -696,6 +753,7 @@ def _train_relation_prompt_probe(
     test_at_best_macro = 0.0
     best_epoch = -1
     bad_epochs = 0
+    best_val_loss = float("inf")
 
     for epoch in range(1, epochs + 1):
         hgnn.eval()
@@ -782,10 +840,25 @@ def _train_relation_prompt_probe(
             args.num_class,
         )
 
-        monitor = val_macro if early_stop_metric == "macro" else val_micro
-        best_monitor = best_val_macro if early_stop_metric == "macro" else best_val_micro
+        val_loss = None
+        if early_stop_mode == "loss":
+            val_loss = _evaluate_graph_probe_loss(
+                valid_list,
+                hgnn,
+                head,
+                targetnode,
+                args.dataset,
+                args.classification_type,
+                batch_size,
+                args.device,
+            )
+            improved = val_loss <= best_val_loss
+        else:
+            monitor = val_macro if early_stop_metric == "macro" else val_micro
+            best_monitor = best_val_macro if early_stop_metric == "macro" else best_val_micro
+            improved = monitor > best_monitor
 
-        if monitor > best_monitor:
+        if improved:
             improved = True
             best_val_micro = val_micro
             best_val_macro = val_macro
@@ -793,66 +866,90 @@ def _train_relation_prompt_probe(
             test_at_best_macro = test_macro
             best_epoch = epoch
             bad_epochs = 0
+            if val_loss is not None:
+                best_val_loss = float(val_loss)
 
             if save_best_path is not None:
-                torch.save(
-                    {
-                        "hgnn_state": hgnn.state_dict(),
-                        "head_state": head.state_dict(),
-                        "in_dim": args.hidden_dim,
-                        "hidden_dim": hidden_dim,
-                        "num_classes": args.num_class,
-                        "best_val_micro": best_val_micro,
-                        "best_val_macro": best_val_macro,
-                        "test_at_best_micro": test_at_best_micro,
-                        "test_at_best_macro": test_at_best_macro,
-                        "best_epoch": best_epoch,
-                        "early_stop_metric": early_stop_metric,
-                    },
-                    save_best_path,
-                )
+                payload = {
+                    "hgnn_state": hgnn.state_dict(),
+                    "head_state": head.state_dict(),
+                    "in_dim": args.hidden_dim,
+                    "hidden_dim": hidden_dim,
+                    "num_classes": args.num_class,
+                    "best_val_micro": best_val_micro,
+                    "best_val_macro": best_val_macro,
+                    "test_at_best_micro": test_at_best_micro,
+                    "test_at_best_macro": test_at_best_macro,
+                    "best_epoch": best_epoch,
+                    "early_stop_metric": early_stop_metric,
+                    "early_stop_mode": early_stop_mode,
+                }
+                if val_loss is not None:
+                    payload["best_val_loss"] = float(val_loss)
+                torch.save(payload, save_best_path)
         else:
             improved = False
             bad_epochs += 1
 
         if epoch_callback is not None:
-            epoch_callback(
-                {
-                    "epoch": epoch,
-                    "train_loss": float(train_loss),
-                    "train_micro": float(train_micro),
-                    "train_macro": float(train_macro),
-                    "val_micro": float(val_micro),
-                    "val_macro": float(val_macro),
-                    "test_micro": float(test_micro),
-                    "test_macro": float(test_macro),
-                    "monitor": float(monitor),
-                    "best_val_micro": float(best_val_micro),
-                    "best_val_macro": float(best_val_macro),
-                    "test_at_best_micro": float(test_at_best_micro),
-                    "test_at_best_macro": float(test_at_best_macro),
-                    "best_epoch": int(best_epoch),
-                    "bad_epochs": int(bad_epochs),
-                    "is_best": bool(improved),
-                    "early_stop": bool(bad_epochs >= patience),
-                }
-            )
+            payload = {
+                "epoch": epoch,
+                "train_loss": float(train_loss),
+                "train_micro": float(train_micro),
+                "train_macro": float(train_macro),
+                "val_micro": float(val_micro),
+                "val_macro": float(val_macro),
+                "test_micro": float(test_micro),
+                "test_macro": float(test_macro),
+                "best_val_micro": float(best_val_micro),
+                "best_val_macro": float(best_val_macro),
+                "test_at_best_micro": float(test_at_best_micro),
+                "test_at_best_macro": float(test_at_best_macro),
+                "best_epoch": int(best_epoch),
+                "bad_epochs": int(bad_epochs),
+                "is_best": bool(improved),
+                "early_stop": bool(bad_epochs >= patience),
+                "early_stop_mode": early_stop_mode,
+            }
+            if val_loss is not None:
+                payload["val_loss"] = float(val_loss)
+                payload["best_val_loss"] = float(best_val_loss)
+                payload["monitor"] = float(-val_loss)
+            else:
+                payload["monitor"] = float(monitor)
+            epoch_callback(payload)
 
         if epoch == 1 or epoch % 10 == 0:
-            print(
-                f"Epoch {epoch:03d} | loss={train_loss:.4f} | "
-                f"val_f1(micro/macro)={val_micro:.4f}/{val_macro:.4f} | "
-                f"test_f1(micro/macro)={test_micro:.4f}/{test_macro:.4f} | "
-                f"monitor({early_stop_metric})={monitor:.4f}"
-            )
+            if val_loss is not None:
+                print(
+                    f"Epoch {epoch:03d} | loss={train_loss:.4f} | "
+                    f"val_loss={val_loss:.4f} | "
+                    f"val_f1(micro/macro)={val_micro:.4f}/{val_macro:.4f} | "
+                    f"test_f1(micro/macro)={test_micro:.4f}/{test_macro:.4f}"
+                )
+            else:
+                print(
+                    f"Epoch {epoch:03d} | loss={train_loss:.4f} | "
+                    f"val_f1(micro/macro)={val_micro:.4f}/{val_macro:.4f} | "
+                    f"test_f1(micro/macro)={test_micro:.4f}/{test_macro:.4f} | "
+                    f"monitor({early_stop_metric})={monitor:.4f}"
+                )
 
         if bad_epochs >= patience:
-            print(
-                f"Early stop at epoch {epoch}, best_epoch={best_epoch} | "
-                f"best_val_f1(micro/macro)={best_val_micro:.4f}/{best_val_macro:.4f} | "
-                f"test@best_f1(micro/macro)={test_at_best_micro:.4f}/{test_at_best_macro:.4f} | "
-                f"monitor={early_stop_metric}"
-            )
+            if val_loss is not None:
+                print(
+                    f"Early stop at epoch {epoch}, best_epoch={best_epoch} | "
+                    f"best_val_loss={best_val_loss:.4f} | "
+                    f"best_val_f1(micro/macro)={best_val_micro:.4f}/{best_val_macro:.4f} | "
+                    f"test@best_f1(micro/macro)={test_at_best_micro:.4f}/{test_at_best_macro:.4f}"
+                )
+            else:
+                print(
+                    f"Early stop at epoch {epoch}, best_epoch={best_epoch} | "
+                    f"best_val_f1(micro/macro)={best_val_micro:.4f}/{best_val_macro:.4f} | "
+                    f"test@best_f1(micro/macro)={test_at_best_micro:.4f}/{test_at_best_macro:.4f} | "
+                    f"monitor={early_stop_metric}"
+                )
             break
 
     return {
@@ -862,6 +959,8 @@ def _train_relation_prompt_probe(
         "test_at_best_macro": test_at_best_macro,
         "best_epoch": best_epoch,
         "early_stop_metric": early_stop_metric,
+        "early_stop_mode": early_stop_mode,
+        "best_val_loss": None if best_val_loss == float("inf") else best_val_loss,
     }
 
 

@@ -685,7 +685,23 @@ def load_peprompt_offline_legacy_splits(args):
         subgraph_type=subgraph_type,
     )
     setattr(args, "peprompt_edge_feature_dim", int(payload.get("peprompt_edge_feature_dim", 0)))
-    return payload["train"], payload["val"], payload["test"], payload["targetnode"]
+    setattr(args, "peprompt_metapath_count", int(payload.get("metapath_count") or 0))
+    setattr(args, "peprompt_graph_summary_dim", int(payload.get("peprompt_graph_summary_dim", 0) or 0))
+    targetnode = payload["targetnode"]
+    dropped_ctx_by_target = payload.get("dropped_metapath_context_by_target")
+    dropped_onehop_ctx_by_target = payload.get("dropped_onehop_context_by_target")
+    # Lazy import to break circular dependency with precompute_peprompt_cache.
+    from scripts.precompute_peprompt_cache import _restore_dropped_ctx_in_sample
+
+    for sample_list in (payload["train"], payload["val"], payload["test"]):
+        for sample in sample_list:
+            _restore_dropped_ctx_in_sample(
+                sample,
+                targetnode,
+                dropped_ctx_by_target,
+                dropped_onehop_ctx_by_target,
+            )
+    return payload["train"], payload["val"], payload["test"], targetnode
 
 
 def _peprompt_cache_subgraph_type(args) -> str:
@@ -700,6 +716,16 @@ def _peprompt_cache_subgraph_type(args) -> str:
     )
     if bool(getattr(args, "metapath_keep_self", False)):
         suffix += "_self"
+    fusion_mode = str(getattr(args, "peprompt_fusion_mode", "none"))
+    ctx_dim = int(getattr(args, "peprompt_ctx_dim", 0) or 0)
+    if fusion_mode == "hop_decoupled" and ctx_dim > 0:
+        suffix += f"_mpvirt2_d{ctx_dim}"
+    elif fusion_mode == "onehop_ctx" and ctx_dim > 0:
+        suffix += f"_onehop_d{ctx_dim}"
+    elif fusion_mode == "type_ctx" and ctx_dim > 0:
+        suffix += f"_typectx_d{ctx_dim}"
+    elif fusion_mode in {"graph_summary", "graph_summary_basis"}:
+        suffix += "_graphsum"
     return f"metapath_topk_{suffix}"
 
 
@@ -783,6 +809,13 @@ def _make_legacy_args(cli_args, method: str, ckpt_path: str, split_seed: int, re
         peprompt_spectral_dim=cli_args.peprompt_spectral_dim,
         peprompt_spectral_max_nodes=cli_args.peprompt_spectral_max_nodes,
         peprompt_edge_prompt_hidden=cli_args.peprompt_edge_prompt_hidden,
+        peprompt_fusion_mode=cli_args.peprompt_fusion_mode,
+        peprompt_ctx_dim=cli_args.peprompt_ctx_dim,
+        peprompt_generator_hidden=cli_args.peprompt_generator_hidden,
+        peprompt_metapath_embed_dim=cli_args.peprompt_metapath_embed_dim,
+        peprompt_graph_summary_dim=cli_args.peprompt_graph_summary_dim,
+        peprompt_basis_count=cli_args.peprompt_basis_count,
+        peprompt_onehop_center_fusion=cli_args.peprompt_onehop_center_fusion,
         embed_batch_size=cli_args.embed_batch_size,
         head_hidden=cli_args.head_hidden,
         head_dropout=cli_args.head_dropout,
@@ -792,6 +825,7 @@ def _make_legacy_args(cli_args, method: str, ckpt_path: str, split_seed: int, re
         prompt_lr=cli_args.prompt_lr,
         weight_decay=cli_args.weight_decay,
         early_stop_metric=cli_args.early_stop_metric,
+        peprompt_early_stop_mode=cli_args.peprompt_early_stop_mode,
         hgmp_prompt_recipe=cli_args.hgmp_prompt_recipe,
         hgmp_prompt_prompt_lr=cli_args.hgmp_prompt_prompt_lr,
         hgmp_prompt_head_lr=cli_args.hgmp_prompt_head_lr,
@@ -1123,7 +1157,7 @@ def build_parser():
     ap.add_argument("--patience", type=int, default=30)  # early stopping 容忍轮数
     ap.add_argument("--lr", type=float, default=5e-3)  # 分类头学习率
     ap.add_argument("--prompt_lr", type=float, default=None)  # prompt 学习率，未指定时回退到 lr
-    ap.add_argument("--weight_decay", type=float, default=1e-4)  # 优化器权重衰减
+    ap.add_argument("--weight_decay", type=float, default=5e-4)  # 优化器权重衰减
     ap.add_argument("--early_stop_metric", type=str, default="macro", choices=["micro", "macro"])  # early stopping 监控指标
     ap.add_argument(
         "--hgmp_prompt_recipe",
@@ -1176,6 +1210,63 @@ def build_parser():
     ap.add_argument("--peprompt_spectral_dim", type=int, default=16)  # Laplacian PE 维度
     ap.add_argument("--peprompt_spectral_max_nodes", type=int, default=50000)  # 计算谱分解允许的最大节点数
     ap.add_argument("--peprompt_edge_prompt_hidden", type=int, default=128)  # 将 PE 边特征映射为提示向量的 MLP 隐层维度
+    ap.add_argument(
+        "--peprompt_early_stop_mode",
+        type=str,
+        default="loss",
+        choices=["metric", "loss"],
+        help="PEPrompt downstream early stopping: validation metric or validation loss.",
+    )
+
+    # ---- hop-decomposed compensation (Module 1+2) ----
+    ap.add_argument(
+        "--peprompt_fusion_mode",
+        type=str,
+        default="none",
+        choices=["none", "hop_decoupled", "onehop_ctx", "type_ctx", "graph_summary", "graph_summary_basis"],
+        help="Edge prompt fusion mode: 'none' = spectral PE only; "
+             "'hop_decoupled' = PE + dropped-neighbour context + h_src + h_dst; "
+             "'onehop_ctx' = 1-hop type-pooled dropped context on 1-hop edges; "
+             "'type_ctx' = one pooled dropped-context per dst node type per subgraph; "
+             "'graph_summary' = shared graph-level metapath summary for all edges in a subgraph; "
+             "'graph_summary_basis' = use graph summary as a selector over prompt bases.",
+    )
+    ap.add_argument(
+        "--peprompt_ctx_dim",
+        type=int,
+        default=0,
+        help="Dimension of the dropped-neighbour context vector (must match node feature dim). "
+             "Used when --peprompt_fusion_mode is hop_decoupled, onehop_ctx, or type_ctx.",
+    )
+    ap.add_argument(
+        "--peprompt_graph_summary_dim",
+        type=int,
+        default=0,
+        help="Graph-level metapath summary dimension; populated from offline cache when --peprompt_fusion_mode is graph_summary or graph_summary_basis.",
+    )
+    ap.add_argument(
+        "--peprompt_basis_count",
+        type=int,
+        default=4,
+        help="Number of global prompt bases used when --peprompt_fusion_mode=graph_summary_basis.",
+    )
+    ap.add_argument(
+        "--peprompt_generator_hidden",
+        type=int,
+        default=128,
+        help="Hidden dimension of the fusion MLP when --peprompt_fusion_mode=hop_decoupled.",
+    )
+    ap.add_argument(
+        "--peprompt_metapath_embed_dim",
+        type=int,
+        default=16,
+        help="Metapath-id embedding dimension used by hop_decoupled weighted-metapath context.",
+    )
+    ap.add_argument(
+        "--peprompt_onehop_center_fusion",
+        action="store_true",
+        help="When --peprompt_fusion_mode=onehop_ctx, also fuse the pooled 1-hop dropped context into the centre node.",
+    )
 
     # HGPrompt 专属设置：仅在 methods 包含 hgprompt 时使用。
     ap.add_argument("--hgprompt_feats_type", type=int, default=2)  # HGPrompt 输入特征类型

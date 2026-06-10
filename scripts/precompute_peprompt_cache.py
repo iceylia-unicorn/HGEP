@@ -119,7 +119,45 @@ def _metapath_cache_key(args) -> str:
     suffix = f"m{int(args.metapath_max_hop)}_k{int(args.metapath_topk)}_{metric}"
     if bool(args.metapath_keep_self):
         suffix += "_self"
+    fusion_mode = str(getattr(args, "peprompt_fusion_mode", "none"))
+    ctx_dim = int(getattr(args, "peprompt_ctx_dim", 0) or 0)
+    if fusion_mode == "hop_decoupled" and ctx_dim > 0:
+        suffix += f"_mpvirt2_d{ctx_dim}"
+    elif fusion_mode == "onehop_ctx" and ctx_dim > 0:
+        suffix += f"_onehop_d{ctx_dim}"
+    elif fusion_mode == "type_ctx" and ctx_dim > 0:
+        suffix += f"_typectx_d{ctx_dim}"
+    elif fusion_mode == "graph_summary":
+        suffix += "_graphsum"
+    elif fusion_mode == "graph_summary_basis":
+        suffix += "_graphsum"
     return f"metapath_topk_{suffix}"
+
+
+def _gather_global_node_feats(graph, ntypes) -> dict[str, np.ndarray] | None:
+    """Extract raw node features as numpy arrays, keyed by node type."""
+    feats = {}
+    for ntype in ntypes:
+        x = graph.nodes[ntype].data.get("x")
+        if x is None:
+            continue
+        if isinstance(x, torch.Tensor):
+            feats[ntype] = x.detach().cpu().numpy().astype(np.float32)
+        else:
+            feats[ntype] = np.asarray(x, dtype=np.float32)
+    return feats if feats else None
+
+
+def _coerce_feature_dim(x: np.ndarray, dim: int) -> np.ndarray:
+    x = np.asarray(x, dtype=np.float32).reshape(-1)
+    dim = int(dim)
+    if x.shape[0] == dim:
+        return x
+    if x.shape[0] > dim:
+        return x[:dim]
+    out = np.zeros((dim,), dtype=np.float32)
+    out[: x.shape[0]] = x
+    return out
 
 
 def extract_metapath_topk_subgraph(
@@ -132,11 +170,44 @@ def extract_metapath_topk_subgraph(
     rank_metric: str,
     keep_self: bool,
     endpoint_popularity: dict,
+    global_feats: dict | None = None,
+    ctx_dim: int = 0,
+    context_mode: str = "none",
 ):
     selected: dict[str, set[int]] = {ntype: set() for ntype in graph.ntypes}
     selected[target_ntype].add(int(target_node_id))
 
-    for metapath in metapaths:
+    dropped_metapath_ctx: list[torch.Tensor] = []
+    dropped_metapath_stats: list[list[float]] = []
+    kept_metapath_assignments: dict[str, set[tuple[int, int]]] = {}
+    onehop_scores_by_type: dict[str, np.ndarray] = {}
+    onehop_keep_by_type: dict[str, set[int]] = {}
+    type_scores_by_type: dict[str, np.ndarray] = {}
+    type_keep_by_type: dict[str, set[int]] = {}
+    summary_keep_mass_by_type: dict[str, float] = {}
+    summary_drop_mass_by_type: dict[str, float] = {}
+    summary_total_mass_by_hop = np.zeros(max((len(m) for m in metapaths), default=1), dtype=np.float32)
+    summary_drop_mass_by_hop = np.zeros(max((len(m) for m in metapaths), default=1), dtype=np.float32)
+    ctx_dim = int(ctx_dim or 0)
+    _compute_metapath_ctx = (
+        context_mode == "hidden_virtual_metapath"
+        and global_feats is not None
+        and ctx_dim > 0
+    )
+    _compute_onehop_ctx = (
+        context_mode == "onehop_type_pooled"
+        and global_feats is not None
+        and ctx_dim > 0
+    )
+    _compute_type_ctx = (
+        context_mode == "type_pooled"
+        and global_feats is not None
+        and ctx_dim > 0
+    )
+    _compute_graph_summary = context_mode == "graph_summary"
+    max_path_len = max((len(metapath) for metapath in metapaths), default=1)
+
+    for metapath_idx, metapath in enumerate(metapaths):
         scores = _metapath_reachable_scores(
             adjs=adjs,
             metapath=metapath,
@@ -147,7 +218,88 @@ def extract_metapath_topk_subgraph(
         ranks = _rank_values(scores, endpoint_popularity.get(metapath), rank_metric)
         keep = _topk_indices(scores, ranks, int(topk))
         if keep.size > 0:
-            selected[metapath[-1][2]].update(int(v) for v in keep.tolist())
+            dst_t = metapath[-1][2]
+            keep_ids = [int(v) for v in keep.tolist()]
+            selected[dst_t].update(keep_ids)
+            assignments = kept_metapath_assignments.setdefault(dst_t, set())
+            for keep_id in keep_ids:
+                assignments.add((keep_id, metapath_idx))
+
+        if _compute_onehop_ctx and len(metapath) == 1:
+            dst_t = metapath[-1][2]
+            scores_np = np.asarray(scores, dtype=np.float32)
+            if dst_t not in onehop_scores_by_type:
+                onehop_scores_by_type[dst_t] = scores_np.copy()
+            else:
+                onehop_scores_by_type[dst_t] += scores_np
+            onehop_keep_by_type.setdefault(dst_t, set()).update(int(v) for v in keep.tolist())
+
+        if _compute_type_ctx:
+            dst_t = metapath[-1][2]
+            scores_np = np.asarray(scores, dtype=np.float32)
+            if dst_t not in type_scores_by_type:
+                type_scores_by_type[dst_t] = scores_np.copy()
+            else:
+                type_scores_by_type[dst_t] += scores_np
+            type_keep_by_type.setdefault(dst_t, set()).update(int(v) for v in keep.tolist())
+
+        if _compute_graph_summary:
+            dst_t = metapath[-1][2]
+            nonzero = np.flatnonzero(scores > 0)
+            dropped = np.setdiff1d(nonzero, keep)
+            if dst_t == target_ntype:
+                dropped = dropped[dropped != int(target_node_id)]
+            keep_score_sum = float(np.asarray(scores[keep], dtype=np.float32).sum()) if keep.size > 0 else 0.0
+            drop_score_sum = float(np.asarray(scores[dropped], dtype=np.float32).sum()) if dropped.size > 0 else 0.0
+            summary_keep_mass_by_type[dst_t] = summary_keep_mass_by_type.get(dst_t, 0.0) + keep_score_sum
+            summary_drop_mass_by_type[dst_t] = summary_drop_mass_by_type.get(dst_t, 0.0) + drop_score_sum
+            hop_idx = max(int(len(metapath)) - 1, 0)
+            summary_total_mass_by_hop[hop_idx] += keep_score_sum + drop_score_sum
+            summary_drop_mass_by_hop[hop_idx] += drop_score_sum
+
+        if not _compute_metapath_ctx:
+            continue
+
+        dst_t = metapath[-1][2]
+        zero_ctx = torch.zeros(ctx_dim, dtype=torch.float32)
+        zero_stats = [0.0, 0.0, 0.0, float(len(metapath)) / float(max_path_len)]
+        if dst_t not in global_feats:
+            dropped_metapath_ctx.append(zero_ctx)
+            dropped_metapath_stats.append(zero_stats)
+            continue
+
+        nonzero = np.flatnonzero(scores > 0)
+        dropped = np.setdiff1d(nonzero, keep)
+        # Exclude the centre node itself from "dropped" for same-type metapaths
+        if dst_t == target_ntype:
+            dropped = dropped[dropped != int(target_node_id)]
+
+        X_dst = global_feats[dst_t]  # ndarray [N_dst, D]
+        if dropped.size > 0:
+            weights = np.asarray(scores[dropped], dtype=np.float32)
+            weight_sum = float(weights.sum())
+            if weight_sum > 0.0:
+                ctx_np = (np.asarray(X_dst[dropped], dtype=np.float32) * weights[:, None]).sum(axis=0)
+                ctx_np = ctx_np / weight_sum
+                ctx = torch.from_numpy(_coerce_feature_dim(ctx_np, ctx_dim))
+            else:
+                ctx = zero_ctx
+        else:
+            weight_sum = 0.0
+            ctx = zero_ctx
+
+        keep_score_sum = float(np.asarray(scores[keep], dtype=np.float32).sum()) if keep.size > 0 else 0.0
+        total_score_sum = keep_score_sum + weight_sum
+        drop_ratio = weight_sum / total_score_sum if total_score_sum > 0.0 else 0.0
+        dropped_metapath_ctx.append(ctx)
+        dropped_metapath_stats.append(
+            [
+                float(np.log1p(dropped.size)),
+                float(np.log1p(weight_sum)),
+                float(drop_ratio),
+                float(len(metapath)) / float(max_path_len),
+            ]
+        )
 
     node_dict = {
         ntype: torch.tensor(sorted(node_ids), dtype=torch.int64)
@@ -157,7 +309,230 @@ def extract_metapath_topk_subgraph(
     seed_nodes = _seed_nodes_dict(target_ntype, target_node_id)
     subgraph = dgl.node_subgraph(graph, node_dict)
     inverse_indices = _find_seed_inverse_indices(subgraph, seed_nodes)
+
+    if dropped_metapath_ctx:
+        payload = {
+            "ctx": torch.stack(dropped_metapath_ctx, dim=0),
+            "stats": torch.tensor(dropped_metapath_stats, dtype=torch.float32),
+        }
+        if kept_metapath_assignments:
+            payload["kept_assignments"] = {
+                ntype: {
+                    "node_ids": torch.tensor([node_id for node_id, _ in pairs], dtype=torch.int64),
+                    "metapath_ids": torch.tensor([mp_idx for _, mp_idx in pairs], dtype=torch.int64),
+                }
+                for ntype, pairs in (
+                    (ntype, sorted(assignments))
+                    for ntype, assignments in kept_metapath_assignments.items()
+                    if assignments
+                )
+            }
+        inverse_indices["_dropped_metapath_ctx"] = payload
+
+    if _compute_onehop_ctx:
+        zero_stats = torch.tensor([0.0, 0.0, 0.0, 1.0], dtype=torch.float32)
+        onehop_payload = {}
+        for dst_t, scores in onehop_scores_by_type.items():
+            if dst_t not in global_feats:
+                onehop_payload[dst_t] = {
+                    "ctx": torch.zeros(ctx_dim, dtype=torch.float32),
+                    "stats": zero_stats.clone(),
+                }
+                continue
+
+            keep_ids = np.array(sorted(onehop_keep_by_type.get(dst_t, set())), dtype=np.int64)
+            nonzero = np.flatnonzero(scores > 0)
+            dropped = np.setdiff1d(nonzero, keep_ids)
+            if dst_t == target_ntype:
+                dropped = dropped[dropped != int(target_node_id)]
+
+            X_dst = global_feats[dst_t]
+            zero_ctx = torch.zeros(ctx_dim, dtype=torch.float32)
+            if dropped.size > 0:
+                weights = np.asarray(scores[dropped], dtype=np.float32)
+                weight_sum = float(weights.sum())
+                if weight_sum > 0.0:
+                    ctx_np = (np.asarray(X_dst[dropped], dtype=np.float32) * weights[:, None]).sum(axis=0)
+                    ctx_np = ctx_np / weight_sum
+                    ctx = torch.from_numpy(_coerce_feature_dim(ctx_np, ctx_dim))
+                else:
+                    ctx = zero_ctx
+            else:
+                weight_sum = 0.0
+                ctx = zero_ctx
+
+            keep_score_sum = float(np.asarray(scores[keep_ids], dtype=np.float32).sum()) if keep_ids.size > 0 else 0.0
+            total_score_sum = keep_score_sum + weight_sum
+            drop_ratio = weight_sum / total_score_sum if total_score_sum > 0.0 else 0.0
+            onehop_payload[dst_t] = {
+                "ctx": ctx,
+                "stats": torch.tensor(
+                    [
+                        float(np.log1p(dropped.size)),
+                        float(np.log1p(weight_sum)),
+                        float(drop_ratio),
+                        1.0,
+                    ],
+                    dtype=torch.float32,
+                ),
+            }
+        if onehop_payload:
+            inverse_indices["_dropped_onehop_ctx"] = onehop_payload
+
+    if _compute_type_ctx:
+        type_payload = {}
+        for dst_t, scores in type_scores_by_type.items():
+            if dst_t not in global_feats:
+                type_payload[dst_t] = torch.zeros(ctx_dim, dtype=torch.float32)
+                continue
+
+            keep_ids = np.array(sorted(type_keep_by_type.get(dst_t, set())), dtype=np.int64)
+            nonzero = np.flatnonzero(scores > 0)
+            dropped = np.setdiff1d(nonzero, keep_ids)
+            if dst_t == target_ntype:
+                dropped = dropped[dropped != int(target_node_id)]
+
+            X_dst = global_feats[dst_t]
+            zero_ctx = torch.zeros(ctx_dim, dtype=torch.float32)
+            if dropped.size > 0:
+                weights = np.asarray(scores[dropped], dtype=np.float32)
+                weight_sum = float(weights.sum())
+                if weight_sum > 0.0:
+                    ctx_np = (np.asarray(X_dst[dropped], dtype=np.float32) * weights[:, None]).sum(axis=0)
+                    ctx_np = ctx_np / weight_sum
+                    ctx = torch.from_numpy(_coerce_feature_dim(ctx_np, ctx_dim))
+                else:
+                    ctx = zero_ctx
+            else:
+                ctx = zero_ctx
+            type_payload[dst_t] = ctx
+
+        if type_payload:
+            inverse_indices["_dropped_ctx"] = type_payload
+
+    if _compute_graph_summary:
+        summary_values: list[float] = []
+        for dst_t in graph.ntypes:
+            keep_mass = float(summary_keep_mass_by_type.get(dst_t, 0.0))
+            drop_mass = float(summary_drop_mass_by_type.get(dst_t, 0.0))
+            total_mass = keep_mass + drop_mass
+            drop_ratio = drop_mass / total_mass if total_mass > 0.0 else 0.0
+            summary_values.extend([
+                float(np.log1p(keep_mass)),
+                float(np.log1p(drop_mass)),
+                float(drop_ratio),
+            ])
+        for hop_idx in range(int(max_path_len)):
+            total_mass = float(summary_total_mass_by_hop[hop_idx])
+            drop_mass = float(summary_drop_mass_by_hop[hop_idx])
+            drop_ratio = drop_mass / total_mass if total_mass > 0.0 else 0.0
+            summary_values.extend([
+                float(np.log1p(total_mass)),
+                float(drop_ratio),
+            ])
+        inverse_indices["_graph_metapath_summary"] = torch.tensor(summary_values, dtype=torch.float32)
+
     return subgraph, inverse_indices
+
+
+def _restore_dropped_ctx_in_sample(
+    sample,
+    target_ntype: str,
+    dropped_ctx_by_target: dict[int, dict] | None = None,
+    dropped_onehop_ctx_by_target: dict[int, dict] | None = None,
+):
+    """Reconstruct padded node-feature context from its compact serialised form."""
+    subgraph, inverse_indices, _label = sample
+    dropped_metapath_ctx = inverse_indices.pop("_dropped_metapath_ctx", None)
+    dropped_onehop_ctx = inverse_indices.pop("_dropped_onehop_ctx", None)
+    graph_metapath_summary = inverse_indices.pop("_graph_metapath_summary", None)
+    centre_local = int(inverse_indices[target_ntype][0].item())
+    centre_global = int(subgraph.nodes[target_ntype].data[dgl.NID][centre_local].item())
+    if dropped_metapath_ctx is None and dropped_ctx_by_target:
+        dropped_metapath_ctx = dropped_ctx_by_target.get(centre_global)
+    if dropped_onehop_ctx is None and dropped_onehop_ctx_by_target:
+        dropped_onehop_ctx = dropped_onehop_ctx_by_target.get(centre_global)
+    if dropped_metapath_ctx:
+        ctx = dropped_metapath_ctx["ctx"].float()
+        stats = dropped_metapath_ctx["stats"].float()
+        num_metapaths = int(ctx.shape[0])
+        target_ctx_mat = torch.zeros(
+            subgraph.num_nodes(target_ntype),
+            int(ctx.shape[0]),
+            int(ctx.shape[1]),
+            dtype=torch.float32,
+        )
+        target_stats_mat = torch.zeros(
+            subgraph.num_nodes(target_ntype),
+            int(stats.shape[0]),
+            int(stats.shape[1]),
+            dtype=torch.float32,
+        )
+        target_ctx_mat[centre_local] = ctx
+        target_stats_mat[centre_local] = stats
+        subgraph.nodes[target_ntype].data["dropped_metapath_ctx"] = target_ctx_mat
+        subgraph.nodes[target_ntype].data["dropped_metapath_stats"] = target_stats_mat
+
+        keep_masks: dict[str, torch.Tensor] = {
+            ntype: torch.zeros(subgraph.num_nodes(ntype), num_metapaths, dtype=torch.bool)
+            for ntype in subgraph.ntypes
+        }
+        keep_masks[target_ntype][centre_local] = True
+        kept_assignments = dropped_metapath_ctx.get("kept_assignments") or {}
+        for ntype, assignment_payload in kept_assignments.items():
+            node_ids = assignment_payload.get("node_ids")
+            metapath_ids = assignment_payload.get("metapath_ids")
+            if node_ids is None or metapath_ids is None:
+                continue
+
+            subgraph_nids = subgraph.nodes[ntype].data[dgl.NID].detach().cpu().long().tolist()
+            local_by_global = {int(global_id): idx for idx, global_id in enumerate(subgraph_nids)}
+            for global_id, metapath_idx in zip(
+                node_ids.detach().cpu().long().tolist(),
+                metapath_ids.detach().cpu().long().tolist(),
+            ):
+                local_idx = local_by_global.get(int(global_id))
+                if local_idx is None:
+                    continue
+                keep_masks[ntype][local_idx, metapath_idx] = True
+
+        for ntype, keep_mask in keep_masks.items():
+            if keep_mask.any():
+                subgraph.nodes[ntype].data["dropped_metapath_keep_mask"] = keep_mask
+    if dropped_onehop_ctx:
+        for dst_t, payload in dropped_onehop_ctx.items():
+            ctx_vec = payload["ctx"].float()
+            stats_vec = payload["stats"].float()
+            ctx_dim = int(ctx_vec.shape[0])
+            ctx_key = f"dropped_onehop_ctx_{dst_t}"
+            stats_key = f"dropped_onehop_stats_{dst_t}"
+            ctx_mat = torch.zeros(subgraph.num_nodes(target_ntype), ctx_dim, dtype=torch.float32)
+            stats_mat = torch.zeros(subgraph.num_nodes(target_ntype), int(stats_vec.shape[0]), dtype=torch.float32)
+            ctx_mat[centre_local] = ctx_vec
+            stats_mat[centre_local] = stats_vec
+            subgraph.nodes[target_ntype].data[ctx_key] = ctx_mat
+            subgraph.nodes[target_ntype].data[stats_key] = stats_mat
+    if graph_metapath_summary is not None:
+        summary_vec = graph_metapath_summary.float()
+        summary_mat = torch.zeros(
+            subgraph.num_nodes(target_ntype),
+            int(summary_vec.shape[0]),
+            dtype=torch.float32,
+        )
+        summary_mat[centre_local] = summary_vec
+        subgraph.nodes[target_ntype].data["graph_metapath_summary"] = summary_mat
+
+    # Backward compatibility for older caches that stored one mean vector per
+    # destination node type.
+    dropped_ctx = inverse_indices.pop("_dropped_ctx", None)
+    if not dropped_ctx:
+        return
+    for dst_t, ctx_vec in dropped_ctx.items():
+        ctx_dim = int(ctx_vec.shape[0])
+        key = f"dropped_ctx_{dst_t}"
+        mat = torch.zeros(subgraph.num_nodes(target_ntype), ctx_dim, dtype=torch.float32)
+        mat[centre_local] = ctx_vec
+        subgraph.nodes[target_ntype].data[key] = mat
 
 
 def _strict_kshot_rest_split(
@@ -293,6 +668,8 @@ def _make_subgraph_extractor(graph, targetnode: str, args):
         topk = int(args.metapath_topk)
         rank_metric = str(args.metapath_rank_metric)
         keep_self = bool(args.metapath_keep_self)
+        ctx_dim = int(getattr(args, "peprompt_ctx_dim", 0) or 0)
+        fusion_mode = str(getattr(args, "peprompt_fusion_mode", "none"))
         adjs = _build_csr_adjs(graph)
         metapaths = _generate_metapaths(graph, targetnode, max_hop)
         endpoint_popularity = {}
@@ -303,6 +680,22 @@ def _make_subgraph_extractor(graph, targetnode: str, args):
                 metapath: _endpoint_popularity(adjs, metapath)
                 for metapath in metapaths
             }
+
+        # Pre-extract global node features ONLY when hop_decoupled mode is
+        # enabled — otherwise we skip the per-subgraph ctx computation entirely.
+        _global_feats = None
+        context_mode = "none"
+        if fusion_mode == "hop_decoupled" and ctx_dim > 0:
+            context_mode = "hidden_virtual_metapath"
+            _global_feats = _gather_global_node_feats(graph, graph.ntypes)
+        elif fusion_mode == "onehop_ctx" and ctx_dim > 0:
+            context_mode = "onehop_type_pooled"
+            _global_feats = _gather_global_node_feats(graph, graph.ntypes)
+        elif fusion_mode == "type_ctx" and ctx_dim > 0:
+            context_mode = "type_pooled"
+            _global_feats = _gather_global_node_feats(graph, graph.ntypes)
+        elif fusion_mode in {"graph_summary", "graph_summary_basis"}:
+            context_mode = "graph_summary"
 
         def _extract(node_id: int):
             return extract_metapath_topk_subgraph(
@@ -315,6 +708,9 @@ def _make_subgraph_extractor(graph, targetnode: str, args):
                 rank_metric=rank_metric,
                 keep_self=keep_self,
                 endpoint_popularity=endpoint_popularity,
+                global_feats=_global_feats,
+                ctx_dim=ctx_dim,
+                context_mode=context_mode,
             )
 
         return _extract, {
@@ -324,6 +720,9 @@ def _make_subgraph_extractor(graph, targetnode: str, args):
             "rank_metric": rank_metric,
             "keep_self": keep_self,
             "num_metapaths": len(metapaths),
+            "context_mode": context_mode,
+            "ctx_dim": ctx_dim,
+            "graph_summary_dim": (3 * len(graph.ntypes) + 2 * int(max_hop)) if context_mode == "graph_summary" else 0,
         }
 
     raise ValueError(f"Unsupported subgraph_type: {subgraph_type}")
@@ -337,13 +736,19 @@ def _build_single_sample(
     feature_name: str,
 ):
     subgraph, inverse_indices = extract_subgraph(int(node_id))
+    dropped_ctx_payload = inverse_indices.pop("_dropped_metapath_ctx", None)
+    dropped_onehop_ctx_payload = inverse_indices.pop("_dropped_onehop_ctx", None)
     _attach_peprompt_edge_features_from_global_pe(
         subgraph=subgraph,
         spectral_embeddings=spectral_payload["spectral_embeddings"],
         node_offsets=spectral_payload["node_offsets"],
         feature_name=feature_name,
     )
-    return (subgraph, inverse_indices, torch.tensor(int(label)))
+    return (
+        subgraph,
+        inverse_indices,
+        torch.tensor(int(label)),
+    ), dropped_ctx_payload, dropped_onehop_ctx_payload
 
 
 def _build_sample_list(
@@ -353,16 +758,23 @@ def _build_sample_list(
     labels: np.ndarray,
     feature_name: str,
 ):
-    return [
-        _build_single_sample(
+    samples = []
+    dropped_ctx_by_target: dict[int, dict] = {}
+    dropped_onehop_ctx_by_target: dict[int, dict] = {}
+    for node_id, label in zip(node_ids, labels):
+        sample, dropped_ctx_payload, dropped_onehop_ctx_payload = _build_single_sample(
             extract_subgraph=extract_subgraph,
             spectral_payload=spectral_payload,
             node_id=int(node_id),
             label=int(label),
             feature_name=feature_name,
         )
-        for node_id, label in zip(node_ids, labels)
-    ]
+        samples.append(sample)
+        if dropped_ctx_payload is not None:
+            dropped_ctx_by_target[int(node_id)] = dropped_ctx_payload
+        if dropped_onehop_ctx_payload is not None:
+            dropped_onehop_ctx_by_target[int(node_id)] = dropped_onehop_ctx_payload
+    return samples, dropped_ctx_by_target, dropped_onehop_ctx_by_target
 
 
 def _build_job_args(cli_args, dataset: str) -> SimpleNamespace:
@@ -390,27 +802,35 @@ def _precompute_dataset(graph, targetnode: str, spectral_payload: dict, args):
                 max_pool_size=int(args.max_pool_size),
             )
 
-            train_list = _build_sample_list(
+            train_list, train_dropped_ctx, train_onehop_ctx = _build_sample_list(
                 extract_subgraph=extract_subgraph,
                 spectral_payload=spectral_payload,
                 node_ids=split["train_ids"],
                 labels=split["train_labels"],
                 feature_name=args.peprompt_edge_feature_name,
             )
-            val_list = _build_sample_list(
+            val_list, val_dropped_ctx, val_onehop_ctx = _build_sample_list(
                 extract_subgraph=extract_subgraph,
                 spectral_payload=spectral_payload,
                 node_ids=split["val_ids"],
                 labels=split["val_labels"],
                 feature_name=args.peprompt_edge_feature_name,
             )
-            test_list = _build_sample_list(
+            test_list, test_dropped_ctx, test_onehop_ctx = _build_sample_list(
                 extract_subgraph=extract_subgraph,
                 spectral_payload=spectral_payload,
                 node_ids=split["test_ids"],
                 labels=split["test_labels"],
                 feature_name=args.peprompt_edge_feature_name,
             )
+            dropped_ctx_by_target = {}
+            dropped_ctx_by_target.update(train_dropped_ctx)
+            dropped_ctx_by_target.update(val_dropped_ctx)
+            dropped_ctx_by_target.update(test_dropped_ctx)
+            dropped_onehop_ctx_by_target = {}
+            dropped_onehop_ctx_by_target.update(train_onehop_ctx)
+            dropped_onehop_ctx_by_target.update(val_onehop_ctx)
+            dropped_onehop_ctx_by_target.update(test_onehop_ctx)
 
             cache_path = build_peprompt_offline_cache_path(
                 cache_dir=args.peprompt_offline_cache_dir,
@@ -438,6 +858,11 @@ def _precompute_dataset(graph, targetnode: str, spectral_payload: dict, args):
                 "metapath_rank_metric": subgraph_config.get("rank_metric"),
                 "metapath_keep_self": subgraph_config.get("keep_self"),
                 "metapath_count": subgraph_config.get("num_metapaths"),
+                "metapath_context_mode": subgraph_config.get("context_mode"),
+                "peprompt_ctx_dim": subgraph_config.get("ctx_dim"),
+                "peprompt_graph_summary_dim": subgraph_config.get("graph_summary_dim", 0),
+                "dropped_metapath_context_by_target": dropped_ctx_by_target,
+                "dropped_onehop_context_by_target": dropped_onehop_ctx_by_target,
                 "max_pool_size": int(args.max_pool_size),
                 "peprompt_edge_feature_name": args.peprompt_edge_feature_name,
                 "peprompt_edge_feature_names": list(PEPROMPT_EDGE_FEATURES),
@@ -476,7 +901,7 @@ def build_parser():
     ap.add_argument("--seeds", nargs="+", type=int, default=[0, 1, 2, 3, 4])
     ap.add_argument("--feats_type", type=int, default=0)
     ap.add_argument("--max_pool_size", type=int, default=400)
-    ap.add_argument("--subgraph_type", type=str, default="khop", choices=["khop", "fanout", "metapath_topk"])
+    ap.add_argument("--subgraph_type", type=str, default="metapath_topk", choices=["khop", "fanout", "metapath_topk"])
     ap.add_argument("--khop_num", type=int, default=None)
     ap.add_argument("--fanouts", nargs="+", type=int, default=[15, 10])
     ap.add_argument("--metapath_max_hop", type=int, default=3)
@@ -496,6 +921,8 @@ def build_parser():
     ap.add_argument("--peprompt_spectral_dim", type=int, default=16)
     ap.add_argument("--peprompt_spectral_max_nodes", type=int, default=50000)
     ap.add_argument("--peprompt_edge_feature_name", type=str, default=PEPROMPT_EDGE_FEATURE_NAME)
+    ap.add_argument("--peprompt_fusion_mode", type=str, default="none", choices=["none", "hop_decoupled", "onehop_ctx", "type_ctx", "graph_summary", "graph_summary_basis"])
+    ap.add_argument("--peprompt_ctx_dim", type=int, default=0)
     return ap
 
 

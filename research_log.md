@@ -443,3 +443,168 @@ python scripts/peprompt_benchmark.py \
 #### 元路径提示
 由于是一种截断的提示，那么如果我将截断的信息融入到提示中，那么会怎么样呢
 这种融合方式
+
+我用了第一种融合方式，是将不同节点对，这种方式有损失
+
+
+第二种方式，元路径可达分数加权融合，这种方式也能达到88.3 ，但不使用情况下结果应该是88.6，然后我改为使用loss早停能达到89
+{
+  "pooled_runs": {
+    "peprompt": {
+      "count": 5,
+      "micro_mean": 0.8912280678749085,
+      "micro_std": 0.00929990487588275,
+      "macro_mean": 0.8902406096458435,
+      "macro_std": 0.009421494158723006
+    }
+  },
+  "seed_mean_then_std": {
+    "peprompt": {
+      "count": 5,
+      "micro_mean": 0.8912280678749085,
+      "micro_std": 0.00929990487588275,
+      "macro_mean": 0.8902406096458435,
+      "macro_std": 0.009421494158723006
+    }
+  }
+}
+
+  --lr 5e-3 \
+  --prompt_lr 1e-3 \
+  "pooled_runs": {
+    "peprompt": {
+      "count": 5,
+      "micro_mean": 0.8915789365768433,
+      "micro_std": 0.009024427702802477,
+      "macro_mean": 0.8912229776382447,
+      "macro_std": 0.00877641540383437
+    }
+  },
+  "seed_mean_then_std": {
+    "peprompt": {
+      "count": 5,
+      "micro_mean": 0.8915789365768433,
+      "micro_std": 0.009024427702802477,
+      "macro_mean": 0.8912229776382447,
+      "macro_std": 0.00877641540383437
+    }
+  }
+
+  --lr 5e-3 \
+  --prompt_lr 5e-4 \
+
+  {
+  "pooled_runs": {
+    "peprompt": {
+      "count": 5,
+      "micro_mean": 0.8929824590682983,
+      "micro_std": 0.007169419664572823,
+      "macro_mean": 0.8928701519966126,
+      "macro_std": 0.007008618695628356
+    }
+  },
+  "seed_mean_then_std": {
+    "peprompt": {
+      "count": 5,
+      "micro_mean": 0.8929824590682983,
+      "micro_std": 0.007169419664572823,
+      "macro_mean": 0.8928701519966126,
+      "macro_std": 0.007008618695628356
+    }
+  }
+}
+
+
+### dropped-context
+#### 1. top-k
+对每条metapath 都会算从目标节点出发的reachable scores，然后取top-k 保留终点节点
+
+#### 2. 找出被丢弃的metapath终点
+nonzero = scores > 0
+dropped = nonzero - keep
+
+但是实际上如何将metapath的dropped context信息保存，并且和下游的边进行较好的融合是个问题
+
+没有一个高效的方案。
+
+有多种融合方式
+
+1. 只用一阶的ctx，但是这种方式目前存在很多的问题
+2. 边类型的ctx 融合edgeprompt 生成 0.5的提升
+3. 虚拟节点的方式，提升也差不多0.5提升，但无论是离线还是下游时间很长
+4. metapath的方式，爆显存，每个sample要存
+
+
+# 26.6.10
+自从发现dropped ctx在效率上不高外，我开始着手处理prompt本身的处理
+
+如果将ctx作为一个子图级别的提示，作为一个子图级别的统计量，而不是一个图级别的统计量，那么是否会有效果呢
+
+z_graph = summary(subgraph metapath structure)
+b_r = Linear_r(z_graph)
+p_e = MLP([h_src, h_dst, pe_e]) + b_r
+
+当前的计算公式
+
+这个子图的结构包含：
+各 hop 的 keep mass
+各终点类型的 reachable mass
+各 metapath 长度的比例
+命中节点类型分布 等
+
+这个方式的变化还行：{
+  "pooled_runs": {
+    "peprompt": {
+      "count": 5,
+      "micro_mean": 0.8929824590682983,
+      "micro_std": 0.013544030239639418,
+      "macro_mean": 0.8928787112236023,
+      "macro_std": 0.013357733794538291
+    }
+  },
+  "seed_mean_then_std": {
+    "peprompt": {
+      "count": 5,
+      "micro_mean": 0.8929824590682983,
+      "micro_std": 0.013544030239639418,
+      "macro_mean": 0.8928787112236023,
+      "macro_std": 0.013357733794538291
+    }
+  }
+}
+但是依旧是很小的收益
+
+
+#### 基向量
+如果使用基向量，而
+alpha_e = softmax(Selector([h_src, h_dst, pe_e, z_graph]))
+p_e = alpha_e @ B
+
+这种方式并不可行，实验结果证明效果并不好，效果并未有多大的变化，但训练的epoch 从60 增到100，但稳定性有所提升
+
+之前的PE prompt并未使用到prompt的信息
+{
+  "pooled_runs": {
+    "peprompt": {
+      "count": 5,
+      "micro_mean": 0.8903508901596069,
+      "micro_std": 0.00835868257925349,
+      "macro_mean": 0.8903262257575989,
+      "macro_std": 0.0078447418263402
+    }
+  },
+  "seed_mean_then_std": {
+    "peprompt": {
+      "count": 5,
+      "micro_mean": 0.8903508901596069,
+      "micro_std": 0.00835868257925349,
+      "macro_mean": 0.8903262257575989,
+      "macro_std": 0.0078447418263402
+    }
+  }
+}
+
+#### metapath生成prompt
+mp_code_e = Σ w_m(e) * emb(m)
+alpha_e = softmax(MLP([pe_e, etype_emb, mp_code_e]))
+p_e = alpha_e @ B
