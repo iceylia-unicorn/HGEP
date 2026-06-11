@@ -267,7 +267,10 @@ def _load_raw_heterograph(root: str, dataset: str, feats_type: int):
     for node_type, node_store in data.node_items():
         for attr, value in list(node_store.items()):
             if attr == "num_nodes":
-                data[node_type]["x"] = create_matrix(value, 0.01)
+                if dataset == "Freebase" and feats_type in (1, 5):
+                    data[node_type]["x"] = torch.zeros((int(value), 10))
+                else:
+                    data[node_type]["x"] = create_matrix(value, 0.01)
                 del data[node_type][attr]
 
     if dataset == "IMDB":

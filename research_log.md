@@ -608,3 +608,36 @@ p_e = alpha_e @ B
 mp_code_e = Σ w_m(e) * emb(m)
 alpha_e = softmax(MLP([pe_e, etype_emb, mp_code_e]))
 p_e = alpha_e @ B
+
+# 26.6.11
+
+#### 接下来的问题
+
+1. 子图的选取方式的进一步优化
+
+
+#### Freebase
+Freebase在进行预训练的时候会爆CPU内存
+
+原本是
+```python
+if attr == "num_nodes":
+    data[node_type]["x"] = create_matrix(value, 0.01)
+```
+其中`value`是`node_type`对应的节点数，也就是说当节点数很多的时候，这一node_type会创建一个极大的dense(密集)节点特征矩阵，这是为了某些无属性节点类型设计的
+
+但由于原本就会压缩到10维，因此也没有必要
+```python
+if dataname == "Freebase" and feats_type in (1, 5):
+    data[node_type]["x"] = torch.zeros((int(value), 10))
+else:
+    data[node_type]["x"] = create_matrix(value, 0.01)
+```
+其中涉及到了feats_type这一超参
+
+- 0/-1: 保留原始特征，无属性则补充为NxN的dense 矩阵
+- 1 只保留第零个节点特征，其余改为Nx10的零特征
+- 2 保留第0个，其余改为identity-like
+- 3 所有改为identity-like
+- 4 save 2，其余改为identity-like
+- 5 save 2, 其余改为Nx10 零特征

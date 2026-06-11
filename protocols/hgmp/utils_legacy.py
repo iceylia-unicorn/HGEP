@@ -139,8 +139,14 @@ def _prepare_pretrain_data_and_dims(feats_type=3, dataname='IMDB', root_dir=None
         for attr, value in node_store.items():
             #没有节点属性的节点类型赋值对角矩阵
             if attr=='num_nodes':
-                #data[node_type]['x']=torch.eye(value)
-                data[node_type]['x'] = create_matrix(value, 0.01)
+                # Freebase has large featureless node types. For reduced
+                # feature protocols, avoid materialising dense N x N features
+                # that are immediately compressed to 10 dims later.
+                if dataname == "Freebase" and feats_type in (1, 5):
+                    data[node_type]['x'] = torch.zeros((int(value), 10))
+                else:
+                    #data[node_type]['x']=torch.eye(value)
+                    data[node_type]['x'] = create_matrix(value, 0.01)
                 del data[node_type][attr]
 
     features=data.x_dict
@@ -1142,5 +1148,4 @@ def create_matrix(size, off_diag_value=0.1):
         matrix[i, i] = 1.0
 
     return matrix
-
 

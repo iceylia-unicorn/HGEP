@@ -328,3 +328,7 @@ nohup python -u scripts/peprompt_benchmark.py \
 # 有关metapath 子图采样
 nohup python -u scripts/peprompt_benchmark.py   --dataset ACM   --methods peprompt   --shot 10   --seeds 0 1 2 3 4   --repeats 1   --device cuda:0   --subgraph_type metapath_topk   --metapath_max_hop 3   --metapath_topk 5   --metapath_rank_metric count   --peprompt_fusion_mode onehop_ctx   --peprompt_ctx_dim 1902   --peprompt_onehop_center_fusion   --peprompt_early_stop_mode loss   --lr 5e-3   --prompt_lr 5e-4   --peprompt_ckpt artifacts/checkpoints/hgmp/pretrain/ACM.GraphCL.GCN.hid512.np500.seed0.pth > onehop_center_fusion.out 2>&1
 
+
+
+配置hop topk: ACM 3,3  
+
