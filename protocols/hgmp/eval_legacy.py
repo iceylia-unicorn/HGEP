@@ -140,7 +140,66 @@ def _to_class_ids(x: torch.Tensor) -> torch.Tensor:
     raise ValueError(f"Unsupported tensor shape for class ids: {tuple(x.shape)}")
 
 
+def _labels_look_multilabel(labels: torch.Tensor) -> bool:
+    return isinstance(labels, torch.Tensor) and labels.ndim == 2 and labels.size(-1) > 1
+
+
+def _multihot_f1_micro_macro(pred, y, num_classes: int):
+    """Match HGMP's IMDB protocol: argmax prediction as one-hot vs multi-hot labels."""
+    pred_ids = _to_class_ids(pred)
+    pred_hot = torch.nn.functional.one_hot(
+        pred_ids.clamp(min=0, max=num_classes - 1),
+        num_classes=num_classes,
+    )
+    valid = pred_ids >= 0
+    pred_hot = pred_hot.to(torch.float32)
+    pred_hot[~valid] = 0.0
+
+    target = y.detach().cpu().to(torch.float32)
+    if target.ndim != 2 or target.size(1) != num_classes:
+        raise ValueError(f"Expected multi-hot labels with shape [N, {num_classes}], got {tuple(target.shape)}")
+    target = (target > 0).to(torch.float32)
+
+    try:
+        import torchmetrics
+
+        micro_metric = torchmetrics.classification.F1Score(
+            task="multiclass",
+            num_classes=num_classes,
+            average="micro",
+        )
+        macro_metric = torchmetrics.classification.F1Score(
+            task="multiclass",
+            num_classes=num_classes,
+            average="macro",
+        )
+        micro = float(micro_metric(pred_hot, target).item())
+        macro = float(macro_metric(pred_hot, target).item())
+        return micro, macro
+    except Exception:
+        pass
+
+    tp = (pred_hot * target).sum(dim=0)
+    fp = (pred_hot * (1.0 - target)).sum(dim=0)
+    fn = ((1.0 - pred_hot) * target).sum(dim=0)
+    eps = 1e-12
+
+    f1_c = (2 * tp) / (2 * tp + fp + fn + eps)
+    support = target.sum(dim=0)
+    mask = support > 0
+    macro = float(f1_c[mask].mean().item()) if mask.any() else 0.0
+
+    TP = tp.sum()
+    FP = fp.sum()
+    FN = fn.sum()
+    micro = float((2 * TP / (2 * TP + FP + FN + eps)).item())
+    return micro, macro
+
+
 def _f1_micro_macro(pred, y, num_classes: int):
+    if _labels_look_multilabel(y):
+        return _multihot_f1_micro_macro(pred, y, num_classes)
+
     pred = _to_class_ids(pred)
     y = _to_class_ids(y)
 

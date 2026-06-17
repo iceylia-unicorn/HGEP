@@ -33,12 +33,14 @@ class PEPromptRelationConfig:
     edge_feature_name: str = "peprompt_edge_feat"  # 图中边特征保存时使用的字段名
     edge_prompt_hidden: int = 128  # 将边 PE 映射到提示向量时，中间 MLP 的隐藏层维度
     # ---- hop-decomposed compensation (Module 1→2 bridge) ----
-    fusion_mode: str = "none"  # "none" = PE-only; "hop_decoupled" = PE + dropped ctx + h_src + h_dst
+    fusion_mode: str = "none"  # "none" = PE-only; "edge_type" = PE + canonical edge type embedding
     ctx_dim: int = 0           # 丢弃邻居上下文的特征维度，必须 == 全局节点特征维度
     generator_hidden: int = 128  # hop_decoupled 模式下融合 MLP 的隐藏层维度
     metapath_count: int = 0
     metapath_embed_dim: int = 16
     graph_summary_dim: int = 0
+    metapath_pos_dim: int = 0
+    metapath_pos_feature_name: str = "peprompt_metapath_pos_feat"
     basis_count: int = 4
     onehop_center_fusion: bool = False
 
@@ -69,6 +71,8 @@ class PEPromptRelation(nn.Module):
         metapath_count: int = 0,
         metapath_embed_dim: int = 16,
         graph_summary_dim: int = 0,
+        metapath_pos_dim: int = 0,
+        metapath_pos_feature_name: str = "peprompt_metapath_pos_feat",
         basis_count: int = 4,
         onehop_center_fusion: bool = False,
     ):
@@ -84,11 +88,13 @@ class PEPromptRelation(nn.Module):
             edge_feature_dim: 输入边特征维度，即 Laplacian PE 差值的维度。
             edge_feature_name: 从 DGL 边数据中读取 PE 边特征时使用的键名。
             edge_prompt_hidden: 边提示 MLP 的隐藏层维度。
-            fusion_mode: "none" = PE-only; "hop_decoupled" = PE + dropped ctx + h_src + h_dst;
+            fusion_mode: "none" = PE-only; "edge_type" = PE + canonical edge type embedding;
+                "hop_decoupled" = PE + dropped ctx + h_src + h_dst;
                 "onehop_ctx" = 1-hop type-pooled dropped ctx + h_src + h_dst;
                 "type_ctx" = one pooled dropped ctx per destination type per subgraph;
                 "graph_summary" = one shared graph-level metapath summary for all edges;
                 "graph_summary_basis" = use graph summary as selector over prompt bases.
+                "metapath_pos" = PE + per-edge metapath-position support.
             ctx_dim: 丢弃邻居上下文的特征维度，仅 hop_decoupled 模式下使用。
             generator_hidden: hop_decoupled 模式下融合 MLP 的隐藏层维度。
         """
@@ -97,7 +103,7 @@ class PEPromptRelation(nn.Module):
             raise ValueError(f"Unsupported mode: {mode}")
         if aggr not in {"mean", "sum"}:
             raise ValueError(f"Unsupported aggr: {aggr}")
-        if fusion_mode not in {"none", "hop_decoupled", "onehop_ctx", "type_ctx", "graph_summary", "graph_summary_basis"}:
+        if fusion_mode not in {"none", "edge_type", "metapath_pos", "hop_decoupled", "onehop_ctx", "type_ctx", "graph_summary", "graph_summary_basis"}:
             raise ValueError(f"Unsupported fusion_mode: {fusion_mode}")
         if int(edge_feature_dim or 0) <= 0:
             raise ValueError("PEPromptRelation requires positive edge_feature_dim.")
@@ -114,6 +120,8 @@ class PEPromptRelation(nn.Module):
         self.metapath_count = int(metapath_count or 0)
         self.metapath_embed_dim = int(metapath_embed_dim or 0)
         self.graph_summary_dim = int(graph_summary_dim or 0)
+        self.metapath_pos_dim = int(metapath_pos_dim or 0)
+        self.metapath_pos_feature_name = str(metapath_pos_feature_name)
         self.basis_count = int(basis_count or 0)
         self.onehop_center_fusion = bool(onehop_center_fusion)
         self.edge_type_to_id = {tuple(etype): idx for idx, etype in enumerate(edge_types)}
@@ -224,6 +232,44 @@ class PEPromptRelation(nn.Module):
             self.ctx_value_mlp = None
             self.center_ctx_proj = None
             self.center_ctx_gate = None
+        elif fusion_mode == "edge_type":
+            if self.edge_type_to_id:
+                self.edge_type_embedding = nn.Embedding(len(self.edge_type_to_id), self.edge_type_embed_dim)
+            else:
+                self.edge_type_embedding = None
+                self.edge_type_embed_dim = 0
+            mlp_input_dim = self.edge_feature_dim + self.edge_type_embed_dim
+            self.edge_prompt_mlp = nn.Sequential(
+                nn.LayerNorm(mlp_input_dim),
+                nn.Linear(mlp_input_dim, edge_prompt_hidden),
+                nn.ReLU(),
+                nn.Dropout(dropout),
+                nn.Linear(edge_prompt_hidden, dim),
+            )
+            self.metapath_embedding = None
+            self.ctx_gate_mlp = None
+            self.ctx_value_mlp = None
+            self.center_ctx_proj = None
+            self.center_ctx_gate = None
+            self.edge_prompt_selector = None
+            self.prompt_basis = None
+        elif fusion_mode == "metapath_pos" and self.metapath_pos_dim > 0:
+            mlp_input_dim = self.edge_feature_dim + self.metapath_pos_dim
+            self.edge_prompt_mlp = nn.Sequential(
+                nn.LayerNorm(mlp_input_dim),
+                nn.Linear(mlp_input_dim, edge_prompt_hidden),
+                nn.ReLU(),
+                nn.Dropout(dropout),
+                nn.Linear(edge_prompt_hidden, dim),
+            )
+            self.metapath_embedding = None
+            self.edge_type_embedding = None
+            self.ctx_gate_mlp = None
+            self.ctx_value_mlp = None
+            self.center_ctx_proj = None
+            self.center_ctx_gate = None
+            self.edge_prompt_selector = None
+            self.prompt_basis = None
         elif self.edge_feature_dim > 0:
             # PE-only mode (original)
             self.edge_prompt_mlp = nn.Sequential(
@@ -451,6 +497,15 @@ class PEPromptRelation(nn.Module):
         summary_per_edge = graph_summary_state[src_graph_ids].to(device=device, dtype=dtype)
         return self._match_last_dim(summary_per_edge, self.graph_summary_dim)
 
+    def _metapath_pos_per_edge(self, graph, etype, device, dtype):
+        if graph is None or self.metapath_pos_dim <= 0:
+            return None
+        edge_data = graph.edges[etype].data.get(self.metapath_pos_feature_name)
+        if edge_data is None:
+            return None
+        edge_data = edge_data.to(device=device, dtype=dtype)
+        return self._match_last_dim(edge_data, self.metapath_pos_dim)
+
     def _apply_onehop_center_fusion(self, x_dict: Dict[str, torch.Tensor], graph) -> Dict[str, torch.Tensor]:
         if (
             graph is None
@@ -550,6 +605,11 @@ class PEPromptRelation(nn.Module):
             and self.graph_summary_dim > 0
             and self.edge_prompt_selector is not None
             and self.prompt_basis is not None
+            and graph is not None
+        )
+        use_metapath_pos = (
+            self.fusion_mode == "metapath_pos"
+            and self.metapath_pos_dim > 0
             and graph is not None
         )
         use_hop_decoupled = (
@@ -661,6 +721,34 @@ class PEPromptRelation(nn.Module):
                 selector_input = torch.cat([h_src, h_dst, pe, summary_per_edge], dim=-1)
                 alpha = torch.softmax(self.edge_prompt_selector(selector_input), dim=-1)
                 p = alpha @ self.prompt_basis.to(device=device, dtype=pe.dtype)
+            elif self.fusion_mode == "edge_type":
+                pe = edge_features.to(device)
+                if self.edge_type_embedding is not None:
+                    etype_id = self.edge_type_to_id.get((src_t, rel_t, dst_t))
+                    if etype_id is not None:
+                        etype_ids = torch.full(
+                            (pe.size(0),),
+                            int(etype_id),
+                            device=device,
+                            dtype=torch.long,
+                        )
+                        etype_emb = self.edge_type_embedding(etype_ids).to(dtype=pe.dtype)
+                    else:
+                        etype_emb = pe.new_zeros(pe.size(0), self.edge_type_embed_dim)
+                else:
+                    etype_emb = pe.new_zeros(pe.size(0), self.edge_type_embed_dim)
+                p = self.edge_prompt_mlp(torch.cat([pe, etype_emb], dim=-1))
+            elif use_metapath_pos:
+                pe = edge_features.to(device)
+                metapath_pos = self._metapath_pos_per_edge(
+                    graph,
+                    (src_t, rel_t, dst_t),
+                    device,
+                    pe.dtype,
+                )
+                if metapath_pos is None:
+                    metapath_pos = pe.new_zeros(pe.size(0), self.metapath_pos_dim)
+                p = self.edge_prompt_mlp(torch.cat([pe, metapath_pos], dim=-1))
             else:
                 p = self.edge_prompt_mlp(edge_features.to(x_dict[src_t].device))
 
@@ -896,13 +984,15 @@ class HGMPPEPromptHGNN(nn.Module):
             edge_prompt_hidden=relation_cfg.edge_prompt_hidden,
             fusion_mode=relation_cfg.fusion_mode,
             ctx_dim=relation_cfg.ctx_dim,
-        generator_hidden=relation_cfg.generator_hidden,
-        metapath_count=relation_cfg.metapath_count,
-        metapath_embed_dim=relation_cfg.metapath_embed_dim,
-        graph_summary_dim=relation_cfg.graph_summary_dim,
-        basis_count=relation_cfg.basis_count,
-        onehop_center_fusion=relation_cfg.onehop_center_fusion,
-    )
+            generator_hidden=relation_cfg.generator_hidden,
+            metapath_count=relation_cfg.metapath_count,
+            metapath_embed_dim=relation_cfg.metapath_embed_dim,
+            graph_summary_dim=relation_cfg.graph_summary_dim,
+            metapath_pos_dim=relation_cfg.metapath_pos_dim,
+            metapath_pos_feature_name=relation_cfg.metapath_pos_feature_name,
+            basis_count=relation_cfg.basis_count,
+            onehop_center_fusion=relation_cfg.onehop_center_fusion,
+        )
 
         if self.hgnn_type == "HGT":
             self.GraphConv = RelationInjectedPEPromptLegacyHGT(
@@ -1119,6 +1209,8 @@ def build_peprompt_relation_cfg_from_args(args) -> PEPromptRelationConfig:
         metapath_count=getattr(args, "peprompt_metapath_count", 0),
         metapath_embed_dim=getattr(args, "peprompt_metapath_embed_dim", 16),
         graph_summary_dim=getattr(args, "peprompt_graph_summary_dim", 0),
+        metapath_pos_dim=getattr(args, "peprompt_metapath_pos_dim", 0),
+        metapath_pos_feature_name=getattr(args, "peprompt_metapath_pos_feature_name", "peprompt_metapath_pos_feat"),
         basis_count=getattr(args, "peprompt_basis_count", 4),
         onehop_center_fusion=getattr(args, "peprompt_onehop_center_fusion", False),
     )

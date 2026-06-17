@@ -611,6 +611,11 @@ p_e = alpha_e @ B
 
 # 26.6.11
 
+#### topk参数实验
+
+在ACM上采用hop3 top3的形式是最好的，能达到90.5两个都是，0.6的标准差。
+
+
 #### 接下来的问题
 
 1. 子图的选取方式的进一步优化
@@ -641,3 +646,53 @@ else:
 - 3 所有改为identity-like
 - 4 save 2，其余改为identity-like
 - 5 save 2, 其余改为Nx10 零特征
+
+# 2026.6.14
+1. ACM数据集 在10shot阶段稳定能超越HGMP
+2. IMDB数据集 10shot阶段由于一些原因，效果很差
+
+# 2026.6.16
+修改了下游的分类标准：什么先linear然后sofatmax,主要是如何将multihot 改为onehot，以及如何比对的问题，在imdb上
+
+并且刚需torchmetrics这个库进行下游的分类。
+
+# 2026.6.17
+
+## HGMP Prompt vs PEPrompt r10 对比记录
+
+统一设置：
+
+- shot=10
+- seeds=0 1 2 3 4
+- repeats=10
+- 下游早停使用 loss，并开启 early_stop_only，只在 best checkpoint 上最终评估 F1
+- HGMP Prompt 使用 khop 子图，`hgmp_prompt_recipe=legacy`
+- PEPrompt 使用 metapath_topk，`rank_metric=count`，`fusion_mode=none`
+- Freebase 使用 `feats_type=1`
+
+日志路径：
+
+- HGMP Prompt: `artifacts/logs/hgmp_prompt_r10_compare/`
+- PEPrompt: `artifacts/logs/peprompt_r10_compare/`
+- PEPrompt IMDB: `artifacts/logs/imdb_compare/peprompt_metapath_h2_k3_lr1e3_plr1e4_r10_fast.log`
+
+### 结果汇总
+
+| Dataset | Method | Subgraph | Count | Micro-F1 | Macro-F1 |
+| --- | --- | --- | ---: | ---: | ---: |
+| ACM | HGMP Prompt | khop | 50 | 0.8371 ± 0.0319 | 0.8366 ± 0.0320 |
+| ACM | PEPrompt | metapath h3/k3 | 50 | 0.8999 ± 0.0055 | 0.8997 ± 0.0053 |
+| DBLP | HGMP Prompt | khop | 50 | 0.5842 ± 0.0360 | 0.5816 ± 0.0370 |
+| DBLP | PEPrompt | metapath h3/k3 | 50 | 0.6187 ± 0.0433 | 0.6171 ± 0.0431 |
+| IMDB | HGMP Prompt | khop | 50 | 0.6760 ± 0.0121 | 0.5996 ± 0.0150 |
+| IMDB | PEPrompt | metapath h2/k3 | 50 | 0.6667 ± 0.0159 | 0.5883 ± 0.0197 |
+| Freebase | HGMP Prompt | khop, ft1 | 50 | 0.2098 ± 0.0199 | 0.1318 ± 0.0201 |
+| Freebase | PEPrompt | metapath h3/k3, ft1 | 50 | 0.3463 ± 0.0207 | 0.2949 ± 0.0268 |
+
+### 初步结论
+
+1. ACM 上 PEPrompt 明显优于 HGMP Prompt，且方差更小：micro 提升约 6.28 个点，macro 提升约 6.30 个点。
+2. DBLP 上 PEPrompt 也优于 HGMP Prompt：micro 提升约 3.45 个点，macro 提升约 3.55 个点，但方差略大。
+3. IMDB 上 HGMP Prompt 略优于 PEPrompt：micro 高约 0.92 个点，macro 高约 1.14 个点。IMDB 当前更适合 h2/k3，h3/k3 和 h2/k2 都不如 h2/k3。
+4. Freebase 上 PEPrompt 相比 HGMP Prompt 提升明显：micro 提升约 13.66 个点，macro 提升约 16.32 个点。但 HGMP Prompt 在 Freebase 上 best_epoch 经常为 1，说明当前 khop + ft1 组合可能训练不稳定或特征信息不足。
+5. 当前结果支持：metapath_topk 子图在 ACM、DBLP、Freebase 上能带来比 khop HGMP Prompt 更好的下游表现；IMDB 受多标签、few-shot split 和高阶噪声影响更大，需要单独使用较小的 h2/k3 配置。

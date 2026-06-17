@@ -64,9 +64,7 @@ def model_create(input_dims,dataname, hgnn_type,pre_method, num_class,metadata,n
                     torch.nn.Linear(hid_dim, num_class),
                     torch.nn.Sigmoid())
             else:
-                answering = torch.nn.Sequential(
-                    torch.nn.Linear(hid_dim, num_class),
-                    torch.nn.Softmax(dim=1))
+                answering = torch.nn.Linear(hid_dim, num_class)
 
             opi_answer = optim.Adam(filter(lambda p: p.requires_grad, answering.parameters()), lr=args.head_lr,
                                     weight_decay=args.weight_decay)

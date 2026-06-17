@@ -117,6 +117,10 @@ def _is_legacy_multilabel_task(dataset: str, classification_type: str) -> bool:
     return str(dataset) == "IMDB" and str(classification_type) != "GIG"
 
 
+def _labels_look_multilabel(labels: torch.Tensor) -> bool:
+    return isinstance(labels, torch.Tensor) and labels.ndim == 2 and labels.size(-1) > 1
+
+
 def _prepare_labels_for_task(
     labels: torch.Tensor,
     device: torch.device,
@@ -124,7 +128,7 @@ def _prepare_labels_for_task(
     classification_type: str,
 ) -> torch.Tensor:
     labels = labels.to(device)
-    if _is_legacy_multilabel_task(dataset, classification_type):
+    if _is_legacy_multilabel_task(dataset, classification_type) and _labels_look_multilabel(labels):
         return labels.float()
     return labels.long()
 
@@ -135,7 +139,7 @@ def _legacy_task_loss(
     dataset: str,
     classification_type: str,
 ) -> torch.Tensor:
-    if _is_legacy_multilabel_task(dataset, classification_type):
+    if _is_legacy_multilabel_task(dataset, classification_type) and _labels_look_multilabel(labels):
         return nn.functional.binary_cross_entropy_with_logits(logits, labels.float())
     return nn.functional.cross_entropy(logits, labels.long())
 
@@ -152,11 +156,67 @@ def _to_class_ids(x: torch.Tensor) -> torch.Tensor:
     raise ValueError(f"Unsupported tensor shape for class ids: {tuple(x.shape)}")
 
 
+def _legacy_multihot_f1_micro_macro(
+    pred: torch.Tensor,
+    y: torch.Tensor,
+    num_classes: int,
+) -> tuple[float, float]:
+    """Match HGMP's IMDB protocol: argmax prediction as one-hot vs multi-hot labels."""
+    pred_ids = _to_class_ids(pred)
+    pred_hot = F.one_hot(pred_ids.clamp(min=0, max=num_classes - 1), num_classes=num_classes).to(y.device)
+    valid = pred_ids >= 0
+    pred_hot = pred_hot.to(torch.float32)
+    pred_hot[~valid] = 0.0
+
+    target = y.to(pred_hot.device).to(torch.float32)
+    if target.ndim != 2 or target.size(1) != num_classes:
+        raise ValueError(f"Expected multi-hot labels with shape [N, {num_classes}], got {tuple(target.shape)}")
+    target = (target > 0).to(torch.float32)
+
+    try:
+        import torchmetrics
+
+        micro_metric = torchmetrics.classification.F1Score(
+            task="multiclass",
+            num_classes=num_classes,
+            average="micro",
+        ).to(pred_hot.device)
+        macro_metric = torchmetrics.classification.F1Score(
+            task="multiclass",
+            num_classes=num_classes,
+            average="macro",
+        ).to(pred_hot.device)
+        micro = float(micro_metric(pred_hot, target).item())
+        macro = float(macro_metric(pred_hot, target).item())
+        return micro, macro
+    except Exception:
+        pass
+
+    tp = (pred_hot * target).sum(dim=0)
+    fp = (pred_hot * (1.0 - target)).sum(dim=0)
+    fn = ((1.0 - pred_hot) * target).sum(dim=0)
+    eps = 1e-12
+
+    f1_c = (2 * tp) / (2 * tp + fp + fn + eps)
+    support = target.sum(dim=0)
+    mask = support > 0
+    macro = float(f1_c[mask].mean().item()) if mask.any() else 0.0
+
+    TP = tp.sum()
+    FP = fp.sum()
+    FN = fn.sum()
+    micro = float((2 * TP / (2 * TP + FP + FN + eps)).item())
+    return micro, macro
+
+
 def _legacy_f1_micro_macro(
     pred: torch.Tensor,
     y: torch.Tensor,
     num_classes: int,
 ) -> tuple[float, float]:
+    if _labels_look_multilabel(y):
+        return _legacy_multihot_f1_micro_macro(pred, y, num_classes)
+
     pred = _to_class_ids(pred)
     y = _to_class_ids(y)
 
@@ -709,6 +769,11 @@ def _train_relation_prompt_probe(
     early_stop_mode = getattr(args, f"{args.method}_early_stop_mode", "metric")
     if early_stop_mode not in {"metric", "loss"}:
         raise ValueError(f"Unsupported {args.method}_early_stop_mode: {early_stop_mode}")
+    eval_mode = getattr(args, f"{args.method}_eval_mode", "full")
+    if eval_mode not in {"full", "early_stop_only"}:
+        raise ValueError(f"Unsupported {args.method}_eval_mode: {eval_mode}")
+    if eval_mode == "early_stop_only" and early_stop_mode != "loss":
+        raise ValueError("PEPrompt eval_mode=early_stop_only requires peprompt_early_stop_mode=loss.")
 
     hgnn = build_legacy_hgnn(
         args,
@@ -754,6 +819,8 @@ def _train_relation_prompt_probe(
     best_epoch = -1
     bad_epochs = 0
     best_val_loss = float("inf")
+    best_hgnn_state = None
+    best_head_state = None
 
     for epoch in range(1, epochs + 1):
         hgnn.eval()
@@ -802,7 +869,7 @@ def _train_relation_prompt_probe(
 
         train_loss = epoch_loss / max(epoch_graphs, 1)
 
-        if epoch_callback is not None:
+        if eval_mode == "full" and epoch_callback is not None:
             train_micro, train_macro = _evaluate_graph_probe(
                 train_list,
                 hgnn,
@@ -817,28 +884,32 @@ def _train_relation_prompt_probe(
         else:
             train_micro, train_macro = None, None
 
-        val_micro, val_macro = _evaluate_graph_probe(
-            valid_list,
-            hgnn,
-            head,
-            targetnode,
-            args.dataset,
-            args.classification_type,
-            batch_size,
-            args.device,
-            args.num_class,
-        )
-        test_micro, test_macro = _evaluate_graph_probe(
-            test_list,
-            hgnn,
-            head,
-            targetnode,
-            args.dataset,
-            args.classification_type,
-            batch_size,
-            args.device,
-            args.num_class,
-        )
+        if eval_mode == "full":
+            val_micro, val_macro = _evaluate_graph_probe(
+                valid_list,
+                hgnn,
+                head,
+                targetnode,
+                args.dataset,
+                args.classification_type,
+                batch_size,
+                args.device,
+                args.num_class,
+            )
+            test_micro, test_macro = _evaluate_graph_probe(
+                test_list,
+                hgnn,
+                head,
+                targetnode,
+                args.dataset,
+                args.classification_type,
+                batch_size,
+                args.device,
+                args.num_class,
+            )
+        else:
+            val_micro = val_macro = None
+            test_micro = test_macro = None
 
         val_loss = None
         if early_stop_mode == "loss":
@@ -860,14 +931,17 @@ def _train_relation_prompt_probe(
 
         if improved:
             improved = True
-            best_val_micro = val_micro
-            best_val_macro = val_macro
-            test_at_best_micro = test_micro
-            test_at_best_macro = test_macro
+            if eval_mode == "full":
+                best_val_micro = val_micro
+                best_val_macro = val_macro
+                test_at_best_micro = test_micro
+                test_at_best_macro = test_macro
             best_epoch = epoch
             bad_epochs = 0
             if val_loss is not None:
                 best_val_loss = float(val_loss)
+            best_hgnn_state = _clone_state_dict(hgnn)
+            best_head_state = _clone_state_dict(head)
 
             if save_best_path is not None:
                 payload = {
@@ -883,6 +957,7 @@ def _train_relation_prompt_probe(
                     "best_epoch": best_epoch,
                     "early_stop_metric": early_stop_metric,
                     "early_stop_mode": early_stop_mode,
+                    "eval_mode": eval_mode,
                 }
                 if val_loss is not None:
                     payload["best_val_loss"] = float(val_loss)
@@ -895,12 +970,6 @@ def _train_relation_prompt_probe(
             payload = {
                 "epoch": epoch,
                 "train_loss": float(train_loss),
-                "train_micro": float(train_micro),
-                "train_macro": float(train_macro),
-                "val_micro": float(val_micro),
-                "val_macro": float(val_macro),
-                "test_micro": float(test_micro),
-                "test_macro": float(test_macro),
                 "best_val_micro": float(best_val_micro),
                 "best_val_macro": float(best_val_macro),
                 "test_at_best_micro": float(test_at_best_micro),
@@ -910,7 +979,19 @@ def _train_relation_prompt_probe(
                 "is_best": bool(improved),
                 "early_stop": bool(bad_epochs >= patience),
                 "early_stop_mode": early_stop_mode,
+                "eval_mode": eval_mode,
             }
+            if eval_mode == "full":
+                payload.update(
+                    {
+                        "train_micro": float(train_micro),
+                        "train_macro": float(train_macro),
+                        "val_micro": float(val_micro),
+                        "val_macro": float(val_macro),
+                        "test_micro": float(test_micro),
+                        "test_macro": float(test_macro),
+                    }
+                )
             if val_loss is not None:
                 payload["val_loss"] = float(val_loss)
                 payload["best_val_loss"] = float(best_val_loss)
@@ -920,7 +1001,13 @@ def _train_relation_prompt_probe(
             epoch_callback(payload)
 
         if epoch == 1 or epoch % 10 == 0:
-            if val_loss is not None:
+            if eval_mode == "early_stop_only":
+                print(
+                    f"Epoch {epoch:03d} | loss={train_loss:.4f} | "
+                    f"val_loss={val_loss:.4f} | best_val_loss={best_val_loss:.4f} | "
+                    f"bad_epochs={bad_epochs}"
+                )
+            elif val_loss is not None:
                 print(
                     f"Epoch {epoch:03d} | loss={train_loss:.4f} | "
                     f"val_loss={val_loss:.4f} | "
@@ -936,7 +1023,12 @@ def _train_relation_prompt_probe(
                 )
 
         if bad_epochs >= patience:
-            if val_loss is not None:
+            if eval_mode == "early_stop_only":
+                print(
+                    f"Early stop at epoch {epoch}, best_epoch={best_epoch} | "
+                    f"best_val_loss={best_val_loss:.4f} | final F1 will be evaluated once on the best checkpoint"
+                )
+            elif val_loss is not None:
                 print(
                     f"Early stop at epoch {epoch}, best_epoch={best_epoch} | "
                     f"best_val_loss={best_val_loss:.4f} | "
@@ -952,6 +1044,60 @@ def _train_relation_prompt_probe(
                 )
             break
 
+    if best_hgnn_state is not None:
+        hgnn.load_state_dict(best_hgnn_state)
+    if best_head_state is not None:
+        head.load_state_dict(best_head_state)
+
+    if eval_mode == "early_stop_only":
+        best_val_micro, best_val_macro = _evaluate_graph_probe(
+            valid_list,
+            hgnn,
+            head,
+            targetnode,
+            args.dataset,
+            args.classification_type,
+            batch_size,
+            args.device,
+            args.num_class,
+        )
+        test_at_best_micro, test_at_best_macro = _evaluate_graph_probe(
+            test_list,
+            hgnn,
+            head,
+            targetnode,
+            args.dataset,
+            args.classification_type,
+            batch_size,
+            args.device,
+            args.num_class,
+        )
+        print(
+            f"Final best-state F1 | best_epoch={best_epoch} | "
+            f"val_f1(micro/macro)={best_val_micro:.4f}/{best_val_macro:.4f} | "
+            f"test@best_f1(micro/macro)={test_at_best_micro:.4f}/{test_at_best_macro:.4f}"
+        )
+        if save_best_path is not None and best_hgnn_state is not None and best_head_state is not None:
+            torch.save(
+                {
+                    "hgnn_state": hgnn.state_dict(),
+                    "head_state": head.state_dict(),
+                    "in_dim": args.hidden_dim,
+                    "hidden_dim": hidden_dim,
+                    "num_classes": args.num_class,
+                    "best_val_micro": best_val_micro,
+                    "best_val_macro": best_val_macro,
+                    "test_at_best_micro": test_at_best_micro,
+                    "test_at_best_macro": test_at_best_macro,
+                    "best_epoch": best_epoch,
+                    "early_stop_metric": early_stop_metric,
+                    "early_stop_mode": early_stop_mode,
+                    "eval_mode": eval_mode,
+                    "best_val_loss": None if best_val_loss == float("inf") else best_val_loss,
+                },
+                save_best_path,
+            )
+
     return {
         "best_val_micro": best_val_micro,
         "best_val_macro": best_val_macro,
@@ -960,6 +1106,7 @@ def _train_relation_prompt_probe(
         "best_epoch": best_epoch,
         "early_stop_metric": early_stop_metric,
         "early_stop_mode": early_stop_mode,
+        "eval_mode": eval_mode,
         "best_val_loss": None if best_val_loss == float("inf") else best_val_loss,
     }
 
@@ -1200,6 +1347,11 @@ def train_hgmp_heteroprompt_probe(
         early_stop_mode = "legacy_loss" if recipe == "legacy" else "metric"
     if early_stop_mode not in {"metric", "legacy_loss"}:
         raise ValueError(f"Unsupported hgmp_prompt_early_stop_mode: {early_stop_mode}")
+    eval_mode = getattr(args, "hgmp_prompt_eval_mode", "full")
+    if eval_mode not in {"full", "early_stop_only"}:
+        raise ValueError(f"Unsupported hgmp_prompt_eval_mode: {eval_mode}")
+    if eval_mode == "early_stop_only" and early_stop_mode != "legacy_loss":
+        raise ValueError("hgmp_prompt_eval_mode=early_stop_only requires hgmp_prompt_early_stop_mode=legacy_loss.")
 
     legacy_defaults = _hgmp_prompt_legacy_defaults(args.dataset) if recipe == "legacy" else {}
     resolved_batch_size = int(
@@ -1315,7 +1467,7 @@ def train_hgmp_heteroprompt_probe(
             lossfn=train_lossfn,
         )
 
-        if epoch_callback is not None:
+        if eval_mode == "full" and epoch_callback is not None:
             train_micro, train_macro = _evaluate_hgmp_prompt_probe(
                 graph_list=train_list,
                 hgnn=hgnn,
@@ -1331,30 +1483,34 @@ def train_hgmp_heteroprompt_probe(
         else:
             train_micro, train_macro = None, None
 
-        val_micro, val_macro = _evaluate_hgmp_prompt_probe(
-            graph_list=valid_list,
-            hgnn=hgnn,
-            PG=PG,
-            head=head,
-            targetnode=targetnode,
-            dataset=args.dataset,
-            classification_type=args.classification_type,
-            batch_size=resolved_batch_size,
-            device=args.device,
-            num_classes=args.num_class,
-        )
-        test_micro, test_macro = _evaluate_hgmp_prompt_probe(
-            graph_list=test_list,
-            hgnn=hgnn,
-            PG=PG,
-            head=head,
-            targetnode=targetnode,
-            dataset=args.dataset,
-            classification_type=args.classification_type,
-            batch_size=resolved_batch_size,
-            device=args.device,
-            num_classes=args.num_class,
-        )
+        if eval_mode == "full":
+            val_micro, val_macro = _evaluate_hgmp_prompt_probe(
+                graph_list=valid_list,
+                hgnn=hgnn,
+                PG=PG,
+                head=head,
+                targetnode=targetnode,
+                dataset=args.dataset,
+                classification_type=args.classification_type,
+                batch_size=resolved_batch_size,
+                device=args.device,
+                num_classes=args.num_class,
+            )
+            test_micro, test_macro = _evaluate_hgmp_prompt_probe(
+                graph_list=test_list,
+                hgnn=hgnn,
+                PG=PG,
+                head=head,
+                targetnode=targetnode,
+                dataset=args.dataset,
+                classification_type=args.classification_type,
+                batch_size=resolved_batch_size,
+                device=args.device,
+                num_classes=args.num_class,
+            )
+        else:
+            val_micro = val_macro = None
+            test_micro = test_macro = None
 
         val_loss = None
         if early_stop_mode == "legacy_loss":
@@ -1378,10 +1534,11 @@ def train_hgmp_heteroprompt_probe(
 
         if improved:
             improved = True
-            best_val_micro = val_micro
-            best_val_macro = val_macro
-            test_at_best_micro = test_micro
-            test_at_best_macro = test_macro
+            if eval_mode == "full":
+                best_val_micro = val_micro
+                best_val_macro = val_macro
+                test_at_best_micro = test_micro
+                test_at_best_macro = test_macro
             best_epoch = epoch
             bad_epochs = 0
             if val_loss is not None:
@@ -1401,6 +1558,7 @@ def train_hgmp_heteroprompt_probe(
                     "early_stop_metric": early_stop_metric,
                     "hgmp_prompt_recipe": recipe,
                     "hgmp_prompt_early_stop_mode": early_stop_mode,
+                    "hgmp_prompt_eval_mode": eval_mode,
                 }
                 if val_loss is not None:
                     payload["best_val_loss"] = float(val_loss)
@@ -1415,12 +1573,6 @@ def train_hgmp_heteroprompt_probe(
                 "head_loss": float(head_loss),
                 "prompt_loss": float(prompt_loss),
                 "train_loss": float((head_loss + prompt_loss) / 2.0),
-                "train_micro": float(train_micro),
-                "train_macro": float(train_macro),
-                "val_micro": float(val_micro),
-                "val_macro": float(val_macro),
-                "test_micro": float(test_micro),
-                "test_macro": float(test_macro),
                 "best_val_micro": float(best_val_micro),
                 "best_val_macro": float(best_val_macro),
                 "test_at_best_micro": float(test_at_best_micro),
@@ -1431,7 +1583,19 @@ def train_hgmp_heteroprompt_probe(
                 "early_stop": bool(bad_epochs >= resolved_patience),
                 "hgmp_prompt_recipe": recipe,
                 "hgmp_prompt_early_stop_mode": early_stop_mode,
+                "hgmp_prompt_eval_mode": eval_mode,
             }
+            if eval_mode == "full":
+                payload.update(
+                    {
+                        "train_micro": float(train_micro),
+                        "train_macro": float(train_macro),
+                        "val_micro": float(val_micro),
+                        "val_macro": float(val_macro),
+                        "test_micro": float(test_micro),
+                        "test_macro": float(test_macro),
+                    }
+                )
             if val_loss is not None:
                 payload["val_loss"] = float(val_loss)
                 payload["best_val_loss"] = float(best_val_loss)
@@ -1442,7 +1606,14 @@ def train_hgmp_heteroprompt_probe(
             epoch_callback(payload)
 
         if epoch == 1 or epoch % 10 == 0:
-            if val_loss is not None:
+            if eval_mode == "early_stop_only":
+                print(
+                    f"Epoch {epoch:03d} | "
+                    f"head_loss={head_loss:.4f} | prompt_loss={prompt_loss:.4f} | "
+                    f"val_loss={val_loss:.4f} | best_val_loss={best_val_loss:.4f} | "
+                    f"bad_epochs={bad_epochs}"
+                )
+            elif val_loss is not None:
                 print(
                     f"Epoch {epoch:03d} | "
                     f"head_loss={head_loss:.4f} | prompt_loss={prompt_loss:.4f} | "
@@ -1461,7 +1632,12 @@ def train_hgmp_heteroprompt_probe(
                 )
 
         if bad_epochs >= resolved_patience:
-            if val_loss is not None:
+            if eval_mode == "early_stop_only":
+                print(
+                    f"Early stop at epoch {epoch}, best_epoch={best_epoch} | "
+                    f"best_val_loss={best_val_loss:.4f} | final F1 will be evaluated once on the best checkpoint"
+                )
+            elif val_loss is not None:
                 print(
                     f"Early stop at epoch {epoch}, best_epoch={best_epoch} | "
                     f"best_val_loss={best_val_loss:.4f} | "
@@ -1482,6 +1658,55 @@ def train_hgmp_heteroprompt_probe(
     if best_head_state is not None:
         head.load_state_dict(best_head_state)
 
+    if eval_mode == "early_stop_only":
+        best_val_micro, best_val_macro = _evaluate_hgmp_prompt_probe(
+            graph_list=valid_list,
+            hgnn=hgnn,
+            PG=PG,
+            head=head,
+            targetnode=targetnode,
+            dataset=args.dataset,
+            classification_type=args.classification_type,
+            batch_size=resolved_batch_size,
+            device=args.device,
+            num_classes=args.num_class,
+        )
+        test_at_best_micro, test_at_best_macro = _evaluate_hgmp_prompt_probe(
+            graph_list=test_list,
+            hgnn=hgnn,
+            PG=PG,
+            head=head,
+            targetnode=targetnode,
+            dataset=args.dataset,
+            classification_type=args.classification_type,
+            batch_size=resolved_batch_size,
+            device=args.device,
+            num_classes=args.num_class,
+        )
+        print(
+            f"Final best-state F1 | best_epoch={best_epoch} | "
+            f"val_f1(micro/macro)={best_val_micro:.4f}/{best_val_macro:.4f} | "
+            f"test@best_f1(micro/macro)={test_at_best_micro:.4f}/{test_at_best_macro:.4f}"
+        )
+        if save_best_path is not None and best_pg_state is not None and best_head_state is not None:
+            torch.save(
+                {
+                    "pg_state": PG.state_dict(),
+                    "head_state": head.state_dict(),
+                    "best_val_micro": best_val_micro,
+                    "best_val_macro": best_val_macro,
+                    "test_at_best_micro": test_at_best_micro,
+                    "test_at_best_macro": test_at_best_macro,
+                    "best_epoch": best_epoch,
+                    "early_stop_metric": early_stop_metric,
+                    "hgmp_prompt_recipe": recipe,
+                    "hgmp_prompt_early_stop_mode": early_stop_mode,
+                    "hgmp_prompt_eval_mode": eval_mode,
+                    "best_val_loss": None if best_val_loss == float("inf") else best_val_loss,
+                },
+                save_best_path,
+            )
+
     return {
         "best_val_micro": best_val_micro,
         "best_val_macro": best_val_macro,
@@ -1491,6 +1716,7 @@ def train_hgmp_heteroprompt_probe(
         "early_stop_metric": early_stop_metric,
         "hgmp_prompt_recipe": recipe,
         "hgmp_prompt_early_stop_mode": early_stop_mode,
+        "hgmp_prompt_eval_mode": eval_mode,
         "best_val_loss": None if best_val_loss == float("inf") else best_val_loss,
     }
 

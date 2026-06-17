@@ -28,6 +28,9 @@ from scripts.peprompt_benchmark import (
     _load_raw_heterograph,
     prepare_peprompt_spectral_payload,
 )
+
+PEPROMPT_METAPATH_POS_FEATURE_NAME = "peprompt_metapath_pos_feat"
+
 from scripts.subgraph_sampling_stats import (
     _build_csr_adjs,
     _generate_metapaths,
@@ -45,6 +48,17 @@ def _ensure_dir(path: Path) -> Path:
 def _target_labels(graph, targetnode: str) -> np.ndarray:
     labels = graph.ndata["y"][targetnode].detach().cpu().numpy()
     labels = np.asarray(labels, dtype=np.int64).reshape(-1)
+    return labels
+
+
+def _target_supervision_labels(graph, targetnode: str, dataset: str) -> np.ndarray:
+    """Return labels saved in samples; IMDB follows legacy HGMP multi-hot supervision."""
+    ndata_keys = set(graph.ndata.keys())
+    label_name = "oldy" if str(dataset) == "IMDB" and "oldy" in ndata_keys else "y"
+    labels = graph.ndata[label_name][targetnode].detach().cpu().numpy()
+    labels = np.asarray(labels, dtype=np.int64)
+    if labels.ndim == 1:
+        return labels.reshape(-1)
     return labels
 
 
@@ -131,6 +145,8 @@ def _metapath_cache_key(args) -> str:
         suffix += "_graphsum"
     elif fusion_mode == "graph_summary_basis":
         suffix += "_graphsum"
+    elif fusion_mode == "metapath_pos":
+        suffix += "_mppos"
     return f"metapath_topk_{suffix}"
 
 
@@ -158,6 +174,104 @@ def _coerce_feature_dim(x: np.ndarray, dim: int) -> np.ndarray:
     out = np.zeros((dim,), dtype=np.float32)
     out[: x.shape[0]] = x
     return out
+
+
+def _sparse_row_nonzero_indices(row) -> np.ndarray:
+    return np.asarray(row.nonzero()[1], dtype=np.int64)
+
+
+def _sparse_col_nonzero_indices(col) -> np.ndarray:
+    return np.asarray(col.nonzero()[0], dtype=np.int64)
+
+
+def _onehot_row(num_nodes: int, node_id: int):
+    import scipy.sparse as sp
+
+    return sp.csr_matrix(
+        ([1.0], ([0], [int(node_id)])),
+        shape=(1, int(num_nodes)),
+        dtype=np.float32,
+    )
+
+
+def _multi_hot_col(num_nodes: int, node_ids: np.ndarray):
+    import scipy.sparse as sp
+
+    node_ids = np.asarray(node_ids, dtype=np.int64).reshape(-1)
+    if node_ids.size == 0:
+        return sp.csr_matrix((int(num_nodes), 1), dtype=np.float32)
+    return sp.csr_matrix(
+        (np.ones(node_ids.size, dtype=np.float32), (node_ids, np.zeros(node_ids.size, dtype=np.int64))),
+        shape=(int(num_nodes), 1),
+        dtype=np.float32,
+    )
+
+
+def _attach_metapath_position_edge_features(
+    subgraph,
+    graph,
+    target_ntype: str,
+    target_node_id: int,
+    adjs: dict,
+    metapaths: list,
+    keep_by_metapath: list[np.ndarray],
+    feature_name: str = PEPROMPT_METAPATH_POS_FEATURE_NAME,
+):
+    max_path_len = max((len(metapath) for metapath in metapaths), default=1)
+    feature_dim = int(len(metapaths) * max_path_len)
+    edge_tables: dict[tuple[str, str, str], torch.Tensor] = {}
+    edge_global_ids: dict[tuple[str, str, str], tuple[np.ndarray, np.ndarray]] = {}
+
+    for etype in subgraph.canonical_etypes:
+        src_t, _, dst_t = etype
+        num_edges = int(subgraph.num_edges(etype=etype))
+        table = torch.zeros((num_edges, feature_dim), dtype=torch.float32)
+        edge_tables[etype] = table
+        if num_edges == 0:
+            continue
+        src_local, dst_local = subgraph.edges(etype=etype)
+        src_nids = subgraph.nodes[src_t].data[dgl.NID].detach().cpu().long().numpy()
+        dst_nids = subgraph.nodes[dst_t].data[dgl.NID].detach().cpu().long().numpy()
+        src_global = src_nids[src_local.detach().cpu().long().numpy()]
+        dst_global = dst_nids[dst_local.detach().cpu().long().numpy()]
+        edge_global_ids[etype] = (src_global.astype(np.int64), dst_global.astype(np.int64))
+
+    for metapath_idx, metapath in enumerate(metapaths):
+        keep = np.asarray(keep_by_metapath[metapath_idx], dtype=np.int64).reshape(-1)
+        if keep.size == 0:
+            continue
+
+        prefix_sets: list[np.ndarray] = []
+        row = _onehot_row(graph.num_nodes(target_ntype), int(target_node_id))
+        for etype in metapath:
+            prefix_sets.append(_sparse_row_nonzero_indices(row))
+            row = row @ adjs[etype]
+
+        suffix_sets: list[np.ndarray] = [np.empty(0, dtype=np.int64) for _ in metapath]
+        col = _multi_hot_col(graph.num_nodes(metapath[-1][2]), keep)
+        for step in range(len(metapath) - 1, -1, -1):
+            suffix_sets[step] = _sparse_col_nonzero_indices(col)
+            if step > 0:
+                col = adjs[metapath[step]] @ col
+
+        for step, etype in enumerate(metapath):
+            if etype not in edge_global_ids:
+                continue
+            src_global, dst_global = edge_global_ids[etype]
+            if src_global.size == 0:
+                continue
+            src_support = np.isin(src_global, prefix_sets[step], assume_unique=False)
+            dst_support = np.isin(dst_global, suffix_sets[step], assume_unique=False)
+            mask = src_support & dst_support
+            if not np.any(mask):
+                continue
+            col_idx = int(metapath_idx * max_path_len + step)
+            edge_tables[etype][torch.from_numpy(np.flatnonzero(mask).astype(np.int64)), col_idx] += 1.0
+
+    for etype, table in edge_tables.items():
+        subgraph.edges[etype].data[feature_name] = torch.log1p(table)
+
+    return feature_dim
 
 
 def extract_metapath_topk_subgraph(
@@ -188,6 +302,7 @@ def extract_metapath_topk_subgraph(
     summary_drop_mass_by_type: dict[str, float] = {}
     summary_total_mass_by_hop = np.zeros(max((len(m) for m in metapaths), default=1), dtype=np.float32)
     summary_drop_mass_by_hop = np.zeros(max((len(m) for m in metapaths), default=1), dtype=np.float32)
+    keep_by_metapath: list[np.ndarray] = []
     ctx_dim = int(ctx_dim or 0)
     _compute_metapath_ctx = (
         context_mode == "hidden_virtual_metapath"
@@ -205,6 +320,7 @@ def extract_metapath_topk_subgraph(
         and ctx_dim > 0
     )
     _compute_graph_summary = context_mode == "graph_summary"
+    _compute_metapath_pos = context_mode == "metapath_pos"
     max_path_len = max((len(metapath) for metapath in metapaths), default=1)
 
     for metapath_idx, metapath in enumerate(metapaths):
@@ -217,6 +333,8 @@ def extract_metapath_topk_subgraph(
         )
         ranks = _rank_values(scores, endpoint_popularity.get(metapath), rank_metric)
         keep = _topk_indices(scores, ranks, int(topk))
+        if _compute_metapath_pos:
+            keep_by_metapath.append(keep.copy())
         if keep.size > 0:
             dst_t = metapath[-1][2]
             keep_ids = [int(v) for v in keep.tolist()]
@@ -309,6 +427,18 @@ def extract_metapath_topk_subgraph(
     seed_nodes = _seed_nodes_dict(target_ntype, target_node_id)
     subgraph = dgl.node_subgraph(graph, node_dict)
     inverse_indices = _find_seed_inverse_indices(subgraph, seed_nodes)
+
+    if _compute_metapath_pos:
+        metapath_pos_dim = _attach_metapath_position_edge_features(
+            subgraph=subgraph,
+            graph=graph,
+            target_ntype=target_ntype,
+            target_node_id=int(target_node_id),
+            adjs=adjs,
+            metapaths=metapaths,
+            keep_by_metapath=keep_by_metapath,
+        )
+        inverse_indices["_metapath_pos_dim"] = int(metapath_pos_dim)
 
     if dropped_metapath_ctx:
         payload = {
@@ -696,6 +826,8 @@ def _make_subgraph_extractor(graph, targetnode: str, args):
             _global_feats = _gather_global_node_feats(graph, graph.ntypes)
         elif fusion_mode in {"graph_summary", "graph_summary_basis"}:
             context_mode = "graph_summary"
+        elif fusion_mode == "metapath_pos":
+            context_mode = "metapath_pos"
 
         def _extract(node_id: int):
             return extract_metapath_topk_subgraph(
@@ -723,6 +855,7 @@ def _make_subgraph_extractor(graph, targetnode: str, args):
             "context_mode": context_mode,
             "ctx_dim": ctx_dim,
             "graph_summary_dim": (3 * len(graph.ntypes) + 2 * int(max_hop)) if context_mode == "graph_summary" else 0,
+            "metapath_pos_dim": (len(metapaths) * max((len(m) for m in metapaths), default=1)) if context_mode == "metapath_pos" else 0,
         }
 
     raise ValueError(f"Unsupported subgraph_type: {subgraph_type}")
@@ -732,12 +865,13 @@ def _build_single_sample(
     extract_subgraph,
     spectral_payload: dict,
     node_id: int,
-    label: int,
+    label,
     feature_name: str,
 ):
     subgraph, inverse_indices = extract_subgraph(int(node_id))
     dropped_ctx_payload = inverse_indices.pop("_dropped_metapath_ctx", None)
     dropped_onehop_ctx_payload = inverse_indices.pop("_dropped_onehop_ctx", None)
+    metapath_pos_dim = int(inverse_indices.pop("_metapath_pos_dim", 0) or 0)
     _attach_peprompt_edge_features_from_global_pe(
         subgraph=subgraph,
         spectral_embeddings=spectral_payload["spectral_embeddings"],
@@ -747,8 +881,8 @@ def _build_single_sample(
     return (
         subgraph,
         inverse_indices,
-        torch.tensor(int(label)),
-    ), dropped_ctx_payload, dropped_onehop_ctx_payload
+        torch.as_tensor(label, dtype=torch.long).clone(),
+    ), dropped_ctx_payload, dropped_onehop_ctx_payload, metapath_pos_dim
 
 
 def _build_sample_list(
@@ -761,12 +895,13 @@ def _build_sample_list(
     samples = []
     dropped_ctx_by_target: dict[int, dict] = {}
     dropped_onehop_ctx_by_target: dict[int, dict] = {}
+    metapath_pos_dim = 0
     for node_id, label in zip(node_ids, labels):
-        sample, dropped_ctx_payload, dropped_onehop_ctx_payload = _build_single_sample(
+        sample, dropped_ctx_payload, dropped_onehop_ctx_payload, sample_metapath_pos_dim = _build_single_sample(
             extract_subgraph=extract_subgraph,
             spectral_payload=spectral_payload,
             node_id=int(node_id),
-            label=int(label),
+            label=label,
             feature_name=feature_name,
         )
         samples.append(sample)
@@ -774,7 +909,8 @@ def _build_sample_list(
             dropped_ctx_by_target[int(node_id)] = dropped_ctx_payload
         if dropped_onehop_ctx_payload is not None:
             dropped_onehop_ctx_by_target[int(node_id)] = dropped_onehop_ctx_payload
-    return samples, dropped_ctx_by_target, dropped_onehop_ctx_by_target
+        metapath_pos_dim = max(int(metapath_pos_dim), int(sample_metapath_pos_dim))
+    return samples, dropped_ctx_by_target, dropped_onehop_ctx_by_target, metapath_pos_dim
 
 
 def _build_job_args(cli_args, dataset: str) -> SimpleNamespace:
@@ -790,6 +926,7 @@ def _build_job_args(cli_args, dataset: str) -> SimpleNamespace:
 
 def _precompute_dataset(graph, targetnode: str, spectral_payload: dict, args):
     labels = _target_labels(graph, targetnode)
+    supervision_labels = _target_supervision_labels(graph, targetnode, args.dataset)
     extract_subgraph, subgraph_config = _make_subgraph_extractor(graph, targetnode, args)
 
     for shot in args.shots:
@@ -802,25 +939,25 @@ def _precompute_dataset(graph, targetnode: str, spectral_payload: dict, args):
                 max_pool_size=int(args.max_pool_size),
             )
 
-            train_list, train_dropped_ctx, train_onehop_ctx = _build_sample_list(
+            train_list, train_dropped_ctx, train_onehop_ctx, train_metapath_pos_dim = _build_sample_list(
                 extract_subgraph=extract_subgraph,
                 spectral_payload=spectral_payload,
                 node_ids=split["train_ids"],
-                labels=split["train_labels"],
+                labels=supervision_labels[split["train_ids"]],
                 feature_name=args.peprompt_edge_feature_name,
             )
-            val_list, val_dropped_ctx, val_onehop_ctx = _build_sample_list(
+            val_list, val_dropped_ctx, val_onehop_ctx, val_metapath_pos_dim = _build_sample_list(
                 extract_subgraph=extract_subgraph,
                 spectral_payload=spectral_payload,
                 node_ids=split["val_ids"],
-                labels=split["val_labels"],
+                labels=supervision_labels[split["val_ids"]],
                 feature_name=args.peprompt_edge_feature_name,
             )
-            test_list, test_dropped_ctx, test_onehop_ctx = _build_sample_list(
+            test_list, test_dropped_ctx, test_onehop_ctx, test_metapath_pos_dim = _build_sample_list(
                 extract_subgraph=extract_subgraph,
                 spectral_payload=spectral_payload,
                 node_ids=split["test_ids"],
-                labels=split["test_labels"],
+                labels=supervision_labels[split["test_ids"]],
                 feature_name=args.peprompt_edge_feature_name,
             )
             dropped_ctx_by_target = {}
@@ -831,6 +968,11 @@ def _precompute_dataset(graph, targetnode: str, spectral_payload: dict, args):
             dropped_onehop_ctx_by_target.update(train_onehop_ctx)
             dropped_onehop_ctx_by_target.update(val_onehop_ctx)
             dropped_onehop_ctx_by_target.update(test_onehop_ctx)
+            metapath_pos_dim = max(
+                int(train_metapath_pos_dim),
+                int(val_metapath_pos_dim),
+                int(test_metapath_pos_dim),
+            )
 
             cache_path = build_peprompt_offline_cache_path(
                 cache_dir=args.peprompt_offline_cache_dir,
@@ -861,6 +1003,8 @@ def _precompute_dataset(graph, targetnode: str, spectral_payload: dict, args):
                 "metapath_context_mode": subgraph_config.get("context_mode"),
                 "peprompt_ctx_dim": subgraph_config.get("ctx_dim"),
                 "peprompt_graph_summary_dim": subgraph_config.get("graph_summary_dim", 0),
+                "peprompt_metapath_pos_dim": int(metapath_pos_dim),
+                "peprompt_metapath_pos_feature_name": PEPROMPT_METAPATH_POS_FEATURE_NAME,
                 "dropped_metapath_context_by_target": dropped_ctx_by_target,
                 "dropped_onehop_context_by_target": dropped_onehop_ctx_by_target,
                 "max_pool_size": int(args.max_pool_size),
@@ -921,7 +1065,7 @@ def build_parser():
     ap.add_argument("--peprompt_spectral_dim", type=int, default=16)
     ap.add_argument("--peprompt_spectral_max_nodes", type=int, default=50000)
     ap.add_argument("--peprompt_edge_feature_name", type=str, default=PEPROMPT_EDGE_FEATURE_NAME)
-    ap.add_argument("--peprompt_fusion_mode", type=str, default="none", choices=["none", "hop_decoupled", "onehop_ctx", "type_ctx", "graph_summary", "graph_summary_basis"])
+    ap.add_argument("--peprompt_fusion_mode", type=str, default="none", choices=["none", "edge_type", "metapath_pos", "hop_decoupled", "onehop_ctx", "type_ctx", "graph_summary", "graph_summary_basis"])
     ap.add_argument("--peprompt_ctx_dim", type=int, default=0)
     return ap
 

@@ -45,6 +45,7 @@ from gpbench.utils.wandb_utils import (
     upload_file_artifact,
 )
 from protocols.hgmp.utils_legacy import create_matrix, seed_everything
+from protocols.hgmp import data_legacy as legacy_data_module
 from protocols.hgprompt.runner import _run_once as hgprompt_run_once
 from protocols.hgprompt.adapter import load_hgprompt_downstream_bundle
 
@@ -667,7 +668,11 @@ def _build_single_sample(graph, targetnode: str, node_id: int, label: int, datas
         {targetnode: int(node_id)},
         k=HOP_NUM[dataset],
     )
-    return (subgraph, inverse_indices, torch.tensor(int(label)))
+    if str(dataset) == "IMDB" and "oldy" in set(graph.ndata.keys()):
+        label_tensor = graph.ndata["oldy"][targetnode][int(node_id)].detach().cpu().long()
+    else:
+        label_tensor = torch.tensor(int(label), dtype=torch.long)
+    return (subgraph, inverse_indices, label_tensor)
 
 
 def load_peprompt_offline_legacy_splits(args):
@@ -690,6 +695,8 @@ def load_peprompt_offline_legacy_splits(args):
     setattr(args, "peprompt_edge_feature_dim", int(payload.get("peprompt_edge_feature_dim", 0)))
     setattr(args, "peprompt_metapath_count", int(payload.get("metapath_count") or 0))
     setattr(args, "peprompt_graph_summary_dim", int(payload.get("peprompt_graph_summary_dim", 0) or 0))
+    setattr(args, "peprompt_metapath_pos_dim", int(payload.get("peprompt_metapath_pos_dim", 0) or 0))
+    setattr(args, "peprompt_metapath_pos_feature_name", str(payload.get("peprompt_metapath_pos_feature_name", "peprompt_metapath_pos_feat")))
     targetnode = payload["targetnode"]
     dropped_ctx_by_target = payload.get("dropped_metapath_context_by_target")
     dropped_onehop_ctx_by_target = payload.get("dropped_onehop_context_by_target")
@@ -729,6 +736,8 @@ def _peprompt_cache_subgraph_type(args) -> str:
         suffix += f"_typectx_d{ctx_dim}"
     elif fusion_mode in {"graph_summary", "graph_summary_basis"}:
         suffix += "_graphsum"
+    elif fusion_mode == "metapath_pos":
+        suffix += "_mppos"
     return f"metapath_topk_{suffix}"
 
 
@@ -817,6 +826,7 @@ def _make_legacy_args(cli_args, method: str, ckpt_path: str, split_seed: int, re
         peprompt_generator_hidden=cli_args.peprompt_generator_hidden,
         peprompt_metapath_embed_dim=cli_args.peprompt_metapath_embed_dim,
         peprompt_graph_summary_dim=cli_args.peprompt_graph_summary_dim,
+        peprompt_metapath_pos_dim=cli_args.peprompt_metapath_pos_dim,
         peprompt_basis_count=cli_args.peprompt_basis_count,
         peprompt_onehop_center_fusion=cli_args.peprompt_onehop_center_fusion,
         embed_batch_size=cli_args.embed_batch_size,
@@ -829,6 +839,7 @@ def _make_legacy_args(cli_args, method: str, ckpt_path: str, split_seed: int, re
         weight_decay=cli_args.weight_decay,
         early_stop_metric=cli_args.early_stop_metric,
         peprompt_early_stop_mode=cli_args.peprompt_early_stop_mode,
+        peprompt_eval_mode=cli_args.peprompt_eval_mode,
         hgmp_prompt_recipe=cli_args.hgmp_prompt_recipe,
         hgmp_prompt_prompt_lr=cli_args.hgmp_prompt_prompt_lr,
         hgmp_prompt_head_lr=cli_args.hgmp_prompt_head_lr,
@@ -837,6 +848,9 @@ def _make_legacy_args(cli_args, method: str, ckpt_path: str, split_seed: int, re
         hgmp_prompt_epochs=cli_args.hgmp_prompt_epochs,
         hgmp_prompt_patience=cli_args.hgmp_prompt_patience,
         hgmp_prompt_early_stop_mode=cli_args.hgmp_prompt_early_stop_mode,
+        hgmp_prompt_eval_mode=cli_args.hgmp_prompt_eval_mode,
+        hgmp_prompt_split_source=cli_args.hgmp_prompt_split_source,
+        hgmp_legacy_data_root=cli_args.hgmp_legacy_data_root,
         save_dir=str(cli_args.save_dir),
         root=cli_args.root,
         splits=cli_args.splits,
@@ -848,11 +862,18 @@ def run_legacy_method_once(cli_args, method: str, ckpt_path: str, split_seed: in
     _set_global_seed(args.seed)
 
     orig_loader = legacy_bridge._load_legacy_fewshot_splits
-    legacy_bridge._load_legacy_fewshot_splits = _patched_legacy_split_loader
+    orig_data_root = legacy_data_module.DATA_ROOT
+    use_legacy_task_files = method == "hgmp_prompt" and str(args.hgmp_prompt_split_source) == "legacy"
+    if use_legacy_task_files:
+        legacy_data_module.DATA_ROOT = Path(args.hgmp_legacy_data_root)
+    else:
+        legacy_bridge._load_legacy_fewshot_splits = _patched_legacy_split_loader
     try:
         method_dir = method
         if method == "peprompt":
             method_dir = f"{method}.{args.subgraph_type}"
+        elif method == "hgmp_prompt" and use_legacy_task_files:
+            method_dir = f"{method}.legacy_split"
         save_dir = (
             Path(args.save_dir)
             / "aligned_protocol"
@@ -921,6 +942,7 @@ def run_legacy_method_once(cli_args, method: str, ckpt_path: str, split_seed: in
             )
     finally:
         legacy_bridge._load_legacy_fewshot_splits = orig_loader
+        legacy_data_module.DATA_ROOT = orig_data_root
 
     return RunRecord(
         method=method,
@@ -1182,6 +1204,26 @@ def build_parser():
         choices=["auto", "metric", "legacy_loss"],
         help="Use validation metric selection by default so hgmp_prompt and peprompt share the same model-selection protocol.",
     )
+    ap.add_argument(
+        "--hgmp_prompt_eval_mode",
+        type=str,
+        default="full",
+        choices=["full", "early_stop_only"],
+        help="For hgmp_prompt, full logs per-epoch F1; early_stop_only only evaluates the early-stop signal each epoch and computes final F1 once.",
+    )
+    ap.add_argument(
+        "--hgmp_prompt_split_source",
+        type=str,
+        default="offline",
+        choices=["offline", "legacy"],
+        help="For hgmp_prompt, use PEPrompt offline cache splits or original HGMP induced_graphs task files.",
+    )
+    ap.add_argument(
+        "--hgmp_legacy_data_root",
+        type=Path,
+        default=Path("data"),
+        help="Root containing <dataset>/induced_graphs for original HGMP task files, e.g. /path/to/HGMP/dataset.",
+    )
 
     # 关系提示注入设置：控制消息是加法还是乘法，以及聚合和归一化方式。
     ap.add_argument("--relation_prompt_mode", type=str, default="mul", choices=["mul", "add"])  # 提示注入方式：mul 对应乘法，add 对应加法
@@ -1220,14 +1262,23 @@ def build_parser():
         choices=["metric", "loss"],
         help="PEPrompt downstream early stopping: validation metric or validation loss.",
     )
+    ap.add_argument(
+        "--peprompt_eval_mode",
+        type=str,
+        default="full",
+        choices=["full", "early_stop_only"],
+        help="PEPrompt downstream eval mode. early_stop_only skips per-epoch train/val/test F1 and evaluates F1 once on the best loss checkpoint.",
+    )
 
     # ---- hop-decomposed compensation (Module 1+2) ----
     ap.add_argument(
         "--peprompt_fusion_mode",
         type=str,
         default="none",
-        choices=["none", "hop_decoupled", "onehop_ctx", "type_ctx", "graph_summary", "graph_summary_basis"],
+        choices=["none", "edge_type", "metapath_pos", "hop_decoupled", "onehop_ctx", "type_ctx", "graph_summary", "graph_summary_basis"],
         help="Edge prompt fusion mode: 'none' = spectral PE only; "
+             "'edge_type' = spectral PE plus canonical edge-type embedding; "
+             "'metapath_pos' = spectral PE plus per-edge metapath-position support; "
              "'hop_decoupled' = PE + dropped-neighbour context + h_src + h_dst; "
              "'onehop_ctx' = 1-hop type-pooled dropped context on 1-hop edges; "
              "'type_ctx' = one pooled dropped-context per dst node type per subgraph; "
@@ -1246,6 +1297,12 @@ def build_parser():
         type=int,
         default=0,
         help="Graph-level metapath summary dimension; populated from offline cache when --peprompt_fusion_mode is graph_summary or graph_summary_basis.",
+    )
+    ap.add_argument(
+        "--peprompt_metapath_pos_dim",
+        type=int,
+        default=0,
+        help="Per-edge metapath-position support feature dimension; populated from offline cache when --peprompt_fusion_mode=metapath_pos.",
     )
     ap.add_argument(
         "--peprompt_basis_count",
