@@ -1,68 +1,53 @@
-> # 项目介绍
+# PEPrompt 研究日志
 
-目前异构图没有针对边的提示，因此可以通过typepair，即边两边不同类型对应一个prompt，通过一个小MLP融合
-并且为了影响消息传递，在每一层的后面加上prompt进行消息门控
+本文档用于记录 HGEP/PEPrompt 的方法设计、实现变化和实验结果。早期内容中包含一些已经被否定的尝试，例如 typepair prompt、dropped-context 复杂融合和基向量选择器；这些内容保留在历史记录中，当前推荐结论以前面的“当前状态”为准。
 
-- typepair是残差连接的，并且并没有比node prompt效果好多少
-- 如何添加结构信息对边信息进行去噪，可以采用小结构指标融入prompt
-- 实验证明只有Laplacian PE有效，并且效果较好，具体实现是通过看作同质图，计算前K个Laplacian 特征值，去掉0这个平凡解。不同节点对应不同k个特征值，将这k个组成位置向量，两节点的位置向量相减
-- PEPrompt与typepair通过add/mul/gate融合，目前发现gate的方式最好，即aA+(1-a)B的方式
+## 当前项目介绍
+
+PEPrompt 的核心目标是在 HGMP 的异构图 prompt 框架上，引入**边级结构提示**，使下游子图分类时的消息传递不仅依赖节点特征和节点 prompt，也能感知边在局部结构中的位置。
+
+当前稳定版本采用以下流程：
+
+1. 使用 HGMP 的 GraphCL 预训练 checkpoint 初始化异构 GNN。
+2. 离线生成 few-shot 下游子图缓存，支持 `khop`、`fanout` 和 `metapath_topk`。
+3. PEPrompt 当前主线使用 `metapath_topk` 子图。每个目标节点按元路径可达计数筛选 top-k 语义邻域，避免 khop 在高阶时引入过大的噪声子图。
+4. 对子图边计算 PE edge feature。当前有效主线是把异构子图视作同质图，计算 Laplacian PE，并用边两端 PE 差作为边结构编码。
+5. 用 PE edge feature 经过 MLP 生成 edge prompt，再注入 HGMP 的消息传递模块。
+
+当前推荐实验配置：
+
+| Dataset | PEPrompt Subgraph | Notes |
+| --- | --- | --- |
+| ACM | metapath h3/k3 | 当前 r10 结果最稳定，约 `0.8999/0.8997` |
+| DBLP | metapath h3/k3 | 相比 HGMP Prompt 有稳定提升 |
+| IMDB | metapath h2/k3 | 多标签任务，高阶 metapath 噪声更明显 |
+| Freebase | metapath h3/k3, `feats_type=1` | 避免 dense pseudo-feature 导致 CPU OOM |
+
+## 当前结论
+
+- Typepair prompt 单独作为类型级边 prompt 效果有限，后续不再作为主线。
+- Laplacian PE edge feature 是当前最有效的结构提示来源。
+- Metapath-topk 子图比 khop 更适合 PEPrompt，尤其在 ACM、DBLP、Freebase 上优势明显。
+- Dropped-context 虽然有小幅提升迹象，但存储、显存和运行时间代价过高，当前不作为主线。
+- IMDB 是特殊情况：任务是多标签，few-shot split 波动较大，高阶 metapath 容易引入噪声，因此当前使用 h2/k3。
+- Freebase 的主要问题不是原始图文件大小，而是无属性节点类型补 dense pseudo-feature 会导致巨大 CPU 内存占用；当前通过 `feats_type=1` 规避。
 
 ## 待解决问题
 
-- [ ] PEPrompt时间较多，需要评估并想办法不用特征分解的方式
-- [ ] 对比的基线HGMP没有达到论文84的水平，只有80
-- [x] **消融**，目前没有验证typepair是否也是噪声
-- [ ] **离线处理** 可以将生成Laplacian PE以及subgraph的部分预处理
-- [ ] **多数据集验证** 当前只验证了ACM以及10shots的情况
-- [ ] **预训练与子图采样方法** 原hgmp的预训练方法以及子图构建方式可能并不适用边提示
-- [ ] **hgprompt的比较** 无论是在hgmp还是hgprompt的论文，hgprompt方法在1至5shot下有着较大优势。
-- [ ] **子图构建** 原HGMP采用的子图构建方式大多是粗暴地用1阶邻居，部分用的2阶邻居
-- [ ] **大图** 当前设定了特征分解只能在50000个节点以内，假如数据集的节点数特别多，很可能造成特征分解的占用很大。
+- [ ] PEPrompt 仍然比纯节点 prompt 慢，需要进一步减少 PE 与 edge prompt 的下游开销。
+- [x] 验证 typepair 是否是噪声。结论：typepair 不是当前主线。
+- [x] 离线处理子图与 PE edge feature。
+- [x] 多数据集验证：ACM、DBLP、IMDB、Freebase 已跑通 r10 对比。
+- [ ] 进一步检查 Freebase 上 HGMP Prompt 异常偏低的原因。
+- [ ] 评估是否需要 hybrid early stopping，减少 IMDB 上 val loss 与 test F1 不一致的问题。
+- [ ] 整理最终论文表格所需的统一协议、日志路径和 checkpoint 说明。
 
+## 方法细节
 
----
+### Edge Prompt 注入
 
-## 提示融合介绍
+对边 $j \rightarrow i$，PEPrompt 先由边结构特征生成边提示 $p_{ij}$，再将其注入消息传递：
 
-在 `_fuse_edge_prompt` 函数中，模型实现了将 **宏观类型提示 $P_{type}$** 与 **微观边提示 $P_{edge}$** 结合的具体逻辑。
-
-设融合后的最终边级提示为 $p_{ij}$，代码提供了三种融合策略（通过 `--typepair_edge_prompt_fusion` 控制）：
-
-#### 1. Add 模式 (残差相加)
-```python
-if self.edge_prompt_fusion == "add":
-    return type_prompt.unsqueeze(0) + self.edge_prompt_alpha * edge_prompt
-```
-* **数学公式：** $p_{ij} = P_{type} + \alpha_{edge} \cdot P_{edge}$
-* **解释：** 以类型提示为主，局部拓扑特征作为加性扰动。
-
-#### 2. Mul 模式 (缩放相乘)
-```python
-if self.edge_prompt_fusion == "mul":
-    scale = 1.0 + self.edge_prompt_alpha * torch.tanh(edge_prompt)
-    return type_prompt.unsqueeze(0) * scale
-```
-* **数学公式：** $p_{ij} = P_{type} \odot (1 + \alpha_{edge} \cdot \tanh(P_{edge}))$
-* **解释：** 利用拓扑特征生成一个在 $[1-\alpha, 1+\alpha]$ 之间的放缩因子，对全局类型 Prompt 进行动态缩放（类似于注意力机制的权重调制）。
-
-#### 3. Gate 模式 (门控融合，默认推荐)
-```python
-gate = torch.sigmoid(edge_prompt)
-return gate * type_prompt.unsqueeze(0) + (1.0 - gate) * edge_prompt
-```
-* **数学公式：** 
-  $g_{ij} = \sigma(P_{edge})$
-  $p_{ij} = g_{ij} \odot P_{type} + (1 - g_{ij}) \odot P_{edge}$
-* **解释：** 经典的门控机制。利用当前边的拓扑特征计算出一个 0~1 的信息流门控 $g_{ij}$，动态决定当前这条边应该依赖“全局类型规律”还是依赖“自身拓扑规律”。
-
----
-
-注入前向传播：如何影响节点表征？
-
-拿到融合后的边提示 $p_{ij}$ 后，在 `TypePairRelationPrompt.forward` 中执行了**自定义的消息传递（Message Passing）**。
-
-#### 1. 构建消息 (Message)
 ```python
 msg = x_dict[src_t][src]
 if self.mode == "mul":
@@ -70,38 +55,40 @@ if self.mode == "mul":
 else:
     msg = msg + p
 ```
-* 对于边 $j \rightarrow i$，源节点特征为 $h_j$。
-* 如果 `--relation_prompt_mode="mul"`：消息 $m_{j \to i} = h_j \odot p_{ij}$
-* 如果 `--relation_prompt_mode="add"`：消息 $m_{j \to i} = h_j + p_{ij}$
 
-#### 2. 聚合消息并进行残差注入 (Aggregation & Residual Injection)
+- `mul`：$m_{j \to i} = h_j \odot p_{ij}$
+- `add`：$m_{j \to i} = h_j + p_{ij}$
+
+随后对目标节点入边消息聚合，并做残差更新：
+
 ```python
-agg_dict[dst_t].index_add_(0, dst, msg) 
-# ... 计算完 mean 后 ...
+agg_dict[dst_t].index_add_(0, dst, msg)
 h = x + self.alpha * agg
 h = self.drop(h)
 h = self.ln[ntype](h)
 ```
-* **聚合：** 将所有流向节点 $i$ 的消息通过 `index_add_` 累加起来，然后取平均（`mean`）或求和（`sum`），得到聚合信息 $\Delta h_i$。
-* **残差更新：** $h_i^{(new)} = \text{LayerNorm}\Big(\text{Dropout}(h_i + \alpha \cdot \Delta h_i)\Big)$
 
----
-## 子图提取
-K-Hop Ego-Network 采用的dgl的`khop_in_subgraph`函数，直接采样目标节点的K阶邻居以内
-#### 预训练阶段
-预训练阶段会进行子图分割，在子图上进行预训练，根据METIS算法将大图分割为500个社区子图
-#### 下游阶段
-khop_in_subgraph,每个数据集拥有不同的跳数。
+### 子图构建
 
-## 划分方式
-`k-shot pretrain`/ `官方val`/ `官方test`
+- `khop`：使用 DGL 的 `khop_in_subgraph`，直接取目标节点 K 阶邻域。
+- `metapath_topk`：枚举 M 跳内元路径，按可达 count 或 degree-normalized score 保留每条元路径 top-k 终点，再诱导得到子图。
+- 当前主线：PEPrompt 使用 `metapath_topk`，HGMP Prompt 对比使用 `khop`。
 
-hgmp原始划分: 每类最多先随机选400个节点，再从这400个节点里面进行划分。`k-shot pretrain`/ `k-shot val`/ `rest test`
+### Few-shot 划分
+
+当前对齐 HGMP 的 few-shot 设定：
+
+- 每个 split seed 生成 train/val/test；
+- 10-shot 下 train 和 val 都是 k-shot；
+- test 为剩余目标节点；
+- IMDB 多标签使用原 HGMP 风格的 F1 计算逻辑。
+
+## 历史实验记录
 
 
 
 
-> # 26.5.5 HGMP复现水平提升
+## 2026-05-05 HGMP 复现水平提升
 初始hgmp的水平为80%
 **当前水平**： 0.8264 std=0.0246 | macro_f1 mean=0.8254 std=0.0241
 与论文相比可能存在的问题：
@@ -112,7 +99,7 @@ hgmp原始划分: 每类最多先随机选400个节点，再从这400个节点�
 - [x] 添加environment.yml用于追踪环境
 - [x] 添加research_log.md 用于写实验记录
 
-> # 26.5.8 hgmp与hgmp_prompt历史命名问题
+## 2026-05-08 HGMP 与 HGMP Prompt 历史命名问题
 发现有两个历史遗留问题
 1. 之前methods分为hgmp与hgmp_prompt但我忘记了这一点。
 2. 下游中也会调用METIS，但按理来说这是上游预训练出现的东西
@@ -129,13 +116,13 @@ hgmp原始划分: 每类最多先随机选400个节点，再从这400个节点�
 
 hgmp若不使用离线处理子图速度极慢，并且采用双轮loss机制导致一直难以收敛
 
-> # 26.5.9 hgmp继续优化
+## 2026-05-09 HGMP 继续优化
 
 hgmp对于不同的数据集参数不同，因此为了达到最优效果，hgmp使用默认参数。
 
 现在看typepair是否需要使用代码进行实验
 
-> # 26.5.11 测试typepair是否为噪声
+## 2026-05-11 测试 typepair 是否为噪声
 实验结果表明，这个typepair确实是噪声：
 ```json
 {
@@ -205,8 +192,7 @@ hgmp对于不同的数据集参数不同，因此为了达到最优效果，hgmp
 
 在1shot的情况下比full版本提升了两个点，因此其实也是削弱
 
-> # 26.5.12 
-
+## 2026-05-12 子图采样与 PE 处理
 #### 关于子图采样方式和PE处理
 
 AI给出的Laplacian PE的优化：
@@ -238,7 +224,7 @@ AI给出的Laplacian PE的优化：
 
 graph PE实际上算是一种额外的信息，如何将这个额外的信息很好地利用起来呢。回到原来的题目，如何去控制目标节点的邻域走向呢，这个是否可以和采样meta-path sample以及
 
-> # 26.5.13
+## 2026-05-13 多数据集测试
 
 #### 多数据集测试
 为了测试fanout是否在其余的数据集上也有这样的优势，准备先将多数据集跑通
@@ -289,7 +275,7 @@ graph PE实际上算是一种额外的信息，如何将这个额外的信息很
 
 这里需要注意，ACM 的 `8.8G` 不是原始数据本体，而是历史 `data/acm/induced_graphs` 缓存占了约 `8.7G`。如果只看原始处理后的图文件，ACM 并不大。
 
-> # 26.5.14
+## 2026-05-14 子图采样问题与方法动机
 #### 子图采样对比出问题
 PPR采样已经被证明性能下降严重，因此
 
@@ -302,7 +288,7 @@ PPR采样已经被证明性能下降严重，因此
 2. 如何去区分这种不同。
 3. paper-author-paper，同一语义情况下的paper特征更有意义，但如何跳过这个author节点去获取paper的提示。
 
-> # 26.5.17
+## 2026-05-17 IMDB 问题排查
 IMDB数据集出现问题，性能没有原论文那么好，并且相较于原始论文性能差距很大，只有30多。
 因为IMDB是多标签的，但
 
@@ -318,11 +304,11 @@ IMDB数据集出现问题，性能没有原论文那么好，并且相较于原�
 2. 测试更多数据集 IMDB和DBLP， freebase太大得做特殊处理
 3. 阅读图位置编码和子图采样相关论文
 
-> # 26.5.19
+## 2026-05-19 可视化
 
 正在做可视化
 
-> # 26.5.31
+## 2026-05-31 Metapath-topk 子图构建
 
 上一个实验出现了一点问题，实际上本身可能存在一些问题，现在开始考虑异构图子图的构建问题。
 
@@ -417,7 +403,7 @@ python scripts/peprompt_benchmark.py \
   --subgraph_type metapath_topk \
   --metapath_rank_metric degree_norm \
   --peprompt_ckpt artifacts/checkpoints/hgmp/pretrain/ACM.GraphCL.GCN.hid512.np500.seed0.pth
-# 26.6.4
+## 2026-06-04 元路径采样与早停
 #### 元路径采样有效
 相较于直接的khop，metapath的结构是有效的，能够达到ACM 10-shot 88.6 此时的子图采样策略与prompt提示没有比较
 ```json
@@ -535,7 +521,7 @@ dropped = nonzero - keep
 4. metapath的方式，爆显存，每个sample要存
 
 
-# 26.6.10
+## 2026-06-10 Dropped-context 与 Prompt 结构
 自从发现dropped ctx在效率上不高外，我开始着手处理prompt本身的处理
 
 如果将ctx作为一个子图级别的提示，作为一个子图级别的统计量，而不是一个图级别的统计量，那么是否会有效果呢
@@ -609,7 +595,7 @@ mp_code_e = Σ w_m(e) * emb(m)
 alpha_e = softmax(MLP([pe_e, etype_emb, mp_code_e]))
 p_e = alpha_e @ B
 
-# 26.6.11
+## 2026-06-11 Top-k 参数与 Freebase
 
 #### topk参数实验
 
@@ -647,16 +633,16 @@ else:
 - 4 save 2，其余改为identity-like
 - 5 save 2, 其余改为Nx10 零特征
 
-# 2026.6.14
+## 2026-06-14 多数据集阶段结论
 1. ACM数据集 在10shot阶段稳定能超越HGMP
 2. IMDB数据集 10shot阶段由于一些原因，效果很差
 
-# 2026.6.16
+## 2026-06-16 IMDB F1 修正
 修改了下游的分类标准：什么先linear然后sofatmax,主要是如何将multihot 改为onehot，以及如何比对的问题，在imdb上
 
 并且刚需torchmetrics这个库进行下游的分类。
 
-# 2026.6.17
+## 2026-06-17
 
 ## HGMP Prompt vs PEPrompt r10 对比记录
 
