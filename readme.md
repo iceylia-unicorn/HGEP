@@ -1,334 +1,200 @@
-## 数据存储位置
-data/acm/raw/ACM/node.dat
+# HGEP / PEPrompt
 
+本项目用于复现 HGMP/HGPrompt 系列异构图 prompt 方法，并在此基础上研究 **PEPrompt**：一种基于边结构位置编码的异构图边级提示方法。
 
-## 分支exp/ v1
+当前主线不再使用早期的 typepair prompt 作为核心方法。实验表明，单纯的边类型 prompt 收益有限；更稳定的方向是使用离线子图采样和 PE edge feature，为下游消息传递生成 edge prompt。
 
-### 预训练
-```bash
-python scripts/pretrain_hgmp.py \ --root data \ --dataset ACM \ --tau_hops 2 \ --fanout 25 15 \ --batch_size 64 \ --epochs 50 \ --lr 1e-3 \ --weight_decay 1e-5 \ --backbone hgt \ --hidden_dim 128 \ --proj_dim 128 \ --num_layers 2 \ --num_heads 2 \ --dropout 0.2 \ --device cuda \ --save checkpoints/pretrain_hgmp_best.pt>
-```
-### 下游任务
-python scripts/finetune_fewshot.py \
-  --dataset ACM \
-  --ckpt checkpoints/pretrain_hgmp_best.pt \
-  --shot 1 \
-  --seed 1 \
-  --tau_hops 2 \
-  --fanout 25 15 \
-  --batch_size 32 \
-  --backbone hgt \
-  --hidden_dim 128 \
-  --num_layers 2 \
-  --num_heads 2 \
-  --prompt_mode mul \
-  --epochs 200 \
-  --patience 30 \
-  --early_stop_metric micro \
-  --lr 1e-3
+## 当前方法
 
-# 关于HGMP
-代码位于reorg/hgmp-hgprompt-aligned分支下
-## 预处理
-使用的类ProG induced graphs形式，因此需要先运行scripts/preprocess_legacy.py，运行后位置位于data/{dataname}/induced_graphs下
+PEPrompt 的下游流程：
 
+1. 使用 HGMP GraphCL checkpoint 初始化异构 GNN。
+2. 离线生成 few-shot 子图缓存。
+3. 对子图边计算 PE edge feature。
+4. 用 PE edge feature 通过 MLP 生成 edge prompt。
+5. 将 edge prompt 注入 HGMP 的消息传递过程。
 
-python scripts/hgmp_pretrain.py \
-  --dataset ACM \
-  --device cuda:0 \
-  --seed 0 \
-  --epochs 200 \
-  --benchmark_defaults
+当前推荐子图设置：
 
-python scripts/hgmp_run.py \
-  --dataset ACM \
-  --shot 10 \
-  --seed 0 \
-  --device cuda:0 \
-  --ckpt artifacts/checkpoints/hgmp/pretrain/ACM.GraphCL.GCN.hid128.np100.pth \
-  --benchmark_defaults
+| Dataset | PEPrompt Subgraph | Notes |
+| --- | --- | --- |
+| ACM | `metapath_topk`, hop=3, topk=3 | 当前 r10 结果约 `0.8999/0.8997` |
+| DBLP | `metapath_topk`, hop=3, topk=3 | 相比 HGMP Prompt 有稳定提升 |
+| IMDB | `metapath_topk`, hop=2, topk=3 | 多标签任务，高阶元路径噪声更明显 |
+| Freebase | `metapath_topk`, hop=3, topk=3, `feats_type=1` | 避免 dense pseudo-feature OOM |
 
+## 目录
 
-```bash 
-python scripts/protocol_fewshot_eval.py \
-  --method typepair \
-  --ckpt artifacts/checkpoints/hgmp/pretrain/ACM.GraphCL.GCN.hid128.np100.pth \
-  --dataset ACM \
-  --device cuda \
-  --shot 10 \
-  --seed 0 \
-  --num_class 3 \
-  --classification_type NIG \
-  --hidden_dim 128 \
-  --num_heads 2 \
-  --num_layers 2 \
-  --hgnn_type GCN
+```text
+scripts/
+  hgmp_pretrain.py              # HGMP GraphCL 预训练入口
+  precompute_peprompt_cache.py  # PEPrompt few-shot 子图与边特征离线缓存
+  peprompt_benchmark.py         # HGMP / HGMP Prompt / PEPrompt 下游对比
+
+src/gpbench/
+  protocol_bridge/              # HGMP legacy 协议桥接和 PEPrompt 实现
+  data/                         # 数据加载与预处理
+  pretrain/                     # 预训练相关模块
+
+protocols/hgmp/
+  *_legacy.py                   # 原 HGMP 逻辑的兼容实现
+
+artifacts/
+  checkpoints/                  # 预训练 checkpoint
+  cache/                        # 离线子图与 PE 缓存
+  logs/                         # 实验日志
+  results/                      # benchmark 输出结果
+
+research_log.md                 # 研究日志和关键实验结论
+readme_legacy.md                # 旧版命令记录，保留作历史参考
 ```
 
+## 环境
 
+当前主要环境：
 
-python scripts/protocol_fewshot_eval.py \
-  --method hgmp_prompt \
-  --ckpt artifacts/checkpoints/hgmp/pretrain/ACM.GraphCL.GCN.hid128.np100.pth \
-  --dataset ACM \
-  --device cuda \
-  --shot 10 \
-  --seed 0 \
-  --num_class 3 \
-  --classification_type NIG \
-  --hidden_dim 128 \
-  --num_heads 2 \
-  --num_layers 2 \
-  --hgnn_type GCN \
-  --epochs 200 \
-  --patience 30 \
-  --lr 5e-3
-
-# 包
-安装dgl 
-```
-Cuda 12.1
-dgl 2.4 
+```text
 python=3.11
-torch==2.4.1
+torch=2.4.1
+dgl=2.4.0
+torch_geometric
+scikit-learn
+torchmetrics
 ```
+
+安装参考：
+
 ```bash
 conda install pytorch==2.4.1 torchvision==0.19.1 torchaudio==2.4.1 pytorch-cuda=12.1 -c pytorch -c nvidia
-
-pip install torch_scatter torch_sparse torch_cluster torch_spline_conv pyg_lib -f https://data.pyg.org/whl/torch-2.4.1%2Bcu124.html
-
-pip install torch_geometric
-
+pip install torch_geometric scikit-learn torchmetrics
 pip install dgl==2.4.0 -f https://data.dgl.ai/wheels/torch-2.4/cu121/repo.html
-
-pip install scikit-learn
 ```
-# hgprompt 
-## pretrain
-python scripts/hgprompt_pretrain.py \
+
+## HGMP 预训练
+
+ACM 示例：
+
+```bash
+python -u scripts/hgmp_pretrain.py \
   --dataset ACM \
   --device cuda:0 \
-  --seed 1 \
-  --epoch 200 \
-  --benchmark_defaults \
-  --ckpt_alias artifacts/checkpoints/hgprompt/pretrain/acm_hgprompt_seed1.pt
-## downstream
-
-python scripts/hgprompt_run.py \
-  --dataset ACM \
-  --splits splits \
-  --shot 10 \
   --seed 0 \
-  --repeat 1 \
-  --device cuda \
-  --ckpt artifacts/checkpoints/hgprompt/pretrain/ACM.gcn.ft2.hop1.seed0.best.pt \
+  --epochs 200 \
   --benchmark_defaults
+```
 
+Freebase 建议使用 `feats_type=1`，避免无属性节点类型被补成巨大 dense 方阵：
 
-# 有关aligned
-需要先用hgprompt生成0-4 seed pretrain.pt，然后就能自动读取不同pt进行
-
-但是这种方式和我以前见过的不一样，应该是同一pretrain，然后不同seed
-
-python scripts/protocol_benchmark_v2.py \
-  --dataset ACM \
-  --shot 10 \
-  --methods hgmp typepair hgprompt \
-  --seeds 0 1 2 3 4 \
-  --hgnn_type GCN \
-  --repeats 2 \
+```bash
+python -u scripts/hgmp_pretrain.py \
+  --dataset Freebase \
+  --device cuda:0 \
+  --seed 0 \
+  --epochs 200 \
+  --benchmark_defaults \
+  --feats_type 1 \
   --hidden_dim 512 \
-  --num_heads 8 \
-  --num_samples 500 \
-  --hgmp_ckpt artifacts/checkpoints/hgmp/pretrain/ACM.GraphCL.GCN.hid128.np100.pth \
-  --typepair_ckpt artifacts/checkpoints/hgmp/pretrain/ACM.GraphCL.GCN.hid128.np100.pth \
-  --hgprompt_ckpt artifacts/checkpoints/hgprompt/pretrain/ACM.gcn.ft2.hop1.seed0.best.pt
+  --num_samples 50
+```
 
-python scripts/protocol_benchmark_v2.py \
+## PEPrompt 离线缓存
+
+ACM h3/k3 示例：
+
+```bash
+python -u scripts/precompute_peprompt_cache.py \
   --dataset ACM \
-  --shot 10 \
-  --methods typepair \
-  --seeds 0 \
-  --hgnn_type GCN \
-  --hidden_dim 512 \
-  --num_heads 8 \
-  --num_samples 500 \
-  --repeats 1 \
-  --hgmp_ckpt artifacts/checkpoints/hgmp/pretrain/ACM.GraphCL.GCN.hid512.np500.seed0.pth \
-  --typepair_ckpt artifacts/checkpoints/hgmp/pretrain/ACM.GraphCL.GCN.hid512.np500.seed0.pth \
-  --hgprompt_ckpt artifacts/checkpoints/hgprompt/pretrain/ACM.gcn.ft2.hop1.seed0.best.pt \
-  --enable_typepair_edge_features \
-  --typepair_spectral_dim 8 \
-  --typepair_edge_prompt_fusion add \
-  --use_wandb
-
-启用edgeprompt
-python scripts/protocol_benchmark_v2.py \
-  --methods typepair \
-  --enable_typepair_edge_features \
-  --typepair_spectral_dim 8 \
-  --typepair_edge_prompt_fusion add \
-  --use_wandb \
-  --wandb_mode offline \
-  --dataset ACM \
-  --shot 1 \
-  --typepair_ckpt /path/to/ckpt.pt
-
-# PEPrompt
-
-## 预处理
-python scripts/precompute_peprompt_cache.py \
-  --datasets ACM \
   --shots 10 \
   --seeds 0 1 2 3 4 \
-  --max_pool_size 400
+  --subgraph_type metapath_topk \
+  --metapath_max_hop 3 \
+  --metapath_topk 3 \
+  --metapath_rank_metric count \
+  --peprompt_fusion_mode none
+```
 
-## 下游
-由于typoepair已被证明无效，因此直接使用PEPrompt
+Freebase：
+
 ```bash
-nohup python -u scripts/peprompt_benchmark.py \
+python -u scripts/precompute_peprompt_cache.py \
+  --dataset Freebase \
+  --shots 10 \
+  --seeds 0 1 2 3 4 \
+  --subgraph_type metapath_topk \
+  --metapath_max_hop 3 \
+  --metapath_topk 3 \
+  --metapath_rank_metric count \
+  --peprompt_fusion_mode none \
+  --feats_type 1
+```
+
+## 下游 Benchmark
+
+PEPrompt ACM 示例：
+
+```bash
+python -u scripts/peprompt_benchmark.py \
   --dataset ACM \
   --methods peprompt \
-  --seeds 0 1 2 3 4 \
-  --repeats 1 \
   --shot 10 \
-  --peprompt_ckpt artifacts/checkpoints/hgmp/pretrain/ACM.GraphCL.GCN.hid512.np500.seed0.pth \
-  --use_wandb \
-  --wandb_mode online \
-  --wandb_name peprompt_test_precompute \
-  --wandb_tags PEPrompt ACM 1-shot \
-  > nohup.out 2>&1 &
-```
-# 有关wandb
-项目中使用了wandb， 只有传入--use_wandb 才会启用
-需要根目录创建.codex，并写入WANDB_API_KEY=XXX
-
-## wandb sweep
-sweep配置卸载configs/wandb中
-wandb sweep configs/wandb/XXXX.yaml
-然后会返回运行需要的指令大概
-大概是 wandb agent 
-
-
-python scripts/typepair_edge_feature_sweep.py \
-  --dataset ACM \
-  --shot 1 \
-  --methods typepair \
   --seeds 0 1 2 3 4 \
-  --hgnn_type GCN \
-  --hidden_dim 512 \
-  --num_heads 8 \
-  --num_samples 500 \
-  --repeats 1 \
-  --hgmp_ckpt artifacts/checkpoints/hgmp/pretrain/ACM.GraphCL.GCN.hid512.np500.seed0.pth \
-  --typepair_ckpt artifacts/checkpoints/hgmp/pretrain/ACM.GraphCL.GCN.hid512.np500.seed0.pth \
-  --hgprompt_ckpt artifacts/checkpoints/hgprompt/pretrain/ACM.gcn.ft2.hop1.seed0.best.pt \
-  --enable_typepair_edge_features \
-  --typepair_spectral_dim 8 \
-  --typepair_edge_prompt_fusion add \
-  --use_wandb \
-  --create_sweep \
-  --run_agent \
-  --sweep_count 80 \
-  --wandb_project HGEP \
-  --wandb_mode offline
-
-# temp 
-```bash
-python scripts/protocol_benchmark_v2.py \
-  --dataset ACM \
-  --shot 10 \
-  --methods hgmp hgmp_prompt \
-  --seeds 0 \
-  --hgnn_type GCN \
-  --hidden_dim 512 \
-  --num_heads 8 \
-  --num_samples 500 \
-  --repeats 1 \
-  --hgmp_ckpt artifacts/checkpoints/hgmp/pretrain/ACM.GraphCL.GCN.hid512.np500.seed0.pth \
-  --typepair_ckpt artifacts/checkpoints/hgmp/pretrain/ACM.GraphCL.GCN.hid512.np500.seed0.pth \
-  --hgprompt_ckpt artifacts/checkpoints/hgprompt/pretrain/ACM.gcn.ft2.hop1.seed0.best.pt 
-```
-```bash
-nohup python -u scripts/protocol_benchmark_v2.py   --dataset ACM   --shot 10   --methods typepair hgmp   --seeds 0 1 2 3 4   --hgnn_type GCN   --hidden_dim 512   --num_heads 8   --num_samples 500   --repeats 10   --hgmp_ckpt artifacts/checkpoints/hgmp/pretrain/ACM.GraphCL.GCN.hid512.np500.seed0.pth   --typepair_ckpt artifacts/checkpoints/hgmp/pretrain/ACM.GraphCL.GCN.hid512.np500.seed0.pth   --hgprompt_ckpt artifacts/checkpoints/hgprompt/pretrain/ACM.gcn.ft2.hop1.seed0.best.pt   --use_wandb > artifacts/logs/baseTest.log 2>&1 &
-```
-
-```bash
-nohup /home_A/yuanqilin/.conda/envs/HGEP/bin/python -u scripts/protocol_multishot_eval.py \
-  --dataset ACM \
-  --methods typepair \
-  --shots 1 3 5 10 \
-  --seeds 0 1 2 3 4 \
-  --repeats 1 \
-  --hgnn_type GCN \
-  --hidden_dim 512 \
-  --num_samples 500 \
-  --typepair_ckpt artifacts/checkpoints/hgmp/pretrain/ACM.GraphCL.GCN.hid512.np500.seed0.pth \
-  --hgmp_ckpt artifacts/checkpoints/hgmp/pretrain/ACM.GraphCL.GCN.hid512.np500.seed0.pth \
-  --enable_typepair_edge_features \
-  --typepair_edge_feature_names SpectralEmbeddingDiff \
-  --typepair_spectral_dim 8 \
-  --typepair_edge_prompt_fusion gate \
-  --use_wandb \
-  --wandb_mode online \
-  > nohup.out 2>&1 &
-```
-python scripts/peprompt_benchmark.py \
-  --dataset IMDB \
-  --root data \
-  --splits splits \
-  --shot 10 \
-  --methods hgmp \
-  --seeds 0 1 2 3 4 \
-  --repeats 1 \
-  --pretrain_seed 0 \
-  --run_seed_base 0 \
+  --repeats 10 \
   --device cuda:0 \
-  --save_dir artifacts/results/peprompt_khop_fanout_suite \
-  --hgmp_ckpt artifacts/checkpoints/hgmp/pretrain/IMDB.GraphCL.GCN.hid256.np200.seed0.pth \
-  --feats_type 0 \
-  --hidden_dim 256 \
-  --num_heads 8 \
-  --num_layers 2 \
-  --dropout 0.5 \
-  --hgnn_type GCN \
-  --num_samples 200 \
-  --num_class 5 \
-  --classification_type NIG \
-  --embed_batch_size 32 \
-  --head_hidden 128 \
-  --head_dropout 0.3 \
-  --epochs 200 \
-  --patience 30 \
-  --lr 5e-3 \
-  --weight_decay 1e-4 \
-  --early_stop_metric macro \
-  --relation_prompt_mode mul \
-  --relation_prompt_alpha 0.5 \
-  --relation_prompt_dropout 0.1 \
-  --relation_prompt_aggr mean \
-  --peprompt_edge_feature_name peprompt_edge_feat \
-  --peprompt_offline_cache_dir artifacts/cache/peprompt_offline_splits \
-  --subgraph_type khop \
-  --peprompt_spectral_cache_dir artifacts/cache/peprompt_spectral_embeddings \
-  --peprompt_spectral_dim 16 \
-  --peprompt_spectral_max_nodes 50000 \
-  --peprompt_edge_prompt_hidden 128
+  --subgraph_type metapath_topk \
+  --metapath_max_hop 3 \
+  --metapath_topk 3 \
+  --metapath_rank_metric count \
+  --peprompt_fusion_mode none \
+  --peprompt_early_stop_mode loss \
+  --peprompt_eval_mode early_stop_only \
+  --lr 1e-3 \
+  --prompt_lr 1e-4 \
+  --peprompt_ckpt artifacts/checkpoints/hgmp/pretrain/ACM.GraphCL.GCN.hid512.np500.seed0.pth
+```
 
+HGMP Prompt 对比：
 
-nohup python -u scripts/peprompt_benchmark.py \
+```bash
+python -u scripts/peprompt_benchmark.py \
   --dataset ACM \
-  --methods peprompt \
-  --seeds 1 \
-  --repeats 1 \
+  --methods hgmp_prompt \
   --shot 10 \
-  --peprompt_ckpt artifacts/checkpoints/hgmp/pretrain/ACM.GraphCL.GCN.hid512.np500.seed0.pth \
-  > nohup.out 2>&1 &
+  --seeds 0 1 2 3 4 \
+  --repeats 10 \
+  --device cuda:0 \
+  --subgraph_type khop \
+  --hgmp_prompt_recipe legacy \
+  --hgmp_prompt_batch_size 10 \
+  --hgmp_prompt_epochs 300 \
+  --hgmp_prompt_patience 30 \
+  --hgmp_prompt_early_stop_mode legacy_loss \
+  --hgmp_prompt_eval_mode early_stop_only \
+  --hgmp_ckpt artifacts/checkpoints/hgmp/pretrain/ACM.GraphCL.GCN.hid512.np500.seed0.pth
+```
 
-# 有关metapath 子图采样
-nohup python -u scripts/peprompt_benchmark.py   --dataset ACM   --methods peprompt   --shot 10   --seeds 0 1 2 3 4   --repeats 1   --device cuda:0   --subgraph_type metapath_topk   --metapath_max_hop 3   --metapath_topk 5   --metapath_rank_metric count   --peprompt_fusion_mode onehop_ctx   --peprompt_ctx_dim 1902   --peprompt_onehop_center_fusion   --peprompt_early_stop_mode loss   --lr 5e-3   --prompt_lr 5e-4   --peprompt_ckpt artifacts/checkpoints/hgmp/pretrain/ACM.GraphCL.GCN.hid512.np500.seed0.pth > onehop_center_fusion.out 2>&1
+## 最新 r10 结果
 
+| Dataset | Method | Subgraph | Count | Micro-F1 | Macro-F1 |
+| --- | --- | --- | ---: | ---: | ---: |
+| ACM | HGMP Prompt | khop | 50 | 0.8371 ± 0.0319 | 0.8366 ± 0.0320 |
+| ACM | PEPrompt | metapath h3/k3 | 50 | 0.8999 ± 0.0055 | 0.8997 ± 0.0053 |
+| DBLP | HGMP Prompt | khop | 50 | 0.5842 ± 0.0360 | 0.5816 ± 0.0370 |
+| DBLP | PEPrompt | metapath h3/k3 | 50 | 0.6187 ± 0.0433 | 0.6171 ± 0.0431 |
+| IMDB | HGMP Prompt | khop | 50 | 0.6760 ± 0.0121 | 0.5996 ± 0.0150 |
+| IMDB | PEPrompt | metapath h2/k3 | 50 | 0.6667 ± 0.0159 | 0.5883 ± 0.0197 |
+| Freebase | HGMP Prompt | khop, ft1 | 50 | 0.2098 ± 0.0199 | 0.1318 ± 0.0201 |
+| Freebase | PEPrompt | metapath h3/k3, ft1 | 50 | 0.3463 ± 0.0207 | 0.2949 ± 0.0268 |
 
+详细分析见 [research_log.md](research_log.md)。
 
-配置hop topk: ACM 3,3  
+## W&B
 
+只有传入 `--use_wandb` 时才会启用 W&B。可以在项目根目录创建 `.codex`：
+
+```text
+WANDB_API_KEY=xxx
+```
+
+## 历史说明
+
+早期版本包含 `typepair`、`typepair_edge_feature_fusion`、`graph_summary_basis`、`dropped-context` 等实验分支。当前记录保留在 [research_log.md](research_log.md) 和 [readme_legacy.md](readme_legacy.md) 中，但主线实验以本文档中的 PEPrompt metapath-topk 配置为准。
