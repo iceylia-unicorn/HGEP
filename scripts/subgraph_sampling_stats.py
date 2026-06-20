@@ -194,6 +194,10 @@ def _rank_values(raw_scores: np.ndarray, endpoint_popularity: np.ndarray | None,
     if rank_metric == "degree_norm":
         denom = np.sqrt(np.maximum(endpoint_popularity, 1.0))
         return raw_scores / denom
+    if rank_metric == "count_idf":
+        if endpoint_popularity is None:
+            raise ValueError("count_idf requires a per-metapath idf weight")
+        return raw_scores * endpoint_popularity
     raise ValueError(f"Unsupported rank_metric={rank_metric}")
 
 
@@ -349,7 +353,7 @@ def build_parser():
     ap.add_argument("--khop_nums", nargs="*", type=int, default=None)
     ap.add_argument("--max_hops", nargs="+", type=int, default=[1, 2])
     ap.add_argument("--topks", nargs="+", type=int, default=[5, 10, 20])
-    ap.add_argument("--rank_metric", type=str, default="count", choices=["count", "degree_norm"])
+    ap.add_argument("--rank_metric", type=str, default="count", choices=["count", "degree_norm", "count_idf"])
     ap.add_argument("--target_sample_size", type=int, default=0, help="0 means all labeled target nodes.")
     ap.add_argument("--seed", type=int, default=0)
     ap.add_argument("--keep_self", action="store_true", help="Keep the target node itself in same-type metapath top-k.")

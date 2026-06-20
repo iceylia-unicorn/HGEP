@@ -297,6 +297,26 @@ def _prepare_homo_graph_for_device(hgnn, g, device: torch.device):
     return homo_g.to(device)
 
 
+def _drop_training_edges(g, drop_prob: float):
+    drop_prob = float(drop_prob or 0.0)
+    if drop_prob <= 0.0:
+        return g
+    if drop_prob >= 1.0:
+        raise ValueError("peprompt_edge_dropout must be < 1.0")
+
+    out = g
+    for etype in g.canonical_etypes:
+        num_edges = int(out.num_edges(etype=etype))
+        if num_edges <= 0:
+            continue
+        drop_mask = torch.rand(num_edges) < drop_prob
+        if not bool(drop_mask.any()):
+            continue
+        eids = torch.nonzero(drop_mask, as_tuple=False).view(-1)
+        out = dgl.remove_edges(out, eids, etype=etype)
+    return out
+
+
 def _uses_edge_features(hgnn) -> bool:
     relation_prompt = getattr(hgnn, "relation_prompt", None)
     return bool(getattr(relation_prompt, "uses_edge_features", False))
@@ -774,6 +794,8 @@ def _train_relation_prompt_probe(
         raise ValueError(f"Unsupported {args.method}_eval_mode: {eval_mode}")
     if eval_mode == "early_stop_only" and early_stop_mode != "loss":
         raise ValueError("PEPrompt eval_mode=early_stop_only requires peprompt_early_stop_mode=loss.")
+    mp_reg_weight = float(getattr(args, "peprompt_mp_reg_weight", 0.0) or 0.0)
+    edge_dropout = float(getattr(args, "peprompt_edge_dropout", 0.0) or 0.0)
 
     hgnn = build_legacy_hgnn(
         args,
@@ -832,6 +854,8 @@ def _train_relation_prompt_probe(
 
         for batch in train_loader:
             batched_graph, batched_label = _unpack_batch(batch, args.classification_type)
+            if edge_dropout > 0.0:
+                batched_graph = _drop_training_edges(batched_graph, edge_dropout)
             edge_index_dict = _prepare_edge_indices_for_device(hgnn, batched_graph, args.device)
             edge_feature_dict = _prepare_edge_features_for_device(hgnn, batched_graph, args.device)
             homo_graph = _prepare_homo_graph_for_device(hgnn, batched_graph, args.device)
@@ -843,6 +867,8 @@ def _train_relation_prompt_probe(
                 args.classification_type,
             )
 
+            if mp_reg_weight > 0.0 and hasattr(hgnn.relation_prompt, "reset_regularization_loss"):
+                hgnn.relation_prompt.reset_regularization_loss()
             graph_emb = forward_graph_batch(
                 hgnn,
                 batched_graph,
@@ -858,6 +884,11 @@ def _train_relation_prompt_probe(
                 args.dataset,
                 args.classification_type,
             )
+            if mp_reg_weight > 0.0 and hasattr(hgnn.relation_prompt, "regularization_loss"):
+                loss = loss + mp_reg_weight * hgnn.relation_prompt.regularization_loss(
+                    device=loss.device,
+                    dtype=loss.dtype,
+                )
 
             opt.zero_grad()
             loss.backward()

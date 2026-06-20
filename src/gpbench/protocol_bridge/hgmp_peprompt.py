@@ -42,6 +42,7 @@ class PEPromptRelationConfig:
     metapath_pos_dim: int = 0
     metapath_pos_feature_name: str = "peprompt_metapath_pos_feat"
     basis_count: int = 4
+    metapath_reg_mode: str = "none"
     onehop_center_fusion: bool = False
 
 
@@ -74,6 +75,7 @@ class PEPromptRelation(nn.Module):
         metapath_pos_dim: int = 0,
         metapath_pos_feature_name: str = "peprompt_metapath_pos_feat",
         basis_count: int = 4,
+        metapath_reg_mode: str = "none",
         onehop_center_fusion: bool = False,
     ):
         """
@@ -105,6 +107,8 @@ class PEPromptRelation(nn.Module):
             raise ValueError(f"Unsupported aggr: {aggr}")
         if fusion_mode not in {"none", "edge_type", "metapath_pos", "hop_decoupled", "onehop_ctx", "type_ctx", "graph_summary", "graph_summary_basis"}:
             raise ValueError(f"Unsupported fusion_mode: {fusion_mode}")
+        if metapath_reg_mode not in {"none", "consistency", "predict"}:
+            raise ValueError(f"Unsupported metapath_reg_mode: {metapath_reg_mode}")
         if int(edge_feature_dim or 0) <= 0:
             raise ValueError("PEPromptRelation requires positive edge_feature_dim.")
 
@@ -123,6 +127,7 @@ class PEPromptRelation(nn.Module):
         self.metapath_pos_dim = int(metapath_pos_dim or 0)
         self.metapath_pos_feature_name = str(metapath_pos_feature_name)
         self.basis_count = int(basis_count or 0)
+        self.metapath_reg_mode = str(metapath_reg_mode)
         self.onehop_center_fusion = bool(onehop_center_fusion)
         self.edge_type_to_id = {tuple(etype): idx for idx, etype in enumerate(edge_types)}
         self.edge_type_embed_dim = int(self.metapath_embed_dim or 8)
@@ -136,6 +141,8 @@ class PEPromptRelation(nn.Module):
         )
         self.edge_prompt_selector = None
         self.prompt_basis = None
+        self.metapath_reg_predictor = None
+        self.last_reg_loss = None
 
         # Build MLP with appropriate input dimension based on fusion mode.
         if fusion_mode == "hop_decoupled" and self.ctx_dim > 0:
@@ -262,7 +269,6 @@ class PEPromptRelation(nn.Module):
                 nn.Dropout(dropout),
                 nn.Linear(edge_prompt_hidden, dim),
             )
-            self.metapath_embedding = None
             self.edge_type_embedding = None
             self.ctx_gate_mlp = None
             self.ctx_value_mlp = None
@@ -298,9 +304,30 @@ class PEPromptRelation(nn.Module):
             self.edge_prompt_selector = None
             self.prompt_basis = None
 
+        if self.metapath_reg_mode == "predict" and self.metapath_pos_dim > 0:
+            self.metapath_reg_predictor = nn.Sequential(
+                nn.LayerNorm(dim),
+                nn.Linear(dim, edge_prompt_hidden),
+                nn.ReLU(),
+                nn.Dropout(dropout),
+                nn.Linear(edge_prompt_hidden, self.metapath_pos_dim),
+            )
+
     @property
     def uses_edge_features(self) -> bool:
         return self.edge_prompt_mlp is not None or self.edge_prompt_selector is not None
+
+    def reset_regularization_loss(self):
+        self.last_reg_loss = None
+
+    def regularization_loss(self, device=None, dtype=None) -> torch.Tensor:
+        if self.last_reg_loss is None:
+            if device is None:
+                device = next(self.parameters()).device
+            if dtype is None:
+                dtype = next(self.parameters()).dtype
+            return torch.zeros((), device=device, dtype=dtype)
+        return self.last_reg_loss
 
     def _match_last_dim(self, x: torch.Tensor, dim: int) -> torch.Tensor:
         if x.size(-1) == dim:
@@ -505,6 +532,37 @@ class PEPromptRelation(nn.Module):
             return None
         edge_data = edge_data.to(device=device, dtype=dtype)
         return self._match_last_dim(edge_data, self.metapath_pos_dim)
+
+    def _accumulate_metapath_prompt_regularization(self, p: torch.Tensor, metapath_pos: torch.Tensor | None):
+        if self.metapath_reg_mode == "none" or metapath_pos is None:
+            return
+        if p.numel() == 0 or metapath_pos.numel() == 0:
+            return
+
+        weights = metapath_pos.to(device=p.device, dtype=p.dtype).clamp_min(0.0)
+        if self.metapath_reg_mode == "predict":
+            if self.metapath_reg_predictor is None:
+                return
+            target = (weights > 0).to(dtype=p.dtype)
+            logits = self.metapath_reg_predictor(p)
+            reg_loss = torch.nn.functional.binary_cross_entropy_with_logits(logits, target)
+            self.last_reg_loss = reg_loss if self.last_reg_loss is None else self.last_reg_loss + reg_loss
+            return
+
+        support = weights.sum(dim=0)
+        valid = support > 1e-6
+        if not bool(valid.any()):
+            return
+
+        weights = weights[:, valid]
+        support = support[valid].clamp_min(1e-6)
+        means = (weights.transpose(0, 1) @ p) / support.unsqueeze(-1)
+        diff = p.unsqueeze(1) - means.unsqueeze(0)
+        loss_per_group = (weights.unsqueeze(-1) * diff.square()).sum(dim=(0, 2)) / (
+            support * max(int(p.size(-1)), 1)
+        )
+        reg_loss = loss_per_group.mean()
+        self.last_reg_loss = reg_loss if self.last_reg_loss is None else self.last_reg_loss + reg_loss
 
     def _apply_onehop_center_fusion(self, x_dict: Dict[str, torch.Tensor], graph) -> Dict[str, torch.Tensor]:
         if (
@@ -752,6 +810,15 @@ class PEPromptRelation(nn.Module):
             else:
                 p = self.edge_prompt_mlp(edge_features.to(x_dict[src_t].device))
 
+            if self.metapath_reg_mode != "none":
+                reg_metapath_pos = self._metapath_pos_per_edge(
+                    graph,
+                    (src_t, rel_t, dst_t),
+                    device,
+                    p.dtype,
+                )
+                self._accumulate_metapath_prompt_regularization(p, reg_metapath_pos)
+
             msg = x_dict[src_t][src]
             if self.mode == "mul":
                 msg = msg * p
@@ -991,6 +1058,7 @@ class HGMPPEPromptHGNN(nn.Module):
             metapath_pos_dim=relation_cfg.metapath_pos_dim,
             metapath_pos_feature_name=relation_cfg.metapath_pos_feature_name,
             basis_count=relation_cfg.basis_count,
+            metapath_reg_mode=relation_cfg.metapath_reg_mode,
             onehop_center_fusion=relation_cfg.onehop_center_fusion,
         )
 
@@ -1212,6 +1280,7 @@ def build_peprompt_relation_cfg_from_args(args) -> PEPromptRelationConfig:
         metapath_pos_dim=getattr(args, "peprompt_metapath_pos_dim", 0),
         metapath_pos_feature_name=getattr(args, "peprompt_metapath_pos_feature_name", "peprompt_metapath_pos_feat"),
         basis_count=getattr(args, "peprompt_basis_count", 4),
+        metapath_reg_mode=getattr(args, "peprompt_mp_reg_mode", "none"),
         onehop_center_fusion=getattr(args, "peprompt_onehop_center_fusion", False),
     )
 

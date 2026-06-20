@@ -45,6 +45,11 @@ def _ensure_dir(path: Path) -> Path:
     return path
 
 
+def _format_float_for_key(value: float) -> str:
+    text = f"{float(value):g}"
+    return text.replace("-", "m").replace(".", "p")
+
+
 def _target_labels(graph, targetnode: str) -> np.ndarray:
     labels = graph.ndata["y"][targetnode].detach().cpu().numpy()
     labels = np.asarray(labels, dtype=np.int64).reshape(-1)
@@ -127,10 +132,22 @@ def extract_fanout_subgraph(
 
 
 def _metapath_cache_key(args) -> str:
-    if str(args.subgraph_type) != "metapath_topk":
+    subgraph_type = str(args.subgraph_type)
+    if subgraph_type not in {"metapath_topk", "metapath_topk_path", "metapath_topk_adapt", "metapath_topk_path_adapt"}:
         return str(args.subgraph_type)
     metric = str(args.metapath_rank_metric)
-    suffix = f"m{int(args.metapath_max_hop)}_k{int(args.metapath_topk)}_{metric}"
+    if subgraph_type in {"metapath_topk_adapt", "metapath_topk_path_adapt"}:
+        min_topk = int(getattr(args, "metapath_min_topk", 1))
+        max_topk = int(getattr(args, "metapath_max_topk", getattr(args, "metapath_topk", 5)))
+        rel_threshold = float(getattr(args, "metapath_rel_threshold", 0.5))
+        suffix = (
+            f"m{int(args.metapath_max_hop)}_"
+            f"k{min_topk}-{max_topk}_"
+            f"a{_format_float_for_key(rel_threshold)}_"
+            f"{metric}"
+        )
+    else:
+        suffix = f"m{int(args.metapath_max_hop)}_k{int(args.metapath_topk)}_{metric}"
     if bool(args.metapath_keep_self):
         suffix += "_self"
     fusion_mode = str(getattr(args, "peprompt_fusion_mode", "none"))
@@ -145,9 +162,110 @@ def _metapath_cache_key(args) -> str:
         suffix += "_graphsum"
     elif fusion_mode == "graph_summary_basis":
         suffix += "_graphsum"
-    elif fusion_mode == "metapath_pos":
+    elif fusion_mode == "metapath_pos" or str(getattr(args, "peprompt_mp_reg_mode", "none")) != "none":
         suffix += "_mppos"
-    return f"metapath_topk_{suffix}"
+    return f"{subgraph_type}_{suffix}"
+
+
+def _metapath_source_idf(adjs: dict, metapath: tuple) -> float:
+    reachable = adjs[metapath[0]]
+    for etype in metapath[1:]:
+        reachable = reachable @ adjs[etype]
+    source_count = int(reachable.shape[0])
+    reached_sources = int(np.count_nonzero(np.asarray(reachable.getnnz(axis=1)).reshape(-1)))
+    return float(np.log((1.0 + source_count) / (1.0 + reached_sources)) + 1.0)
+
+
+def _build_csc_adjs(adjs: dict) -> dict:
+    return {etype: adj.tocsc() for etype, adj in adjs.items()}
+
+
+def _add_one_path_for_endpoint(
+    selected: dict[str, set[int]],
+    adjs: dict,
+    adjs_csc: dict,
+    metapath: tuple,
+    target_ntype: str,
+    target_node_id: int,
+    endpoint_id: int,
+) -> bool:
+    """Add one concrete centre-to-endpoint path for a selected metapath endpoint.
+
+    The top-k rule selects endpoints by metapath reachability. This helper
+    backtracks one actual path and adds its intermediate nodes, so the induced
+    subgraph preserves a visible route from the centre to the endpoint.
+    """
+    import scipy.sparse as sp
+
+    row = sp.csr_matrix(
+        ([1.0], ([0], [int(target_node_id)])),
+        shape=(1, int(adjs[metapath[0]].shape[0])),
+        dtype=np.float32,
+    )
+    prefix_rows = []
+    for etype in metapath:
+        prefix_rows.append(row)
+        row = row @ adjs[etype]
+
+    current = int(endpoint_id)
+    selected[metapath[-1][2]].add(current)
+    for step in range(len(metapath) - 1, -1, -1):
+        etype = metapath[step]
+        src_t = etype[0]
+        predecessors = np.asarray(adjs_csc[etype].getcol(current).nonzero()[0], dtype=np.int64)
+        if predecessors.size == 0:
+            return False
+
+        prefix = prefix_rows[step]
+        prefix_scores = np.asarray(prefix[:, predecessors].toarray()).reshape(-1)
+        reachable_mask = prefix_scores > 0
+        if not np.any(reachable_mask):
+            return False
+        candidates = predecessors[reachable_mask]
+        candidate_scores = prefix_scores[reachable_mask]
+        order = np.lexsort((candidates, -candidate_scores))
+        current = int(candidates[order[0]])
+        selected[src_t].add(current)
+
+    return current == int(target_node_id) and metapath[0][0] == target_ntype
+
+
+def _adaptive_relative_indices(
+    scores: np.ndarray,
+    ranks: np.ndarray,
+    min_topk: int,
+    max_topk: int,
+    rel_threshold: float,
+) -> np.ndarray:
+    candidates = np.flatnonzero(scores > 0).astype(np.int64)
+    if candidates.size == 0:
+        return candidates
+
+    min_topk = max(0, int(min_topk))
+    max_topk = int(max_topk)
+    rel_threshold = float(rel_threshold)
+    candidate_ranks = np.asarray(ranks[candidates], dtype=np.float32)
+    max_rank = float(candidate_ranks.max()) if candidate_ranks.size > 0 else 0.0
+    if max_rank <= 0.0:
+        keep = np.empty(0, dtype=np.int64)
+    else:
+        keep = candidates[candidate_ranks >= rel_threshold * max_rank]
+
+    required = min(min_topk, int(candidates.size))
+    if keep.size < required:
+        keep = np.unique(
+            np.concatenate([keep.astype(np.int64), _topk_indices(scores, ranks, required)])
+        ).astype(np.int64)
+
+    if keep.size == 0:
+        return keep.astype(np.int64)
+
+    keep_ranks = np.asarray(ranks[keep], dtype=np.float32)
+    order = np.lexsort((keep, -keep_ranks))
+    keep = keep[order]
+    if max_topk > 0 and keep.size > max_topk:
+        keep = keep[:max_topk]
+    return keep.astype(np.int64)
 
 
 def _gather_global_node_feats(graph, ntypes) -> dict[str, np.ndarray] | None:
@@ -287,6 +405,12 @@ def extract_metapath_topk_subgraph(
     global_feats: dict | None = None,
     ctx_dim: int = 0,
     context_mode: str = "none",
+    preserve_paths: bool = False,
+    adjs_csc: dict | None = None,
+    adaptive_mode: str = "none",
+    min_topk: int = 1,
+    max_topk: int = 5,
+    rel_threshold: float = 0.5,
 ):
     selected: dict[str, set[int]] = {ntype: set() for ntype in graph.ntypes}
     selected[target_ntype].add(int(target_node_id))
@@ -332,13 +456,38 @@ def extract_metapath_topk_subgraph(
             keep_self=bool(keep_self),
         )
         ranks = _rank_values(scores, endpoint_popularity.get(metapath), rank_metric)
-        keep = _topk_indices(scores, ranks, int(topk))
+        if str(adaptive_mode) == "relative":
+            keep = _adaptive_relative_indices(
+                scores=scores,
+                ranks=ranks,
+                min_topk=int(min_topk),
+                max_topk=int(max_topk),
+                rel_threshold=float(rel_threshold),
+            )
+        else:
+            keep = _topk_indices(scores, ranks, int(topk))
         if _compute_metapath_pos:
             keep_by_metapath.append(keep.copy())
         if keep.size > 0:
             dst_t = metapath[-1][2]
             keep_ids = [int(v) for v in keep.tolist()]
-            selected[dst_t].update(keep_ids)
+            if preserve_paths:
+                if adjs_csc is None:
+                    adjs_csc = _build_csc_adjs(adjs)
+                for keep_id in keep_ids:
+                    ok = _add_one_path_for_endpoint(
+                        selected=selected,
+                        adjs=adjs,
+                        adjs_csc=adjs_csc,
+                        metapath=metapath,
+                        target_ntype=target_ntype,
+                        target_node_id=int(target_node_id),
+                        endpoint_id=int(keep_id),
+                    )
+                    if not ok:
+                        selected[dst_t].add(int(keep_id))
+            else:
+                selected[dst_t].update(keep_ids)
             assignments = kept_metapath_assignments.setdefault(dst_t, set())
             for keep_id in keep_ids:
                 assignments.add((keep_id, metapath_idx))
@@ -793,14 +942,20 @@ def _make_subgraph_extractor(graph, targetnode: str, args):
 
         return _extract, {"subgraph_type": subgraph_type, "fanout": fanout}
 
-    if subgraph_type == "metapath_topk":
+    if subgraph_type in {"metapath_topk", "metapath_topk_path", "metapath_topk_adapt", "metapath_topk_path_adapt"}:
         max_hop = int(args.metapath_max_hop)
         topk = int(args.metapath_topk)
+        min_topk = int(getattr(args, "metapath_min_topk", 1))
+        max_topk = int(getattr(args, "metapath_max_topk", topk))
+        rel_threshold = float(getattr(args, "metapath_rel_threshold", 0.5))
         rank_metric = str(args.metapath_rank_metric)
         keep_self = bool(args.metapath_keep_self)
+        preserve_paths = subgraph_type in {"metapath_topk_path", "metapath_topk_path_adapt"}
+        adaptive_mode = "relative" if subgraph_type in {"metapath_topk_adapt", "metapath_topk_path_adapt"} else "none"
         ctx_dim = int(getattr(args, "peprompt_ctx_dim", 0) or 0)
         fusion_mode = str(getattr(args, "peprompt_fusion_mode", "none"))
         adjs = _build_csr_adjs(graph)
+        adjs_csc = _build_csc_adjs(adjs) if preserve_paths else None
         metapaths = _generate_metapaths(graph, targetnode, max_hop)
         endpoint_popularity = {}
         if rank_metric == "degree_norm":
@@ -810,11 +965,17 @@ def _make_subgraph_extractor(graph, targetnode: str, args):
                 metapath: _endpoint_popularity(adjs, metapath)
                 for metapath in metapaths
             }
+        elif rank_metric == "count_idf":
+            endpoint_popularity = {
+                metapath: np.float32(_metapath_source_idf(adjs, metapath))
+                for metapath in metapaths
+            }
 
         # Pre-extract global node features ONLY when hop_decoupled mode is
         # enabled — otherwise we skip the per-subgraph ctx computation entirely.
         _global_feats = None
         context_mode = "none"
+        mp_reg_mode = str(getattr(args, "peprompt_mp_reg_mode", "none"))
         if fusion_mode == "hop_decoupled" and ctx_dim > 0:
             context_mode = "hidden_virtual_metapath"
             _global_feats = _gather_global_node_feats(graph, graph.ntypes)
@@ -826,7 +987,7 @@ def _make_subgraph_extractor(graph, targetnode: str, args):
             _global_feats = _gather_global_node_feats(graph, graph.ntypes)
         elif fusion_mode in {"graph_summary", "graph_summary_basis"}:
             context_mode = "graph_summary"
-        elif fusion_mode == "metapath_pos":
+        elif fusion_mode == "metapath_pos" or mp_reg_mode != "none":
             context_mode = "metapath_pos"
 
         def _extract(node_id: int):
@@ -843,14 +1004,25 @@ def _make_subgraph_extractor(graph, targetnode: str, args):
                 global_feats=_global_feats,
                 ctx_dim=ctx_dim,
                 context_mode=context_mode,
+                preserve_paths=preserve_paths,
+                adjs_csc=adjs_csc,
+                adaptive_mode=adaptive_mode,
+                min_topk=min_topk,
+                max_topk=max_topk,
+                rel_threshold=rel_threshold,
             )
 
         return _extract, {
             "subgraph_type": subgraph_type,
             "max_hop": max_hop,
             "topk": topk,
+            "min_topk": min_topk,
+            "max_topk": max_topk,
+            "rel_threshold": rel_threshold,
+            "adaptive_mode": adaptive_mode,
             "rank_metric": rank_metric,
             "keep_self": keep_self,
+            "preserve_paths": preserve_paths,
             "num_metapaths": len(metapaths),
             "context_mode": context_mode,
             "ctx_dim": ctx_dim,
@@ -997,6 +1169,10 @@ def _precompute_dataset(graph, targetnode: str, spectral_payload: dict, args):
                 "fanout": subgraph_config.get("fanout"),
                 "metapath_max_hop": subgraph_config.get("max_hop"),
                 "metapath_topk": subgraph_config.get("topk"),
+                "metapath_min_topk": subgraph_config.get("min_topk"),
+                "metapath_max_topk": subgraph_config.get("max_topk"),
+                "metapath_rel_threshold": subgraph_config.get("rel_threshold"),
+                "metapath_adaptive_mode": subgraph_config.get("adaptive_mode"),
                 "metapath_rank_metric": subgraph_config.get("rank_metric"),
                 "metapath_keep_self": subgraph_config.get("keep_self"),
                 "metapath_count": subgraph_config.get("num_metapaths"),
@@ -1045,12 +1221,20 @@ def build_parser():
     ap.add_argument("--seeds", nargs="+", type=int, default=[0, 1, 2, 3, 4])
     ap.add_argument("--feats_type", type=int, default=0)
     ap.add_argument("--max_pool_size", type=int, default=400)
-    ap.add_argument("--subgraph_type", type=str, default="metapath_topk", choices=["khop", "fanout", "metapath_topk"])
+    ap.add_argument(
+        "--subgraph_type",
+        type=str,
+        default="metapath_topk",
+        choices=["khop", "fanout", "metapath_topk", "metapath_topk_path", "metapath_topk_adapt", "metapath_topk_path_adapt"],
+    )
     ap.add_argument("--khop_num", type=int, default=None)
     ap.add_argument("--fanouts", nargs="+", type=int, default=[15, 10])
     ap.add_argument("--metapath_max_hop", type=int, default=3)
     ap.add_argument("--metapath_topk", type=int, default=5)
-    ap.add_argument("--metapath_rank_metric", type=str, default="count", choices=["count", "degree_norm"])
+    ap.add_argument("--metapath_min_topk", type=int, default=1)
+    ap.add_argument("--metapath_max_topk", type=int, default=5)
+    ap.add_argument("--metapath_rel_threshold", type=float, default=0.5)
+    ap.add_argument("--metapath_rank_metric", type=str, default="count", choices=["count", "degree_norm", "count_idf"])
     ap.add_argument("--metapath_keep_self", action="store_true")
     ap.add_argument(
         "--peprompt_spectral_cache_dir",
@@ -1066,6 +1250,7 @@ def build_parser():
     ap.add_argument("--peprompt_spectral_max_nodes", type=int, default=50000)
     ap.add_argument("--peprompt_edge_feature_name", type=str, default=PEPROMPT_EDGE_FEATURE_NAME)
     ap.add_argument("--peprompt_fusion_mode", type=str, default="none", choices=["none", "edge_type", "metapath_pos", "hop_decoupled", "onehop_ctx", "type_ctx", "graph_summary", "graph_summary_basis"])
+    ap.add_argument("--peprompt_mp_reg_mode", type=str, default="none", choices=["none", "consistency", "predict"])
     ap.add_argument("--peprompt_ctx_dim", type=int, default=0)
     return ap
 

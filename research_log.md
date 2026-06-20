@@ -9,8 +9,8 @@ PEPrompt 的核心目标是在 HGMP 的异构图 prompt 框架上，引入**边�
 当前稳定版本采用以下流程：
 
 1. 使用 HGMP 的 GraphCL 预训练 checkpoint 初始化异构 GNN。
-2. 离线生成 few-shot 下游子图缓存，支持 `khop`、`fanout` 和 `metapath_topk`。
-3. PEPrompt 当前主线使用 `metapath_topk` 子图。每个目标节点按元路径可达计数筛选 top-k 语义邻域，避免 khop 在高阶时引入过大的噪声子图。
+2. 离线生成 few-shot 下游子图缓存，支持 `khop`、`fanout`、`metapath_topk`、`metapath_topk_path`、`metapath_topk_adapt` 和 `metapath_topk_path_adapt`。
+3. PEPrompt 当前主线使用基于元路径的动态子图。每个目标节点按元路径可达计数筛选语义邻域；DBLP 上固定 top-k 不够稳定，当前最优方向是 adaptive top-k。最新 ablation 表明核心收益主要来自 adaptive endpoint selection，path-preserving 不是必要条件。
 4. 对子图边计算 PE edge feature。当前有效主线是把异构子图视作同质图，计算 Laplacian PE，并用边两端 PE 差作为边结构编码。
 5. 用 PE edge feature 经过 MLP 生成 edge prompt，再注入 HGMP 的消息传递模块。
 
@@ -19,7 +19,7 @@ PEPrompt 的核心目标是在 HGMP 的异构图 prompt 框架上，引入**边�
 | Dataset | PEPrompt Subgraph | Notes |
 | --- | --- | --- |
 | ACM | metapath h3/k3 | 当前 r10 结果最稳定，约 `0.8999/0.8997` |
-| DBLP | metapath h3/k3 | 相比 HGMP Prompt 有稳定提升 |
+| DBLP | metapath adapt h3/k1-5/a0.5 | adaptive no-path 与 path-adapt 基本持平，显著优于固定 top-k |
 | IMDB | metapath h2/k3 | 多标签任务，高阶 metapath 噪声更明显 |
 | Freebase | metapath h3/k3, `feats_type=1` | 避免 dense pseudo-feature 导致 CPU OOM |
 
@@ -28,6 +28,7 @@ PEPrompt 的核心目标是在 HGMP 的异构图 prompt 框架上，引入**边�
 - Typepair prompt 单独作为类型级边 prompt 效果有限，后续不再作为主线。
 - Laplacian PE edge feature 是当前最有效的结构提示来源。
 - Metapath-topk 子图比 khop 更适合 PEPrompt，尤其在 ACM、DBLP、Freebase 上优势明显。
+- DBLP 上固定 top-k 的主要问题是 split 间差异很大；adaptive top-k 通过相对阈值动态选择每条元路径的终点数量，显著缓解了 split 2 低分问题。最新 no-path ablation 说明 path-preserving 不是主要收益来源。
 - Dropped-context 虽然有小幅提升迹象，但存储、显存和运行时间代价过高，当前不作为主线。
 - IMDB 是特殊情况：任务是多标签，few-shot split 波动较大，高阶 metapath 容易引入噪声，因此当前使用 h2/k3。
 - Freebase 的主要问题不是原始图文件大小，而是无属性节点类型补 dense pseudo-feature 会导致巨大 CPU 内存占用；当前通过 `feats_type=1` 规避。
@@ -41,6 +42,9 @@ PEPrompt 的核心目标是在 HGMP 的异构图 prompt 框架上，引入**边�
 - [ ] 进一步检查 Freebase 上 HGMP Prompt 异常偏低的原因。
 - [ ] 评估是否需要 hybrid early stopping，减少 IMDB 上 val loss 与 test F1 不一致的问题。
 - [ ] 整理最终论文表格所需的统一协议、日志路径和 checkpoint 说明。
+- [x] 将 DBLP `metapath_topk_path_adapt h3/k1-5/a0.5` 从 seeds 0/2 扩展到 seeds 0-4。结论：保持高均值，`macro=0.7861 ± 0.0317`，seed-mean macro std `0.0237`。
+- [ ] 在 ACM、Freebase、IMDB 上验证 adaptive top-k 是否普适；ACM 初步显示 no-path adaptive 更快且 1-shot 更好，仍需更多 seeds。
+- [ ] 系统比较 `metapath_topk_adapt` 与 `metapath_topk_path_adapt`，确认 path-preserving 是否应从主线中移除。
 
 ## 方法细节
 
@@ -71,8 +75,11 @@ h = self.ln[ntype](h)
 ### 子图构建
 
 - `khop`：使用 DGL 的 `khop_in_subgraph`，直接取目标节点 K 阶邻域。
-- `metapath_topk`：枚举 M 跳内元路径，按可达 count 或 degree-normalized score 保留每条元路径 top-k 终点，再诱导得到子图。
-- 当前主线：PEPrompt 使用 `metapath_topk`，HGMP Prompt 对比使用 `khop`。
+- `metapath_topk`：枚举 M 跳内元路径，按可达 count 或 degree-normalized score 保留每条元路径固定 top-k 终点，再诱导得到子图。
+- `metapath_topk_path`：在固定 top-k 终点基础上，为每个被选终点回溯并保留一条实际路径。
+- `metapath_topk_adapt`：每条元路径按 `rank >= alpha * max_rank` 动态决定保留终点数，但不回溯中间路径，直接对选中终点诱导子图。
+- `metapath_topk_path_adapt`：在 path-preserving 基础上，每条元路径按 `rank >= alpha * max_rank` 动态决定保留终点数，并用 `min_topk/max_topk` 控制范围。
+- 当前主线：ACM/Freebase 仍使用固定 `metapath_topk` 结果作为已验证基线；DBLP 当前最优方向是 adaptive top-k，`metapath_topk_adapt` 因效率更高、效果持平或更好，已成为新的优先候选；HGMP Prompt 对比使用 `khop`。
 
 ### Few-shot 划分
 
@@ -682,3 +689,275 @@ else:
 3. IMDB 上 HGMP Prompt 略优于 PEPrompt：micro 高约 0.92 个点，macro 高约 1.14 个点。IMDB 当前更适合 h2/k3，h3/k3 和 h2/k2 都不如 h2/k3。
 4. Freebase 上 PEPrompt 相比 HGMP Prompt 提升明显：micro 提升约 13.66 个点，macro 提升约 16.32 个点。但 HGMP Prompt 在 Freebase 上 best_epoch 经常为 1，说明当前 khop + ft1 组合可能训练不稳定或特征信息不足。
 5. 当前结果支持：metapath_topk 子图在 ACM、DBLP、Freebase 上能带来比 khop HGMP Prompt 更好的下游表现；IMDB 受多标签、few-shot split 和高阶噪声影响更大，需要单独使用较小的 h2/k3 配置。
+
+## 2026-06-18 Metapath-aware Prompt 结构尝试
+
+### 背景
+
+现有 PEPrompt 使用 metapath_topk 构建子图，但下游 edge prompt 主要依赖 PE edge feature：
+
+```text
+p_e = MLP(PE_e)
+message_e = p_e * h_src
+```
+
+因此尝试让下游 prompt 显式利用 metapath_topk 子图中的元路径结构信息，而不是只把 metapath 用在子图采样阶段。
+
+### 尝试过的结构
+
+1. `metapath_id / metapath_pos`：将边所属 metapath 或 metapath-position 信息拼接进 prompt 生成器。
+2. `metapath_anchor`：学习一组 metapath anchor basis，根据边的 metapath-position 选择 anchor，并注入消息。
+3. `metapath_anchor residual`：将 anchor 改为独立残差项：
+
+```text
+message_e = p_e * h_src + beta_e * anchor_e
+```
+
+4. `metapath_weighted`：不再添加 anchor，而是用 metapath-position 控制 weighted mean 聚合：
+
+```text
+g_e = 1 + scale * tanh(MLP(metapath_pos_e))
+agg_v = sum_e g_e * (p_e * h_src) / sum_e g_e
+```
+
+### ACM 10-shot 结果
+
+统一设置：
+
+- dataset=ACM
+- shot=10
+- seeds=0 1 2 3 4
+- repeats=10
+- subgraph=metapath_topk h3/k3
+- rank_metric=count
+- early_stop=loss
+- eval_mode=early_stop_only
+- lr=1e-3
+- prompt_lr=1e-4
+
+| Variant | Count | Micro-F1 | Macro-F1 | 结论 |
+| --- | ---: | ---: | ---: | --- |
+| PE-only baseline | 50 | 0.8999 ± 0.0055 | 0.8997 ± 0.0053 | 当前最稳 |
+| metapath_id / pos | 50 | 0.8986 ± 0.0054 | 0.8984 ± 0.0054 | 轻微下降 |
+| anchor residual | 50 | 0.8991 ± 0.0055 | 0.8989 ± 0.0054 | 基本无变化 |
+| weighted aggregation, scale=0.3 | 50 | 0.8990 ± 0.0064 | 0.8988 ± 0.0064 | 基本无变化且方差略大 |
+
+`metapath_weighted, scale=0.3` 详细结果：
+
+```json
+{
+  "pooled_runs": {
+    "peprompt": {
+      "count": 50,
+      "micro_mean": 0.8989824569225311,
+      "micro_std": 0.006437329577886571,
+      "macro_mean": 0.8987558817863465,
+      "macro_std": 0.006366986148410977
+    }
+  },
+  "seed_mean_then_std": {
+    "peprompt": {
+      "count": 5,
+      "micro_mean": 0.8989824569225311,
+      "micro_std": 0.005417217560814098,
+      "macro_mean": 0.8987558817863464,
+      "macro_std": 0.005341396818890045
+    }
+  }
+}
+```
+
+### 阶段结论
+
+这些结构都没有稳定超过 PE-only baseline。说明当前瓶颈大概率不在“把 metapath 信息再塞进 edge prompt 生成器”或“给消息增加一个 metapath 残差项”，而在更上游的子图选择和保留边质量上。
+
+因此暂时移除 `metapath_anchor` 和 `metapath_weighted` 这些失败分支，回到最初 PEPrompt 版本作为主线：
+
+```text
+PE edge feature -> edge prompt p_e -> message_e = p_e * h_src
+```
+
+后续优化更应优先考虑：
+
+1. metapath_topk 的 `max_hop/topk/rank_metric` 参数；
+2. 子图规模、噪声和不同数据集的最优采样深度；
+3. 是否需要在子图构建阶段引入更强的结构筛选，而不是在下游补充复杂 prompt 模块。
+
+
+## 2026-06-20 DBLP split 不稳定性与 adaptive top-k
+
+### 背景
+
+DBLP 上固定 `metapath_topk` 的一个核心问题是 split 间差异很大：部分 split 可以达到较高性能，但 split 2 等低分 split 明显拖低均值。此前主要观察到：
+
+- 固定 `metapath_topk h3/k2 count` 全 5 个 split 的均值约为 `micro=0.6317`、`macro=0.6306`，seed-mean std 约 `0.046`。
+- `degree_norm` 和 `count_idf` 没有解决 split 2 低分问题。
+- `edge_dropout=0.1/0.2` 能小幅提升均值，但 pooled std 反而变大，说明它更像正则化训练噪声，并没有从根本上修复子图选择不稳定。
+- 可视化 split 0 和 split 2 的训练节点子图后发现，固定 top-k 的元路径终点选择不一定保留实际连接路径；只保留终点再诱导子图，可能导致部分可达语义在子图中不可解释。
+
+### path-preserving top-k
+
+先实现了 `metapath_topk_path`：仍然按固定 top-k 选择每条元路径终点，但对每个被选终点回溯并保留一条从中心节点到终点的实际路径。
+
+DBLP seeds 0/2, repeats 10, h3/k2/count：
+
+```json
+{
+  "pooled_runs": {
+    "peprompt": {
+      "count": 20,
+      "micro_mean": 0.6449342042207717,
+      "micro_std": 0.07528573036144878,
+      "macro_mean": 0.6422702252864838,
+      "macro_std": 0.07480264465980478
+    }
+  },
+  "seed_mean_then_std": {
+    "peprompt": {
+      "count": 2,
+      "micro_mean": 0.6449342042207717,
+      "micro_std": 0.0701315850019455,
+      "macro_mean": 0.6422702252864838,
+      "macro_std": 0.06921493411064145
+    }
+  }
+}
+```
+
+结论：path-preserving 能明显改善 split 0，但 split 2 仍然偏低，split 方差没有解决。
+
+### dynamic top-k / adaptive top-k
+
+固定 top-k 的问题在于：不同目标节点、不同元路径的 reachable score 分布差异很大。强行每条元路径都取同样的 top-k，会出现两种问题：
+
+1. score 集中时，固定 k 可能引入很多弱相关终点；
+2. score 分散但多个候选接近最高分时，固定较小 k 又会丢掉有效邻域。
+
+因此实现了新的 `subgraph_type=metapath_topk_path_adapt`：
+
+- 仍然枚举 `metapath_max_hop=M` 内的所有元路径；
+- 对每个中心节点、每条元路径分别计算 reachable score；
+- 选择满足 `rank >= alpha * max_rank` 的候选终点；
+- 用 `min_topk` 和 `max_topk` 做下限和上限；
+- 对每个被选终点保留一条实际路径；
+- 当前测试配置为 `M=3, min_k=1, max_k=5, alpha=0.5, rank_metric=count`。
+
+缓存 key：
+
+```text
+metapath_topk_path_adapt_m3_k1-5_a0p5_count
+```
+
+相关日志：
+
+- 预计算：`artifacts/logs/peprompt_r10_compare/precompute_DBLP_h3_k1-5_a0p5_path_adapt_s0_s2.log`
+- benchmark：`artifacts/logs/peprompt_r10_compare/DBLP_peprompt_h3_k1-5_a0p5_path_adapt_s0_s2_r10_fast.log`
+
+DBLP seeds 0/2, repeats 10 结果：
+
+```json
+{
+  "pooled_runs": {
+    "peprompt": {
+      "count": 20,
+      "micro_mean": 0.7897368371486664,
+      "micro_std": 0.033750320570326106,
+      "macro_mean": 0.7877550244331359,
+      "macro_std": 0.033386411548086616
+    }
+  },
+  "seed_mean_then_std": {
+    "peprompt": {
+      "count": 2,
+      "micro_mean": 0.7897368371486664,
+      "micro_std": 0.029342108964920066,
+      "macro_mean": 0.7877550244331359,
+      "macro_std": 0.02869718074798583
+    }
+  }
+}
+```
+
+阶段结论：
+
+1. adaptive top-k 是目前 DBLP 上最重要的改进，远高于固定 top-k 和 path-only。
+2. split 0/2 的 seed-mean std 从 path-only 的约 `0.0692` macro 降到约 `0.0287` macro，说明它不只是提高均值，也明显降低了 split 间不稳定性。
+3. 这个结果支持一个更强的方法动机：PEPrompt 的关键不只是边 prompt 生成器，而是“如何根据异构语义路径动态选择局部结构”。固定 top-k 是过于粗糙的子图构建规则。
+
+### 需要继续验证
+
+当前状态：
+
+1. DBLP `metapath_topk_path_adapt` 已完成 seeds `0 1 2 3 4`，保持高均值和较低 split 方差。
+2. DBLP `metapath_topk_adapt` no-path 当前只完成 seeds `0/2`，结果与 path-adapt 基本持平；后续可补完整 seeds `0 1 2 3 4`。
+3. 对 adaptive 参数做小范围网格：
+   - `alpha`: `0.4, 0.5, 0.6`
+   - `max_k`: `3, 5, 8`
+   - `min_k`: 先保持 `1`
+4. 统计 adaptive 子图大小，确认性能提升不是因为子图无约束膨胀。
+5. 在 ACM、Freebase 和 IMDB 上测试是否仍然有提升；IMDB 需要谨慎，因为高阶 metapath 可能引入多标签噪声。
+
+### 当前实现状态
+
+已经修改：
+
+- `scripts/precompute_peprompt_cache.py`
+  - 新增 `metapath_topk_path_adapt`
+  - 新增参数 `--metapath_min_topk`, `--metapath_max_topk`, `--metapath_rel_threshold`
+  - 新增相对阈值选择器，并保留 path-preserving 逻辑
+- `scripts/peprompt_benchmark.py`
+  - 支持加载 adaptive cache key
+  - benchmark 参数同步 adaptive top-k 配置
+- `scripts/analyze_peprompt_splits.py`
+  - 支持 adaptive cache key，便于后续 split 诊断
+- `scripts/visualize_split_neighborhoods.py`
+  - 支持 adaptive cache key，便于后续可视化训练节点子图
+
+### 追加实验：adaptive no-path ablation
+
+为了验证 `path-preserving` 是否真的是 adaptive top-k 的关键收益来源，新增了一个 ablation 子图类型：
+
+```text
+subgraph_type=metapath_topk_adapt
+```
+
+它与 `metapath_topk_path_adapt` 使用完全相同的 adaptive endpoint selection：
+
+```text
+M=3, min_k=1, max_k=5, alpha=0.5, rank_metric=count
+```
+
+区别只有一个：`metapath_topk_adapt` 不回溯和保留中间路径，只保留 adaptive 选出的终点并诱导子图。因此它可以直接衡量 path-preserving 模块的贡献。
+
+#### DBLP no-path adaptive
+
+
+与 DBLP `metapath_topk_path_adapt` seeds 0/2 对比：
+
+| Variant | Seeds | Count | Micro-F1 | Macro-F1 | Seed-mean Macro Std |
+| --- | --- | ---: | ---: | ---: | ---: |
+| path-adapt | 0/2 | 20 | 0.7897 ± 0.0338 | 0.7878 ± 0.0334 | 0.0287 |
+| adapt no-path | 0/2 | 20 | 0.7889 ± 0.0327 | 0.7870 ± 0.0323 | 0.0270 |
+| path-adapt full | 0/1/2/3/4 | 50 | 0.7883 ± 0.0318 | 0.7861 ± 0.0317 | 0.0237 |
+
+结论：DBLP 上 no-path 与 path-adapt 基本持平，差距约 `0.08` 个百分点，远小于 run std。path-preserving 不是 DBLP adaptive top-k 提升的主要来源。
+
+#### ACM adaptive no-path
+
+ACM 10-shot, seed 0, repeats 10：
+
+| Variant | Seeds | Count | Micro-F1 | Macro-F1 | 预计算时间 |
+| --- | --- | ---: | ---: | ---: | ---: |
+| path-adapt | 0/2 | 20 | 0.8870 ± 0.0200 | 0.8855 ± 0.0210 | seed0 `183.58s`, seed2 `171.06s` |
+| adapt no-path | 0 | 10 | 0.8881 ± 0.0100 | 0.8866 ± 0.0101 | seed0 `27.56s` |
+
+注意：这里 path-adapt 是 seeds 0/2，no-path 当前只读到 seed 0，因此不是严格同 seeds 对比。但 no-path seed 0 已经达到或略高于 path-adapt pooled 均值，并且预计算时间从约 3 分钟降到约 28 秒，效率优势非常明显。
+
+ACM 1-shot, seed 0, repeats 10：
+
+| Variant | Seeds | Count | Micro-F1 | Macro-F1 | 预计算时间 |
+| --- | --- | ---: | ---: | ---: | ---: |
+| path-adapt | 0 | 10 | 0.7711 ± 0.0336 | 0.7561 ± 0.0384 | 未单独记录到同名 seed0 日志 |
+| adapt no-path | 0 | 10 | 0.7846 ± 0.0365 | 0.7756 ± 0.0390 | `29.28s` |
+
+ACM 1-shot 上 no-path 明显更好，macro 约提升 `+0.0195`。

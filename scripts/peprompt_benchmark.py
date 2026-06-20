@@ -110,6 +110,11 @@ def _ensure_dir(path: Path) -> Path:
     return path
 
 
+def _format_float_for_key(value: float) -> str:
+    text = f"{float(value):g}"
+    return text.replace("-", "m").replace(".", "p")
+
+
 def _set_global_seed(seed: int):
     seed_everything(int(seed))
     np.random.seed(int(seed))
@@ -716,14 +721,25 @@ def load_peprompt_offline_legacy_splits(args):
 
 def _peprompt_cache_subgraph_type(args) -> str:
     subgraph_type = str(getattr(args, "subgraph_type", "khop"))
-    if subgraph_type != "metapath_topk":
+    if subgraph_type not in {"metapath_topk", "metapath_topk_path", "metapath_topk_adapt", "metapath_topk_path_adapt"}:
         return subgraph_type
     metric = str(getattr(args, "metapath_rank_metric", "count"))
-    suffix = (
-        f"m{int(getattr(args, 'metapath_max_hop', 3))}_"
-        f"k{int(getattr(args, 'metapath_topk', 5))}_"
-        f"{metric}"
-    )
+    if subgraph_type in {"metapath_topk_adapt", "metapath_topk_path_adapt"}:
+        min_topk = int(getattr(args, "metapath_min_topk", 1))
+        max_topk = int(getattr(args, "metapath_max_topk", getattr(args, "metapath_topk", 5)))
+        rel_threshold = float(getattr(args, "metapath_rel_threshold", 0.5))
+        suffix = (
+            f"m{int(getattr(args, 'metapath_max_hop', 3))}_"
+            f"k{min_topk}-{max_topk}_"
+            f"a{_format_float_for_key(rel_threshold)}_"
+            f"{metric}"
+        )
+    else:
+        suffix = (
+            f"m{int(getattr(args, 'metapath_max_hop', 3))}_"
+            f"k{int(getattr(args, 'metapath_topk', 5))}_"
+            f"{metric}"
+        )
     if bool(getattr(args, "metapath_keep_self", False)):
         suffix += "_self"
     fusion_mode = str(getattr(args, "peprompt_fusion_mode", "none"))
@@ -736,9 +752,9 @@ def _peprompt_cache_subgraph_type(args) -> str:
         suffix += f"_typectx_d{ctx_dim}"
     elif fusion_mode in {"graph_summary", "graph_summary_basis"}:
         suffix += "_graphsum"
-    elif fusion_mode == "metapath_pos":
+    elif fusion_mode == "metapath_pos" or str(getattr(args, "peprompt_mp_reg_mode", "none")) != "none":
         suffix += "_mppos"
-    return f"metapath_topk_{suffix}"
+    return f"{subgraph_type}_{suffix}"
 
 
 def _patched_legacy_split_loader(args):
@@ -815,6 +831,9 @@ def _make_legacy_args(cli_args, method: str, ckpt_path: str, split_seed: int, re
         subgraph_type=cli_args.subgraph_type,
         metapath_max_hop=cli_args.metapath_max_hop,
         metapath_topk=cli_args.metapath_topk,
+        metapath_min_topk=cli_args.metapath_min_topk,
+        metapath_max_topk=cli_args.metapath_max_topk,
+        metapath_rel_threshold=cli_args.metapath_rel_threshold,
         metapath_rank_metric=cli_args.metapath_rank_metric,
         metapath_keep_self=cli_args.metapath_keep_self,
         peprompt_write_edge_feature_stats=cli_args.peprompt_write_edge_feature_stats,
@@ -828,6 +847,9 @@ def _make_legacy_args(cli_args, method: str, ckpt_path: str, split_seed: int, re
         peprompt_graph_summary_dim=cli_args.peprompt_graph_summary_dim,
         peprompt_metapath_pos_dim=cli_args.peprompt_metapath_pos_dim,
         peprompt_basis_count=cli_args.peprompt_basis_count,
+        peprompt_mp_reg_mode=cli_args.peprompt_mp_reg_mode,
+        peprompt_mp_reg_weight=cli_args.peprompt_mp_reg_weight,
+        peprompt_edge_dropout=cli_args.peprompt_edge_dropout,
         peprompt_onehop_center_fusion=cli_args.peprompt_onehop_center_fusion,
         embed_batch_size=cli_args.embed_batch_size,
         head_hidden=cli_args.head_hidden,
@@ -1184,6 +1206,7 @@ def build_parser():
     ap.add_argument("--prompt_lr", type=float, default=None)  # prompt 学习率，未指定时回退到 lr
     ap.add_argument("--weight_decay", type=float, default=5e-4)  # 优化器权重衰减
     ap.add_argument("--early_stop_metric", type=str, default="macro", choices=["micro", "macro"])  # early stopping 监控指标
+    ap.add_argument("--peprompt_edge_dropout", type=float, default=0.0)  # PEPrompt 训练时随机丢弃子图边，验证/测试不生效
     ap.add_argument(
         "--hgmp_prompt_recipe",
         type=str,
@@ -1246,10 +1269,18 @@ def build_parser():
         type=Path,
         default=ROOT / "artifacts" / "cache" / "peprompt_offline_splits",
     )  # 严格 k-shot + 子图 + 边特征离线缓存目录
-    ap.add_argument("--subgraph_type", type=str, default="khop", choices=["khop", "fanout", "metapath_topk"])  # 选择要加载的离线子图缓存类型
+    ap.add_argument(
+        "--subgraph_type",
+        type=str,
+        default="khop",
+        choices=["khop", "fanout", "metapath_topk", "metapath_topk_path", "metapath_topk_adapt", "metapath_topk_path_adapt"],
+    )  # 选择要加载的离线子图缓存类型
     ap.add_argument("--metapath_max_hop", type=int, default=3)  # metapath_topk 最大元路径长度 M
     ap.add_argument("--metapath_topk", type=int, default=5)  # 每条元路径保留的 top-k 终点邻居数
-    ap.add_argument("--metapath_rank_metric", type=str, default="count", choices=["count", "degree_norm"])  # top-k 排序指标
+    ap.add_argument("--metapath_min_topk", type=int, default=1)  # 自适应 top-k 的每条元路径最少保留终点数
+    ap.add_argument("--metapath_max_topk", type=int, default=5)  # 自适应 top-k 的每条元路径最多保留终点数
+    ap.add_argument("--metapath_rel_threshold", type=float, default=0.5)  # 自适应 top-k 相对最高分阈值
+    ap.add_argument("--metapath_rank_metric", type=str, default="count", choices=["count", "degree_norm", "count_idf"])  # top-k 排序指标
     ap.add_argument("--metapath_keep_self", action="store_true")  # 是否允许同类型元路径把目标节点自身纳入 top-k
     ap.add_argument("--peprompt_write_edge_feature_stats", action=argparse.BooleanOptionalAction, default=True)  # 是否写出边特征统计信息
     ap.add_argument("--peprompt_spectral_dim", type=int, default=16)  # Laplacian PE 维度
@@ -1308,7 +1339,20 @@ def build_parser():
         "--peprompt_basis_count",
         type=int,
         default=4,
-        help="Number of global prompt bases used when --peprompt_fusion_mode=graph_summary_basis.",
+        help="Number of global prompt bases used by basis-style prompt modes such as graph_summary_basis.",
+    )
+    ap.add_argument(
+        "--peprompt_mp_reg_mode",
+        type=str,
+        default="none",
+        choices=["none", "consistency", "predict"],
+        help="Metapath regularization mode applied to edge prompts without changing message generation.",
+    )
+    ap.add_argument(
+        "--peprompt_mp_reg_weight",
+        type=float,
+        default=0.0,
+        help="Weight for metapath prompt regularization loss.",
     )
     ap.add_argument(
         "--peprompt_generator_hidden",
