@@ -19,7 +19,7 @@ PEPrompt 的核心目标是在 HGMP 的异构图 prompt 框架上，引入**边�
 | Dataset | PEPrompt Subgraph | Notes |
 | --- | --- | --- |
 | ACM | metapath h3/k3 | 当前 r10 结果最稳定，约 `0.8999/0.8997` |
-| DBLP | metapath adapt h3/k1-5/a0.5 | adaptive no-path 与 path-adapt 基本持平，显著优于固定 top-k |
+| DBLP | metapath adapt h3/k1-8/a0.5 | 当前最强配置，`macro=0.8234 ± 0.0342`，显著优于 k1-5 和固定 top-k |
 | IMDB | metapath h2/k3 | 多标签任务，高阶 metapath 噪声更明显 |
 | Freebase | metapath h3/k3, `feats_type=1` | 避免 dense pseudo-feature 导致 CPU OOM |
 
@@ -28,7 +28,7 @@ PEPrompt 的核心目标是在 HGMP 的异构图 prompt 框架上，引入**边�
 - Typepair prompt 单独作为类型级边 prompt 效果有限，后续不再作为主线。
 - Laplacian PE edge feature 是当前最有效的结构提示来源。
 - Metapath-topk 子图比 khop 更适合 PEPrompt，尤其在 ACM、DBLP、Freebase 上优势明显。
-- DBLP 上固定 top-k 的主要问题是 split 间差异很大；adaptive top-k 通过相对阈值动态选择每条元路径的终点数量，显著缓解了 split 2 低分问题。最新 no-path ablation 说明 path-preserving 不是主要收益来源。
+- DBLP 上固定 top-k 的主要问题是 split 间差异很大；adaptive top-k 通过相对阈值动态选择每条元路径的终点数量，显著缓解了 split 低分问题。最新确认结果显示 no-path adaptive `h3/k1-8/a0.5` 是当前最强 DBLP 配置，path-preserving 不是主要收益来源。
 - Dropped-context 虽然有小幅提升迹象，但存储、显存和运行时间代价过高，当前不作为主线。
 - IMDB 是特殊情况：任务是多标签，few-shot split 波动较大，高阶 metapath 容易引入噪声，因此当前使用 h2/k3。
 - Freebase 的主要问题不是原始图文件大小，而是无属性节点类型补 dense pseudo-feature 会导致巨大 CPU 内存占用；当前通过 `feats_type=1` 规避。
@@ -43,7 +43,7 @@ PEPrompt 的核心目标是在 HGMP 的异构图 prompt 框架上，引入**边�
 - [ ] 评估是否需要 hybrid early stopping，减少 IMDB 上 val loss 与 test F1 不一致的问题。
 - [ ] 整理最终论文表格所需的统一协议、日志路径和 checkpoint 说明。
 - [x] 将 DBLP `metapath_topk_path_adapt h3/k1-5/a0.5` 从 seeds 0/2 扩展到 seeds 0-4。结论：保持高均值，`macro=0.7861 ± 0.0317`，seed-mean macro std `0.0237`。
-- [ ] 在 ACM、Freebase、IMDB 上验证 adaptive top-k 是否普适；ACM 初步显示 no-path adaptive 更快且 1-shot 更好，仍需更多 seeds。
+- [x] 在 ACM、Freebase、IMDB 上验证 adaptive top-k 是否普适。结论：adaptive 不是普适提升，当前主要在 DBLP 上显著有效；IMDB 和 Freebase 没有稳定超过已有基线。
 - [ ] 系统比较 `metapath_topk_adapt` 与 `metapath_topk_path_adapt`，确认 path-preserving 是否应从主线中移除。
 
 ## 方法细节
@@ -961,3 +961,175 @@ ACM 1-shot, seed 0, repeats 10：
 | adapt no-path | 0 | 10 | 0.7846 ± 0.0365 | 0.7756 ± 0.0390 | `29.28s` |
 
 ACM 1-shot 上 no-path 明显更好，macro 约提升 `+0.0195`。
+
+
+## 2026-06-21 多数据集 adaptive 参数确认
+
+### 背景
+
+在 DBLP 上发现 `metapath_topk_adapt` 的 `max_k` 可能比是否 path-preserving 更关键。于是做了一轮 stage-1 小网格：
+
+- DBLP：`h3`，调 `max_k=3/5/8`、`alpha=0.4/0.5/0.6`、`rank_metric=count/degree_norm`
+- IMDB：以降噪为目标，调 `h1/h2`、`max_k=3/5`、`alpha=0.5/0.6`、`rank_metric=count/degree_norm`
+- Freebase：以固定 `h3/k3` 为基线，调 `h2/h3`、`max_k=3/5/8`、`alpha=0.4/0.5/0.6`
+
+stage-1 使用 seeds `0/2`、repeats `5`。随后对每个数据集最有希望的配置做 full confirm：seeds `0/1/2/3/4`、repeats `10`。
+
+### DBLP：h3/k1-8/a0.5 确认有效
+
+stage-1 中 `h3/k1-8/a0.5/count` 明显最好：
+
+```text
+DBLP h3 k1-8 a0.5 count, seeds 0/2, repeats 5:
+micro = 0.8343 ± 0.0188
+macro = 0.8327 ± 0.0188
+seed-mean macro std = 0.0137
+```
+
+full confirm 日志：
+
+- `artifacts/logs/peprompt_r10_compare/DBLP_h3_k1-8_a0p5_count_adapt_nopath_s0_s4_r10_confirm.log`
+
+full confirm 结果：
+
+```json
+{
+  "pooled_runs": {
+    "peprompt": {
+      "count": 50,
+      "micro_mean": 0.8254868447780609,
+      "micro_std": 0.03385488631425971,
+      "macro_mean": 0.82337895154953,
+      "macro_std": 0.03416613137294566
+    }
+  },
+  "seed_mean_then_std": {
+    "peprompt": {
+      "count": 5,
+      "micro_mean": 0.8254868447780609,
+      "micro_std": 0.028675414817826636,
+      "macro_mean": 0.82337895154953,
+      "macro_std": 0.02869757898229863
+    }
+  }
+}
+```
+
+对比此前 DBLP 关键结果：
+
+| Variant | Seeds | Count | Micro-F1 | Macro-F1 | Seed-mean Macro Std |
+| --- | --- | ---: | ---: | ---: | ---: |
+| fixed `metapath_topk h3/k2` | 0-4 | 50 | 0.6317 | 0.6306 | ~0.046 |
+| path-adapt `h3/k1-5/a0.5` | 0-4 | 50 | 0.7883 ± 0.0318 | 0.7861 ± 0.0317 | 0.0237 |
+| adapt no-path `h3/k1-5/a0.5` | 0/2 | 20 | 0.7889 ± 0.0327 | 0.7870 ± 0.0323 | 0.0270 |
+| adapt no-path `h3/k1-8/a0.5` | 0-4 | 50 | 0.8255 ± 0.0339 | 0.8234 ± 0.0342 | 0.0287 |
+
+结论：
+
+1. DBLP 上 adaptive top-k 的核心不只是“动态阈值”，还包括给每条元路径足够的上限容量。`max_k=5` 仍然偏保守，`max_k=8` 明显更好。
+2. `h3/k1-8/a0.5/count` 已经成为当前 DBLP 最强配置。
+3. seed-mean 方差相较 path-adapt `k1-5` 略高，但均值提升约 `+3.7` 个 macro 点，收益远大于方差代价。
+
+### IMDB：degree_norm 小网格有信号，但 full confirm 回落
+
+stage-1 最好的是 `h2/k1-5/a0.5/degree_norm`：
+
+```text
+IMDB h2 k1-5 a0.5 degree_norm, seeds 0/2, repeats 5:
+micro = 0.6781 ± 0.0067
+macro = 0.6029 ± 0.0087
+seed-mean macro std = 0.0079
+```
+
+full confirm 日志：
+
+- `artifacts/logs/peprompt_r10_compare/IMDB_h2_k1-5_a0p5_degree_norm_adapt_nopath_s0_s4_r10_confirm.log`
+
+full confirm 结果：
+
+```json
+{
+  "pooled_runs": {
+    "peprompt": {
+      "count": 50,
+      "micro_mean": 0.6671663200855256,
+      "micro_std": 0.015704459163242403,
+      "macro_mean": 0.5894608116149902,
+      "macro_std": 0.01941842145287495
+    }
+  },
+  "seed_mean_then_std": {
+    "peprompt": {
+      "count": 5,
+      "micro_mean": 0.6671663200855256,
+      "micro_std": 0.014730146186656724,
+      "macro_mean": 0.5894608116149902,
+      "macro_std": 0.018220297291866795
+    }
+  }
+}
+```
+
+对比历史 IMDB：
+
+| Variant | Seeds | Count | Micro-F1 | Macro-F1 |
+| --- | --- | ---: | ---: | ---: |
+| HGMP Prompt khop | 0-4 | 50 | 0.6760 ± 0.0121 | 0.5996 ± 0.0150 |
+| PEPrompt fixed `h2/k3` | 0-4 | 50 | 0.6667 ± 0.0159 | 0.5883 ± 0.0197 |
+| adapt no-path `h2/k1-5/a0.5/count` | 0-4 | 50 | 0.6464 ± 0.0046 | 0.5641 ± 0.0064 |
+| adapt no-path `h2/k1-5/a0.5/degree_norm` | 0-4 | 50 | 0.6672 ± 0.0157 | 0.5895 ± 0.0194 |
+
+结论：
+
+1. IMDB 上 `degree_norm` 比 adaptive count 明显更合理，说明多标签场景中直接按可达 count 扩邻域会引入噪声。
+2. 但 full confirm 后它只与 fixed `h2/k3` 基本持平，仍未超过 HGMP Prompt khop。
+3. IMDB 的瓶颈可能不在 adaptive 子图上，而在多标签 few-shot 的监督噪声、label collapse/评估协议和 early stopping 的不稳定性。
+
+### Freebase：adaptive 未超过固定 h3/k3
+
+stage-1 使用 hid256 checkpoint 时，较好的两个候选为：
+
+```text
+h3/k1-3/a0.5/count:
+micro = 0.3401 ± 0.0189
+macro = 0.2877 ± 0.0273
+
+h3/k1-8/a0.5/count:
+micro = 0.3428 ± 0.0268
+macro = 0.2847 ± 0.0309
+```
+
+由于固定 `h3/k3` baseline 使用 hid512 checkpoint，为公平比较，使用 `Freebase.GraphCL.GCN.hid512.np50.seed0.pth` 做 full confirm。
+
+full confirm 日志：
+
+- `artifacts/logs/peprompt_r10_compare/Freebase_ft1_h3_k1-3_a0p5_count_adapt_nopath_hid512_s0_s4_r10_confirm.log`
+- `artifacts/logs/peprompt_r10_compare/Freebase_ft1_h3_k1-8_a0p5_count_adapt_nopath_hid512_s0_s4_r10_confirm.log`
+
+full confirm 结果：
+
+| Variant | Seeds | Count | Micro-F1 | Macro-F1 | Seed-mean Macro Std |
+| --- | --- | ---: | ---: | ---: | ---: |
+| fixed `h3/k3`, hid512 | 0-4 | 50 | 0.3463 ± 0.0207 | 0.2949 ± 0.0268 | 0.0177 |
+| adapt no-path `h3/k1-3/a0.5`, hid512 | 0-4 | 50 | 0.3331 ± 0.0235 | 0.2791 ± 0.0256 | 0.0122 |
+| adapt no-path `h3/k1-8/a0.5`, hid512 | 0-4 | 50 | 0.3376 ± 0.0303 | 0.2856 ± 0.0362 | 0.0084 |
+
+结论：
+
+1. Freebase 上 adaptive no-path 没有超过固定 `metapath_topk h3/k3`。
+2. `k1-8` 比 `k1-3` 均值略高、seed-mean 方差更低，但 pooled 方差更大，仍然不如固定 top-k。
+3. Freebase 可能更需要固定大小的稳定语义邻域，adaptive threshold 反而会在类别稀疏、节点类型不均衡时引入不稳定选择。
+
+### 2026-06-21 阶段结论
+
+1. `metapath_topk_adapt` 不是普适提升，目前主要在 DBLP 上显著有效。
+2. DBLP 的关键配置是 `h3/k1-8/a0.5/count`，说明 DBLP 需要更宽的高阶语义邻域；`k1-5` 上限不足。
+3. IMDB 上 `degree_norm` 优于 count，但 full confirm 只和 fixed `h2/k3` 持平，仍不如 HGMP Prompt。IMDB 后续应优先研究多标签协议、early stopping 或标签噪声，而不是继续扩大 metapath 网格。
+4. Freebase 上固定 `h3/k3` 仍是当前最好配置，adaptive threshold 没有带来收益。
+5. 后续调参应数据集分治：
+   - DBLP：围绕 `max_k=8` 继续微调 `alpha=0.4/0.5/0.6`，并统计子图大小；
+   - IMDB：保留 `h2/k3` 或 `degree_norm` 作为对照，优先处理多标签评估/早停；
+   - Freebase：回到固定 top-k 或尝试很小范围的固定 k，而不是继续 adaptive。
+
+#### IMDB数据集的F1计算
+由于当前的F1会被argmax缩成onehot，因此改回来试一下，发现效果还不如之前的效果。

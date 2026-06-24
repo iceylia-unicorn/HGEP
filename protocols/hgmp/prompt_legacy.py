@@ -142,11 +142,15 @@ class GCL_GCN(nn.Module):
         for fc, feature in zip(self.fc_list, feats_emd):
             h.append(fc(feature))
         h = torch.cat(h, 0)
+        graph_device = getattr(graph, "device", torch.device("cpu"))
+        graph_for_homo = graph.to(torch.device("cpu")) if graph_device.type != "cpu" else graph
+        homo_g = dgl.to_homogeneous(graph_for_homo)
+        homo_g = dgl.remove_self_loop(homo_g)
+        homo_g = dgl.add_self_loop(homo_g)
+        homo_g = homo_g.to(h.device)
+
         for i, layer in enumerate(self.layers):
             h = self.dropout(h)
-            homo_g=dgl.to_homogeneous(graph)
-            homo_g=dgl.remove_self_loop(homo_g)
-            homo_g=dgl.add_self_loop(homo_g)
             h = layer(homo_g, h)
         res = {}
         for i, key in enumerate(keys):
@@ -396,20 +400,16 @@ class HeteroPrompt(torch.nn.Module):
 
 
     def forward(self,graph_batch):
-        batched_graph=[]
-
-        for graph in dgl.unbatch(graph_batch):
-            # device = torch.device("cuda")
-            # self.token_list=self.token_list.to(device)
-            # graph=graph.to(device=device)
-            for node_type in self.token_list.keys():
-                newdata=graph.ndata['x'][node_type]*self.token_list[node_type]
-                graph.ndata['x']={node_type:newdata}
-            batched_graph.append(graph)
-
-        batched_graph=dgl.batch(batched_graph)
-
-        return batched_graph
+        graph_batch = graph_batch.local_var()
+        for node_type in self.token_list.keys():
+            if node_type not in graph_batch.ntypes:
+                continue
+            if 'x' not in graph_batch.nodes[node_type].data:
+                continue
+            graph_batch.nodes[node_type].data['x'] = (
+                graph_batch.nodes[node_type].data['x'] * self.token_list[node_type]
+            )
+        return graph_batch
     def weighted_sum(self,type_embedding):
         token=self.type_token
         token=F.normalize(token,p=2,dim=1)

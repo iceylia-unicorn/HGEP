@@ -161,36 +161,19 @@ def _legacy_multihot_f1_micro_macro(
     y: torch.Tensor,
     num_classes: int,
 ) -> tuple[float, float]:
-    """Match HGMP's IMDB protocol: argmax prediction as one-hot vs multi-hot labels."""
-    pred_ids = _to_class_ids(pred)
-    pred_hot = F.one_hot(pred_ids.clamp(min=0, max=num_classes - 1), num_classes=num_classes).to(y.device)
-    valid = pred_ids >= 0
-    pred_hot = pred_hot.to(torch.float32)
-    pred_hot[~valid] = 0.0
+    """True multilabel IMDB protocol: sigmoid-threshold predictions vs multi-hot labels."""
+    if not isinstance(pred, torch.Tensor):
+        pred = torch.as_tensor(pred)
+    if pred.ndim != 2 or pred.size(1) != num_classes:
+        raise ValueError(f"Expected logits with shape [N, {num_classes}], got {tuple(pred.shape)}")
+
+    pred_probs = torch.sigmoid(pred.to(torch.float32))
+    pred_hot = (pred_probs >= 0.5).to(torch.float32)
 
     target = y.to(pred_hot.device).to(torch.float32)
     if target.ndim != 2 or target.size(1) != num_classes:
         raise ValueError(f"Expected multi-hot labels with shape [N, {num_classes}], got {tuple(target.shape)}")
     target = (target > 0).to(torch.float32)
-
-    try:
-        import torchmetrics
-
-        micro_metric = torchmetrics.classification.F1Score(
-            task="multiclass",
-            num_classes=num_classes,
-            average="micro",
-        ).to(pred_hot.device)
-        macro_metric = torchmetrics.classification.F1Score(
-            task="multiclass",
-            num_classes=num_classes,
-            average="macro",
-        ).to(pred_hot.device)
-        micro = float(micro_metric(pred_hot, target).item())
-        macro = float(macro_metric(pred_hot, target).item())
-        return micro, macro
-    except Exception:
-        pass
 
     tp = (pred_hot * target).sum(dim=0)
     fp = (pred_hot * (1.0 - target)).sum(dim=0)
