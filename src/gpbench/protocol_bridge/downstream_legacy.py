@@ -752,6 +752,364 @@ def _evaluate_graph_probe_loss(
     return total_loss / max(total_graphs, 1)
 
 
+def _prototype_centers(emb: torch.Tensor, labels: torch.Tensor, num_classes: int) -> torch.Tensor:
+    labels = _to_class_ids(labels).to(emb.device)
+    counts = torch.zeros(num_classes, device=emb.device, dtype=emb.dtype)
+    counts.scatter_add_(0, labels, torch.ones_like(labels, dtype=emb.dtype))
+    centers = torch.zeros(num_classes, emb.size(1), device=emb.device, dtype=emb.dtype)
+    centers.scatter_add_(0, labels.view(-1, 1).expand(-1, emb.size(1)), emb)
+    return centers / counts.clamp_min(1.0).view(-1, 1)
+
+
+def _prototype_logits(emb: torch.Tensor, centers: torch.Tensor) -> torch.Tensor:
+    emb = F.normalize(emb, p=2, dim=1)
+    centers = F.normalize(centers, p=2, dim=1)
+    return emb @ centers.t()
+
+
+def _collect_graph_embeddings(
+    graph_list,
+    hgnn,
+    targetnode: str,
+    dataset: str,
+    classification_type: str,
+    batch_size: int,
+    device: torch.device,
+    *,
+    train: bool,
+):
+    loader = dgl.dataloading.GraphDataLoader(graph_list, batch_size=batch_size, shuffle=False)
+    xs = []
+    ys = []
+
+    hgnn.eval()
+    if train and hasattr(hgnn, "relation_prompt"):
+        hgnn.relation_prompt.train()
+
+    context = torch.enable_grad() if train else torch.no_grad()
+    with context:
+        for batch in loader:
+            batched_graph, batched_label = _unpack_batch(batch, classification_type)
+            edge_index_dict = _prepare_edge_indices_for_device(hgnn, batched_graph, device)
+            edge_feature_dict = _prepare_edge_features_for_device(hgnn, batched_graph, device)
+            homo_graph = _prepare_homo_graph_for_device(hgnn, batched_graph, device)
+            batched_graph = batched_graph.to(device)
+            batched_label = _prepare_labels_for_task(
+                batched_label,
+                device,
+                dataset,
+                classification_type,
+            )
+
+            graph_emb = forward_graph_batch(
+                hgnn,
+                batched_graph,
+                targetnode,
+                edge_feature_dict=edge_feature_dict,
+                edge_index_dict=edge_index_dict,
+                homo_graph=homo_graph,
+            )
+            xs.append(graph_emb)
+            ys.append(batched_label)
+
+    return torch.cat(xs, dim=0), torch.cat(ys, dim=0)
+
+
+def _evaluate_prototype_probe(
+    graph_list,
+    hgnn,
+    centers: torch.Tensor,
+    targetnode: str,
+    dataset: str,
+    classification_type: str,
+    batch_size: int,
+    device: torch.device,
+    num_classes: int,
+):
+    emb, labels = _collect_graph_embeddings(
+        graph_list,
+        hgnn,
+        targetnode,
+        dataset,
+        classification_type,
+        batch_size,
+        device,
+        train=False,
+    )
+    logits = _prototype_logits(emb, centers)
+    loss = F.cross_entropy(logits, _to_class_ids(labels).to(device))
+    micro, macro = _legacy_f1_micro_macro(logits, labels, num_classes)
+    return loss, micro, macro
+
+
+def _train_relation_prompt_prototype_probe(
+    args,
+    batch_size: int = 32,
+    prompt_lr: float | None = None,
+    weight_decay: float = 1e-4,
+    epochs: int = 200,
+    patience: int = 30,
+    save_best_path: str | None = None,
+    epoch_callback=None,
+):
+    train_list, valid_list, test_list, targetnode = _load_legacy_fewshot_splits(args)
+    if _is_legacy_multilabel_task(args.dataset, args.classification_type):
+        raise ValueError("PEPrompt prototype head currently supports single-label tasks only; IMDB multi-label is not supported.")
+
+    eval_mode = getattr(args, f"{args.method}_eval_mode", "full")
+    if eval_mode not in {"full", "early_stop_only"}:
+        raise ValueError(f"Unsupported {args.method}_eval_mode: {eval_mode}")
+
+    hgnn = build_legacy_hgnn(
+        args,
+        args.ckpt,
+        freeze=True,
+        train_relation_prompt_only=True,
+    )
+
+    prompt_lr = float(getattr(args, "prompt_lr", None) or prompt_lr or getattr(args, "lr", 5e-3))
+    opt = torch.optim.AdamW(
+        [
+            {
+                "params": list(hgnn.relation_prompt.parameters()),
+                "lr": prompt_lr,
+                "weight_decay": weight_decay,
+            }
+        ]
+    )
+
+    best_val_micro = 0.0
+    best_val_macro = 0.0
+    test_at_best_micro = 0.0
+    test_at_best_macro = 0.0
+    best_epoch = -1
+    bad_epochs = 0
+    best_val_loss = float("inf")
+    best_hgnn_state = None
+
+    for epoch in range(1, epochs + 1):
+        hgnn.eval()
+        hgnn.relation_prompt.train()
+
+        train_emb, train_labels = _collect_graph_embeddings(
+            train_list,
+            hgnn,
+            targetnode,
+            args.dataset,
+            args.classification_type,
+            batch_size,
+            args.device,
+            train=True,
+        )
+        train_labels_ids = _to_class_ids(train_labels).to(args.device)
+        centers = _prototype_centers(train_emb, train_labels_ids, args.num_class)
+        train_logits = _prototype_logits(train_emb, centers)
+        train_loss = F.cross_entropy(train_logits, train_labels_ids)
+
+        opt.zero_grad()
+        train_loss.backward()
+        opt.step()
+
+        with torch.no_grad():
+            hgnn.eval()
+            train_centers = _prototype_centers(
+                _collect_graph_embeddings(
+                    train_list,
+                    hgnn,
+                    targetnode,
+                    args.dataset,
+                    args.classification_type,
+                    batch_size,
+                    args.device,
+                    train=False,
+                )[0],
+                train_labels_ids,
+                args.num_class,
+            )
+            if eval_mode == "full" and epoch_callback is not None:
+                train_micro, train_macro = _legacy_f1_micro_macro(train_logits.detach(), train_labels_ids, args.num_class)
+            else:
+                train_micro, train_macro = None, None
+
+            val_loss, val_micro, val_macro = _evaluate_prototype_probe(
+                valid_list,
+                hgnn,
+                train_centers,
+                targetnode,
+                args.dataset,
+                args.classification_type,
+                batch_size,
+                args.device,
+                args.num_class,
+            )
+            if eval_mode == "full":
+                _, test_micro, test_macro = _evaluate_prototype_probe(
+                    test_list,
+                    hgnn,
+                    train_centers,
+                    targetnode,
+                    args.dataset,
+                    args.classification_type,
+                    batch_size,
+                    args.device,
+                    args.num_class,
+                )
+            else:
+                test_micro = test_macro = None
+
+        improved = float(val_loss.item()) <= best_val_loss
+        if improved:
+            best_val_micro = val_micro
+            best_val_macro = val_macro
+            if eval_mode == "full":
+                test_at_best_micro = test_micro
+                test_at_best_macro = test_macro
+            best_epoch = epoch
+            bad_epochs = 0
+            best_val_loss = float(val_loss.item())
+            best_hgnn_state = _clone_state_dict(hgnn)
+
+            if save_best_path is not None:
+                torch.save(
+                    {
+                        "hgnn_state": hgnn.state_dict(),
+                        "head_type": "prototype",
+                        "in_dim": args.hidden_dim,
+                        "num_classes": args.num_class,
+                        "best_val_micro": best_val_micro,
+                        "best_val_macro": best_val_macro,
+                        "test_at_best_micro": test_at_best_micro,
+                        "test_at_best_macro": test_at_best_macro,
+                        "best_epoch": best_epoch,
+                        "early_stop_mode": "prototype_val_loss",
+                        "eval_mode": eval_mode,
+                        "best_val_loss": best_val_loss,
+                    },
+                    save_best_path,
+                )
+        else:
+            bad_epochs += 1
+
+        if epoch_callback is not None:
+            payload = {
+                "epoch": epoch,
+                "train_loss": float(train_loss.item()),
+                "val_loss": float(val_loss.item()),
+                "best_val_loss": float(best_val_loss),
+                "best_val_micro": float(best_val_micro),
+                "best_val_macro": float(best_val_macro),
+                "test_at_best_micro": float(test_at_best_micro),
+                "test_at_best_macro": float(test_at_best_macro),
+                "best_epoch": int(best_epoch),
+                "bad_epochs": int(bad_epochs),
+                "is_best": bool(improved),
+                "early_stop": bool(bad_epochs >= patience),
+                "early_stop_mode": "prototype_val_loss",
+                "eval_mode": eval_mode,
+                "head_type": "prototype",
+                "monitor": float(-val_loss.item()),
+            }
+            if eval_mode == "full":
+                payload.update(
+                    {
+                        "train_micro": float(train_micro),
+                        "train_macro": float(train_macro),
+                        "val_micro": float(val_micro),
+                        "val_macro": float(val_macro),
+                        "test_micro": float(test_micro),
+                        "test_macro": float(test_macro),
+                    }
+                )
+            epoch_callback(payload)
+
+        if epoch == 1 or epoch % 10 == 0:
+            if eval_mode == "early_stop_only":
+                print(
+                    f"Epoch {epoch:03d} | loss={train_loss.item():.4f} | "
+                    f"val_loss={val_loss.item():.4f} | best_val_loss={best_val_loss:.4f} | "
+                    f"bad_epochs={bad_epochs} | head=prototype"
+                )
+            else:
+                print(
+                    f"Epoch {epoch:03d} | loss={train_loss.item():.4f} | "
+                    f"val_loss={val_loss.item():.4f} | "
+                    f"val_f1(micro/macro)={val_micro:.4f}/{val_macro:.4f} | "
+                    f"test_f1(micro/macro)={test_micro:.4f}/{test_macro:.4f} | head=prototype"
+                )
+
+        if bad_epochs >= patience:
+            if eval_mode == "early_stop_only":
+                print(
+                    f"Early stop at epoch {epoch}, best_epoch={best_epoch} | "
+                    f"best_val_loss={best_val_loss:.4f} | final F1 will be evaluated once on the best checkpoint | "
+                    "head=prototype"
+                )
+            else:
+                print(
+                    f"Early stop at epoch {epoch}, best_epoch={best_epoch} | "
+                    f"best_val_loss={best_val_loss:.4f} | "
+                    f"best_val_f1(micro/macro)={best_val_micro:.4f}/{best_val_macro:.4f} | "
+                    f"test@best_f1(micro/macro)={test_at_best_micro:.4f}/{test_at_best_macro:.4f} | "
+                    "head=prototype"
+                )
+            break
+
+    if best_hgnn_state is not None:
+        hgnn.load_state_dict(best_hgnn_state)
+
+    if eval_mode == "early_stop_only":
+        train_emb, train_labels = _collect_graph_embeddings(
+            train_list,
+            hgnn,
+            targetnode,
+            args.dataset,
+            args.classification_type,
+            batch_size,
+            args.device,
+            train=False,
+        )
+        centers = _prototype_centers(train_emb, _to_class_ids(train_labels).to(args.device), args.num_class)
+        _, best_val_micro, best_val_macro = _evaluate_prototype_probe(
+            valid_list,
+            hgnn,
+            centers,
+            targetnode,
+            args.dataset,
+            args.classification_type,
+            batch_size,
+            args.device,
+            args.num_class,
+        )
+        _, test_at_best_micro, test_at_best_macro = _evaluate_prototype_probe(
+            test_list,
+            hgnn,
+            centers,
+            targetnode,
+            args.dataset,
+            args.classification_type,
+            batch_size,
+            args.device,
+            args.num_class,
+        )
+        print(
+            f"Final best-state F1 | best_epoch={best_epoch} | "
+            f"val_f1(micro/macro)={best_val_micro:.4f}/{best_val_macro:.4f} | "
+            f"test@best_f1(micro/macro)={test_at_best_micro:.4f}/{test_at_best_macro:.4f} | head=prototype"
+        )
+
+    return {
+        "best_val_micro": best_val_micro,
+        "best_val_macro": best_val_macro,
+        "test_at_best_micro": test_at_best_micro,
+        "test_at_best_macro": test_at_best_macro,
+        "best_epoch": best_epoch,
+        "early_stop_metric": "loss",
+        "early_stop_mode": "prototype_val_loss",
+        "eval_mode": eval_mode,
+        "best_val_loss": None if best_val_loss == float("inf") else best_val_loss,
+    }
+
+
 def _train_relation_prompt_probe(
     args,
     batch_size: int = 32,
@@ -767,6 +1125,18 @@ def _train_relation_prompt_probe(
     epoch_callback=None,
 ):
     assert early_stop_metric in {"micro", "macro"}
+
+    if getattr(args, f"{args.method}_head_type", "mlp") == "prototype":
+        return _train_relation_prompt_prototype_probe(
+            args=args,
+            batch_size=batch_size,
+            prompt_lr=prompt_lr,
+            weight_decay=weight_decay,
+            epochs=epochs,
+            patience=patience,
+            save_best_path=save_best_path,
+            epoch_callback=epoch_callback,
+        )
 
     train_list, valid_list, test_list, targetnode = _load_legacy_fewshot_splits(args)
     early_stop_mode = getattr(args, f"{args.method}_early_stop_mode", "metric")

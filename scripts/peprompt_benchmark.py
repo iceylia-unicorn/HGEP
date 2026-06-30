@@ -80,6 +80,26 @@ LEGACY_CKPT_NAME_RE = re.compile(
 )
 LEGACY_CKPT_SYNC_KEYS = ("hgnn_type", "hidden_dim", "num_samples")
 LEGACY_CKPT_OPTIONAL_SYNC_KEYS = ("num_class", "feats_type", "num_heads", "num_layers", "dropout")
+HGPROMPT_CKPT_NAME_RE = re.compile(
+    r"^(?P<dataset>[^.]+)\.(?P<model_type>[^.]+)\.ft(?P<feats_type>-?\d+)\.hop(?P<subgraph_hop_num>\d+)"
+    r"(?:\.seed(?P<seed>\d+))?\.best\.pt$"
+)
+HGPROMPT_CKPT_SYNC_KEYS = {
+    "feats_type": "hgprompt_feats_type",
+    "hidden_dim": "hgprompt_hidden_dim",
+    "num_heads": "hgprompt_num_heads",
+    "num_layers": "hgprompt_num_layers",
+    "model_type": "hgprompt_model_type",
+    "dropout": "hgprompt_dropout",
+    "slope": "hgprompt_slope",
+    "edge_feats": "hgprompt_edge_feats",
+    "subgraph_hop_num": "hgprompt_subgraph_hop_num",
+    "hetero_pretrain": "hgprompt_hetero_pretrain",
+    "hetero_subgraph": "hgprompt_hetero_pretrain_subgraph",
+    "semantic_weight": "hgprompt_pretrain_semantic",
+    "each_loss": "hgprompt_pretrain_each_loss",
+    "freebase_type": "hgprompt_freebase_type",
+}
 
 
 @dataclass
@@ -169,10 +189,111 @@ def _load_legacy_ckpt_metadata(ckpt_path: str) -> dict:
     return meta
 
 
+def _extract_state_dict_from_payload(payload) -> dict | None:
+    if not isinstance(payload, dict):
+        return None
+    for key in ("model_state", "state_dict", "encoder_state_dict", "encoder_state"):
+        value = payload.get(key)
+        if isinstance(value, dict):
+            return value
+    if all(hasattr(value, "shape") for value in payload.values()):
+        return payload
+    return None
+
+
+def _infer_hgprompt_ckpt_metadata_from_state_dict(ckpt_path: Path) -> dict:
+    if not ckpt_path.exists():
+        return {}
+    try:
+        try:
+            payload = torch.load(ckpt_path, map_location="cpu", weights_only=False)
+        except TypeError:
+            payload = torch.load(ckpt_path, map_location="cpu")
+    except Exception as exc:
+        warnings.warn(f"Could not inspect HGPrompt checkpoint {ckpt_path}: {exc}")
+        return {}
+
+    state_dict = _extract_state_dict_from_payload(payload)
+    if not state_dict:
+        return {}
+
+    meta = {}
+    fc_weight = next(
+        (
+            value
+            for key, value in state_dict.items()
+            if key.startswith("fc_list.") and key.endswith(".weight") and hasattr(value, "shape") and len(value.shape) == 2
+        ),
+        None,
+    )
+    if fc_weight is not None:
+        meta["hidden_dim"] = int(fc_weight.shape[0])
+
+    layer_ids = {
+        int(parts[1])
+        for key in state_dict.keys()
+        if (parts := key.split(".")) and len(parts) > 2 and parts[0] == "layers" and parts[1].isdigit()
+    }
+    gat_layer_ids = {
+        int(parts[1])
+        for key in state_dict.keys()
+        if (parts := key.split(".")) and len(parts) > 2 and parts[0] == "gat_layers" and parts[1].isdigit()
+    }
+    if layer_ids:
+        meta["num_layers"] = max(layer_ids) + 1
+        meta.setdefault("model_type", "gcn")
+    elif gat_layer_ids:
+        # HGPrompt GAT-style backbones keep an output layer after the message-passing stack.
+        meta["num_layers"] = max(1, len(gat_layer_ids) - 1)
+        meta.setdefault("model_type", "gat")
+
+    if "semantic_weight" in state_dict:
+        meta["semantic_weight"] = 1
+    return meta
+
+
+def _load_hgprompt_ckpt_metadata(ckpt_path: str) -> dict:
+    src = Path(ckpt_path)
+    meta = {}
+
+    sidecar = Path(str(src) + ".json")
+    if sidecar.exists():
+        with open(sidecar, "r", encoding="utf-8") as f:
+            loaded = json.load(f)
+        if not isinstance(loaded, dict):
+            raise ValueError(f"HGPrompt checkpoint metadata is not a JSON object: {sidecar}")
+        meta.update(loaded)
+
+    match = HGPROMPT_CKPT_NAME_RE.match(src.name)
+    if match:
+        parsed = match.groupdict()
+        meta.setdefault("dataset", parsed["dataset"])
+        meta.setdefault("model_type", parsed["model_type"])
+        meta.setdefault("feats_type", int(parsed["feats_type"]))
+        meta.setdefault("subgraph_hop_num", int(parsed["subgraph_hop_num"]))
+        if parsed.get("seed") is not None:
+            meta.setdefault("seed", int(parsed["seed"]))
+
+    inferred = _infer_hgprompt_ckpt_metadata_from_state_dict(src)
+    for key, value in inferred.items():
+        meta.setdefault(key, value)
+    return meta
+
+
 def _sync_args_with_legacy_ckpts(args, ckpt_by_method: dict[str, str]):
     legacy_metas = []
     for method, ckpt_path in ckpt_by_method.items():
-        if method not in LEGACY_HGMP_METHODS:
+        hgprompt_uses_hgmp = (
+            method == "hgprompt"
+            and str(getattr(args, "hgprompt_pretrain_family", "hgprompt")) == "hgmp"
+        )
+        peprompt_uses_hgprompt = (
+            method == "peprompt"
+            and str(getattr(args, "peprompt_pretrain_family", "auto")) == "hgprompt"
+        )
+        if peprompt_uses_hgprompt:
+            continue
+        if method not in LEGACY_HGMP_METHODS and not hgprompt_uses_hgmp:
             continue
         meta = _load_legacy_ckpt_metadata(ckpt_path)
         if meta:
@@ -220,6 +341,145 @@ def _sync_args_with_legacy_ckpts(args, ckpt_by_method: dict[str, str]):
                 "based on legacy checkpoint metadata."
             )
             setattr(args, key, ckpt_value)
+    return args
+
+
+def _resolve_peprompt_pretrain_family(args, ckpt_by_method: dict[str, str]):
+    if "peprompt" not in ckpt_by_method:
+        return args
+    configured = str(getattr(args, "peprompt_pretrain_family", "auto"))
+    if configured != "auto":
+        return args
+
+    ckpt_path = ckpt_by_method["peprompt"]
+    legacy_meta = _load_legacy_ckpt_metadata(ckpt_path)
+    hgprompt_meta = _load_hgprompt_ckpt_metadata(ckpt_path)
+    if legacy_meta and legacy_meta.get("hgnn_type") is not None:
+        args.peprompt_pretrain_family = "hgmp"
+    elif hgprompt_meta and hgprompt_meta.get("model_type") is not None:
+        args.peprompt_pretrain_family = "hgprompt"
+    else:
+        args.peprompt_pretrain_family = "hgmp"
+    print(f"[peprompt-family] resolved peprompt_pretrain_family={args.peprompt_pretrain_family}")
+    return args
+
+
+def _sync_args_with_peprompt_hgprompt_ckpt(args, ckpt_by_method: dict[str, str]):
+    if "peprompt" not in ckpt_by_method:
+        return args
+    if str(getattr(args, "peprompt_pretrain_family", "auto")) != "hgprompt":
+        return args
+
+    meta = _load_hgprompt_ckpt_metadata(ckpt_by_method["peprompt"])
+    if not meta:
+        raise RuntimeError(f"Could not read HGPrompt checkpoint metadata: {ckpt_by_method['peprompt']}")
+
+    model_type = str(meta.get("model_type", "gcn")).lower()
+    if model_type != "gcn":
+        raise RuntimeError(
+            f"PEPrompt currently only supports HGPrompt GCN checkpoints, got model_type={model_type}."
+        )
+
+    overrides = {
+        "hgnn_type": "GCN",
+        "hidden_dim": int(meta.get("hidden_dim", getattr(args, "hidden_dim", 64))),
+        "num_layers": int(meta.get("num_layers", getattr(args, "num_layers", 2))),
+        "dropout": float(meta.get("dropout", getattr(args, "dropout", 0.5))),
+    }
+    for key, value in overrides.items():
+        old_value = getattr(args, key, None)
+        if old_value != value:
+            print(
+                f"[peprompt-hgprompt-sync] overriding {key} from {old_value} to {value} "
+                "based on HGPrompt checkpoint metadata."
+            )
+            setattr(args, key, value)
+    return args
+
+
+def _sync_args_with_hgprompt_ckpts(args, ckpt_by_method: dict[str, str]):
+    hgprompt_metas = []
+    for method, ckpt_path in ckpt_by_method.items():
+        if method != "hgprompt":
+            continue
+        if str(getattr(args, "hgprompt_pretrain_family", "hgprompt")) != "hgprompt":
+            continue
+        meta = _load_hgprompt_ckpt_metadata(ckpt_path)
+        if not meta:
+            warnings.warn(
+                f"HGPrompt checkpoint has no readable metadata and could not be inferred: {ckpt_path}. "
+                "Downstream HGPrompt args will be used as-is; check hidden_dim/num_layers/model_type manually."
+            )
+            continue
+        hgprompt_metas.append((method, ckpt_path, meta))
+
+    if not hgprompt_metas:
+        return args
+
+    dataset_values = {
+        str(meta["dataset"])
+        for _, _, meta in hgprompt_metas
+        if meta.get("dataset") is not None
+    }
+    if len(dataset_values) > 1:
+        raise RuntimeError(
+            f"Resolved HGPrompt checkpoints disagree on dataset: {sorted(dataset_values)}"
+        )
+    if dataset_values:
+        ckpt_dataset = next(iter(dataset_values))
+        if ckpt_dataset != args.dataset:
+            raise RuntimeError(
+                f"CLI dataset={args.dataset} does not match HGPrompt checkpoint dataset={ckpt_dataset}."
+            )
+
+    for meta_key, arg_key in HGPROMPT_CKPT_SYNC_KEYS.items():
+        if meta_key == "freebase_type" and args.dataset != "Freebase":
+            continue
+        values = {
+            meta[meta_key]
+            for _, _, meta in hgprompt_metas
+            if meta.get(meta_key) is not None
+        }
+        if len(values) > 1:
+            detail = ", ".join(
+                f"{method}:{meta.get(meta_key)}"
+                for method, _, meta in hgprompt_metas
+                if meta.get(meta_key) is not None
+            )
+            raise RuntimeError(f"Resolved HGPrompt checkpoints disagree on {meta_key}: {detail}")
+        if not values:
+            continue
+        ckpt_value = next(iter(values))
+        old_value = getattr(args, arg_key, None)
+        if old_value != ckpt_value:
+            print(
+                f"[hgprompt-ckpt-sync] overriding {arg_key} from {old_value} to {ckpt_value} "
+                "based on HGPrompt checkpoint metadata."
+            )
+            setattr(args, arg_key, ckpt_value)
+    return args
+
+
+def _resolve_hgprompt_pretrain_family(args, ckpt_by_method: dict[str, str]):
+    if "hgprompt" not in ckpt_by_method:
+        return args
+    configured = str(getattr(args, "hgprompt_pretrain_family", "auto"))
+    if configured != "auto":
+        return args
+
+    ckpt_path = ckpt_by_method["hgprompt"]
+    legacy_meta = _load_legacy_ckpt_metadata(ckpt_path)
+    hgprompt_meta = _load_hgprompt_ckpt_metadata(ckpt_path)
+    if legacy_meta:
+        args.hgprompt_pretrain_family = "hgmp"
+    elif hgprompt_meta:
+        args.hgprompt_pretrain_family = "hgprompt"
+    else:
+        raise RuntimeError(
+            f"Could not infer hgprompt pretrain family from checkpoint: {ckpt_path}. "
+            "Set --hgprompt_pretrain_family hgprompt or hgmp explicitly."
+        )
+    print(f"[hgprompt-family] resolved hgprompt_pretrain_family={args.hgprompt_pretrain_family}")
     return args
 
 
@@ -757,6 +1017,13 @@ def _peprompt_cache_subgraph_type(args) -> str:
     return f"{subgraph_type}_{suffix}"
 
 
+def _hgprompt_split_cache_subgraph_type(args) -> str:
+    configured = getattr(args, "hgprompt_split_subgraph_type", None)
+    if configured:
+        return str(configured)
+    return _peprompt_cache_subgraph_type(args)
+
+
 def _patched_legacy_split_loader(args):
     return load_peprompt_offline_legacy_splits(args)
 
@@ -985,13 +1252,19 @@ def _make_hgprompt_args(cli_args, ckpt_path: str, split_seed: int, repeat_id: in
         dataset=cli_args.dataset,
         splits=cli_args.splits,
         shotnum=cli_args.shot,
+        split_source=cli_args.hgprompt_split_source,
+        peprompt_offline_cache_dir=cli_args.peprompt_offline_cache_dir,
+        peprompt_feats_type=cli_args.feats_type,
+        peprompt_subgraph_type=_hgprompt_split_cache_subgraph_type(cli_args),
         seed=split_seed,
         repeat=1,
         tasknum=1,
         pretrain_ckpt=ckpt_path,
+        pretrain_family=cli_args.hgprompt_pretrain_family,
         save_dir=str(save_dir),
         device=cli_args.device,
         strict_load=False,
+        allow_partial_load=cli_args.hgprompt_allow_partial_load,
         feats_type=cli_args.hgprompt_feats_type,
         hidden_dim=cli_args.hgprompt_hidden_dim,
         bottle_net_hidden_dim=cli_args.hgprompt_bottle_net_hidden_dim,
@@ -1023,11 +1296,35 @@ def _make_hgprompt_args(cli_args, ckpt_path: str, split_seed: int, repeat_id: in
         semantic_prompt_weight=cli_args.hgprompt_semantic_prompt_weight,
         freebase_type=cli_args.hgprompt_freebase_type,
         shgn_hidden_dim=cli_args.hgprompt_shgn_hidden_dim,
+        num_class=cli_args.num_class,
+        hgmp_feats_type=cli_args.feats_type,
+        hgmp_hidden_dim=cli_args.hidden_dim,
+        hgmp_num_heads=cli_args.num_heads,
+        hgmp_num_layers=cli_args.num_layers,
+        hgmp_dropout=cli_args.dropout,
+        hgmp_hgnn_type=cli_args.hgnn_type,
+        hgmp_num_samples=cli_args.num_samples,
+        hgmp_edge_feats=getattr(cli_args, "edge_feats", cli_args.hgprompt_edge_feats),
+        hgmp_slope=getattr(cli_args, "slope", cli_args.hgprompt_slope),
         downstream_run_seed=run_seed,
     )
 
 
-def run_hgprompt_once(cli_args, ckpt_path: str, split_seed: int, repeat_id: int, epoch_callback=None) -> RunRecord:
+def _load_hgprompt_bundle(cli_args, split_seed: int):
+    return load_hgprompt_downstream_bundle(
+        root=cli_args.root,
+        dataset=cli_args.dataset,
+        splits=cli_args.splits,
+        shot=cli_args.shot,
+        seed=split_seed,
+        split_source=cli_args.hgprompt_split_source,
+        peprompt_offline_cache_dir=cli_args.peprompt_offline_cache_dir,
+        peprompt_feats_type=cli_args.feats_type,
+        peprompt_subgraph_type=_hgprompt_split_cache_subgraph_type(cli_args),
+    )
+
+
+def run_hgprompt_once(cli_args, ckpt_path: str, split_seed: int, repeat_id: int, epoch_callback=None, bundle=None) -> RunRecord:
     run_seed = _make_run_seed(split_seed, repeat_id, cli_args.run_seed_base)
     _set_global_seed(run_seed)
 
@@ -1043,13 +1340,8 @@ def run_hgprompt_once(cli_args, ckpt_path: str, split_seed: int, repeat_id: int,
     save_dir.mkdir(parents=True, exist_ok=True)
 
     args = _make_hgprompt_args(cli_args, ckpt_path, split_seed, repeat_id, save_dir)
-    bundle = load_hgprompt_downstream_bundle(
-        root=cli_args.root,
-        dataset=cli_args.dataset,
-        splits=cli_args.splits,
-        shot=cli_args.shot,
-        seed=split_seed,
-    )
+    if bundle is None:
+        bundle = _load_hgprompt_bundle(cli_args, split_seed)
     res = hgprompt_run_once(args, bundle, repeat_id, epoch_callback=epoch_callback)
     return RunRecord(
         method="hgprompt",
@@ -1256,6 +1548,13 @@ def build_parser():
     ap.add_argument("--relation_prompt_use_ln", action="store_true")  # 是否在关系提示输出后使用 LayerNorm
 
     # PEPrompt 专属设置：只保留基于 Laplacian PE 的边提示参数。
+    ap.add_argument(
+        "--peprompt_pretrain_family",
+        type=str,
+        default="auto",
+        choices=["auto", "hgmp", "hgprompt"],
+        help="Which pretraining family the PEPrompt checkpoint comes from. HGPrompt GCN ckpts are mapped into the HGMP-GCN wrapper.",
+    )
     ap.add_argument("--peprompt_edge_feature_dim", type=int, default=0)  # 实际挂到边上的特征维度，运行时会被自动更新
     ap.add_argument("--peprompt_edge_feature_names", nargs="*", default=None, choices=PEPROMPT_EDGE_FEATURES)  # 启用的边特征名称，当前仅支持谱差值
     ap.add_argument("--peprompt_edge_feature_name", type=str, default=PEPROMPT_EDGE_FEATURE_NAME)  # DGL 图中保存 PEPrompt 边特征的字段名
@@ -1286,6 +1585,13 @@ def build_parser():
     ap.add_argument("--peprompt_spectral_dim", type=int, default=16)  # Laplacian PE 维度
     ap.add_argument("--peprompt_spectral_max_nodes", type=int, default=50000)  # 计算谱分解允许的最大节点数
     ap.add_argument("--peprompt_edge_prompt_hidden", type=int, default=128)  # 将 PE 边特征映射为提示向量的 MLP 隐层维度
+    ap.add_argument(
+        "--peprompt_head_type",
+        type=str,
+        default="mlp",
+        choices=["mlp", "prototype"],
+        help="PEPrompt downstream head: default MLP probe, or HGPrompt-style class-center prototype classifier.",
+    )
     ap.add_argument(
         "--peprompt_early_stop_mode",
         type=str,
@@ -1373,6 +1679,13 @@ def build_parser():
     )
 
     # HGPrompt 专属设置：仅在 methods 包含 hgprompt 时使用。
+    ap.add_argument(
+        "--hgprompt_pretrain_family",
+        type=str,
+        default="auto",
+        choices=["auto", "hgprompt", "hgmp"],
+        help="Which encoder family to use for hgprompt downstream. auto detects from --hgprompt_ckpt.",
+    )
     ap.add_argument("--hgprompt_feats_type", type=int, default=2)  # HGPrompt 输入特征类型
     ap.add_argument("--hgprompt_hidden_dim", type=int, default=64)  # HGPrompt 隐藏维度
     ap.add_argument("--hgprompt_bottle_net_hidden_dim", type=int, default=2)  # BottleNet 中间层维度
@@ -1402,6 +1715,24 @@ def build_parser():
     ap.add_argument("--hgprompt_semantic_prompt_weight", type=float, default=0.1)  # semantic prompt 损失权重
     ap.add_argument("--hgprompt_freebase_type", type=int, default=0)  # Freebase 特定配置
     ap.add_argument("--hgprompt_shgn_hidden_dim", type=int, default=3)  # SHGN 隐藏维度
+    ap.add_argument(
+        "--hgprompt_split_source",
+        type=str,
+        default="peprompt_cache",
+        choices=["peprompt_cache", "splits"],
+        help="Use PEPrompt offline cache train/val/test ids by default; 'splits' keeps the older split-file adapter.",
+    )
+    ap.add_argument(
+        "--hgprompt_split_subgraph_type",
+        type=str,
+        default=None,
+        help="PEPrompt offline cache key used only for HGPrompt split ids. Defaults to the current benchmark subgraph cache key.",
+    )
+    ap.add_argument(
+        "--hgprompt_allow_partial_load",
+        action="store_true",
+        help="Allow partial HGPrompt checkpoint loading. Disabled by default so pretrain/backbone mismatches fail loudly.",
+    )
 
     # W&B 记录设置：控制在线/离线日志、项目名和 artifact 输出。
     ap.add_argument("--use_wandb", action="store_true")  # 是否启用 W&B
@@ -1425,7 +1756,11 @@ def run_benchmark(args):
     try:
         records: list[RunRecord] = []
         ckpt_by_method = {method: _resolve_ckpt(args, method) for method in args.methods}
+        args = _resolve_peprompt_pretrain_family(args, ckpt_by_method)
+        args = _resolve_hgprompt_pretrain_family(args, ckpt_by_method)
         args = _sync_args_with_legacy_ckpts(args, ckpt_by_method)
+        args = _sync_args_with_peprompt_hgprompt_ckpt(args, ckpt_by_method)
+        args = _sync_args_with_hgprompt_ckpts(args, ckpt_by_method)
         config = _build_run_config(args, ckpt_by_method)
 
         if args.use_wandb:
@@ -1444,10 +1779,16 @@ def run_benchmark(args):
                 config=config,
             )
 
+        hgprompt_bundle_cache = {}
         for method in args.methods:
             ckpt_path = ckpt_by_method[method]
             print(f"================ method={method} | ckpt={ckpt_path} ================")
             for split_seed in args.seeds:
+                hgprompt_bundle = None
+                if method == "hgprompt" and args.repeats > 0:
+                    if split_seed not in hgprompt_bundle_cache:
+                        hgprompt_bundle_cache[split_seed] = _load_hgprompt_bundle(args, split_seed)
+                    hgprompt_bundle = hgprompt_bundle_cache[split_seed]
                 for repeat_id in range(args.repeats):
                     run_seed = _make_run_seed(split_seed, repeat_id, args.run_seed_base)
                     epoch_logger = _make_downstream_epoch_logger(
@@ -1459,7 +1800,14 @@ def run_benchmark(args):
                         run_seed=run_seed,
                     )
                     if method == "hgprompt":
-                        record = run_hgprompt_once(args, ckpt_path, split_seed, repeat_id, epoch_callback=epoch_logger)
+                        record = run_hgprompt_once(
+                            args,
+                            ckpt_path,
+                            split_seed,
+                            repeat_id,
+                            epoch_callback=epoch_logger,
+                            bundle=hgprompt_bundle,
+                        )
                     elif method == "peprompt":
                         record = run_legacy_method_once(args, "peprompt", ckpt_path, split_seed, repeat_id, epoch_callback=epoch_logger)
                     elif method == "hgmp":

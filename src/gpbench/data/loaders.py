@@ -48,6 +48,7 @@ def load_hgb_node_task(root: str | Path, name: str) -> NodeTaskData: #str | Path
         "ACM": "paper",
         "DBLP": "author",
         "IMDB": "movie",
+        "Freebase": "book",
     }
     target_ntype = target_map[name]
 

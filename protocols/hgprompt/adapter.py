@@ -8,7 +8,7 @@ import numpy as np
 import scipy.sparse as sp
 
 from gpbench.data.loaders import load_hgb_node_task
-from gpbench.downstream.fewshot import load_split_file
+from gpbench.downstream.fewshot import load_peprompt_split_ids, load_split_file
 from protocols.hgprompt.utils.data_loader import data_loader
 
 
@@ -83,12 +83,61 @@ def _map_local_target_idx_to_global(split_idx: np.ndarray, shift: int) -> np.nda
     return split_idx + int(shift)
 
 
+def _load_current_protocol_split(
+    *,
+    split_source: str,
+    splits: str | Path,
+    dataset_name: str,
+    dataset: str,
+    shot: int,
+    seed: int,
+    peprompt_offline_cache_dir: str | Path | None,
+    peprompt_feats_type: int,
+    peprompt_subgraph_type: str,
+) -> Dict[str, Any]:
+    split_source = str(split_source)
+    if split_source == "splits":
+        return _ensure_dict(load_split_file(str(splits), dataset_name, shot, seed))
+
+    if split_source != "peprompt_cache":
+        raise ValueError(f"Unsupported HGPrompt split_source={split_source}")
+
+    if peprompt_offline_cache_dir is None:
+        raise ValueError("peprompt_offline_cache_dir is required when split_source='peprompt_cache'.")
+
+    payload = load_peprompt_split_ids(
+        cache_dir=peprompt_offline_cache_dir,
+        dataset_name=dataset,
+        shot=shot,
+        seed=seed,
+        feats_type=peprompt_feats_type,
+        subgraph_type=peprompt_subgraph_type,
+    )
+    return {
+        "train_idx": np.asarray(payload["train_ids"], dtype=np.int64),
+        "val_idx": np.asarray(payload["val_ids"], dtype=np.int64),
+        "test_idx": np.asarray(payload["test_ids"], dtype=np.int64),
+        "train_labels": np.asarray(payload.get("train_labels", []), dtype=np.int64),
+        "val_labels": np.asarray(payload.get("val_labels", []), dtype=np.int64),
+        "test_labels": np.asarray(payload.get("test_labels", []), dtype=np.int64),
+        "class_stats": payload.get("class_stats", {}),
+        "num_classes": payload.get("num_classes"),
+        "source": "peprompt_cache",
+        "subgraph_cache_key": payload.get("subgraph_cache_key", peprompt_subgraph_type),
+        "feats_type": payload.get("feats_type", peprompt_feats_type),
+    }
+
+
 def load_hgprompt_downstream_bundle(
     root: str | Path,
     dataset: str,
     splits: str | Path,
     shot: int,
     seed: int,
+    split_source: str = "splits",
+    peprompt_offline_cache_dir: str | Path | None = None,
+    peprompt_feats_type: int = 0,
+    peprompt_subgraph_type: str = "khop",
 ) -> HPromptDownstreamBundle:
     dataset = str(dataset)
     if dataset not in RAW_SUBDIR:
@@ -99,7 +148,17 @@ def load_hgprompt_downstream_bundle(
 
     # 这一步沿用 HGEP 当前 few-shot / dataset_name 约定
     task = load_hgb_node_task(root, dataset)
-    split = _ensure_dict(load_split_file(str(splits), task.dataset_name, shot, seed))
+    split = _load_current_protocol_split(
+        split_source=split_source,
+        splits=splits,
+        dataset_name=task.dataset_name,
+        dataset=dataset,
+        shot=shot,
+        seed=seed,
+        peprompt_offline_cache_dir=peprompt_offline_cache_dir,
+        peprompt_feats_type=peprompt_feats_type,
+        peprompt_subgraph_type=peprompt_subgraph_type,
+    )
 
     dl = data_loader(str(raw_dir))
     features_list, adjM = _build_features_and_adj(dl)

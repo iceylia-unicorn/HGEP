@@ -20,7 +20,7 @@ import dgl
 import numpy as np
 import torch
 
-from gpbench.downstream.fewshot import build_peprompt_offline_cache_path
+from gpbench.downstream.fewshot import build_peprompt_offline_cache_path, save_peprompt_split_ids
 from scripts.peprompt_benchmark import (
     HOP_NUM,
     PEPROMPT_EDGE_FEATURE_NAME,
@@ -1204,12 +1204,21 @@ def _precompute_dataset(graph, targetnode: str, spectral_payload: dict, args):
 
             with open(cache_path, "wb") as f:
                 pk.dump(payload, f, protocol=pk.HIGHEST_PROTOCOL)
+            split_ids_path = save_peprompt_split_ids(
+                cache_dir=args.peprompt_offline_cache_dir,
+                dataset_name=args.dataset,
+                shot=shot,
+                seed=split_seed,
+                feats_type=args.feats_type,
+                subgraph_type=_metapath_cache_key(args),
+                split_payload=payload,
+            )
 
             elapsed = time.perf_counter() - start_time
             print(
                 f"[saved] dataset={args.dataset} subgraph={_metapath_cache_key(args)} shot={shot} seed={split_seed} "
                 f"train={len(train_list)} val={len(val_list)} test={len(test_list)} "
-                f"path={cache_path} time={elapsed:.2f}s"
+                f"path={cache_path} split_ids={split_ids_path} time={elapsed:.2f}s"
             )
 
 

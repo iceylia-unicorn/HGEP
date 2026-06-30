@@ -45,6 +45,8 @@ PEPrompt 的核心目标是在 HGMP 的异构图 prompt 框架上，引入**边�
 - [x] 将 DBLP `metapath_topk_path_adapt h3/k1-5/a0.5` 从 seeds 0/2 扩展到 seeds 0-4。结论：保持高均值，`macro=0.7861 ± 0.0317`，seed-mean macro std `0.0237`。
 - [x] 在 ACM、Freebase、IMDB 上验证 adaptive top-k 是否普适。结论：adaptive 不是普适提升，当前主要在 DBLP 上显著有效；IMDB 和 Freebase 没有稳定超过已有基线。
 - [ ] 系统比较 `metapath_topk_adapt` 与 `metapath_topk_path_adapt`，确认 path-preserving 是否应从主线中移除。
+- [ ] 复查 HGPrompt native baseline 的协议差异。当前 ACM/DBLP 结果偏强，split overlap 已检查为 0，但还需要修正/验证 HGPrompt center 与 best checkpoint 的同步逻辑。
+- [x] 增加 PEPrompt 的 HGPrompt-style prototype/class-center 下游开关。结论：ACM 上表现较强，DBLP 1-shot 明显不稳，说明 HGPrompt 的 prototype 分类逻辑不能直接作为 PEPrompt 的通用下游替代。
 
 ## 方法细节
 
@@ -369,47 +371,6 @@ IMDB数据集出现问题，性能没有原论文那么好，并且相较于原�
 [metapath_topk] dataset=Freebase M=3 topk=10 metapaths=72 avg_nodes=118.11 avg_edges=559.37 max_nodes=510 max_edges=3530
 [metapath_topk] dataset=Freebase M=3 topk=20 metapaths=72 avg_nodes=212.79 avg_edges=1086.07 max_nodes=990 max_edges=6983
 
-发现ACM的大小与
-
-我想到一种可能，元路径实际上是语义树，如果纯粹
-
-
-conda run -n HGEP python scripts/peprompt_benchmark.py \
-  --dataset ACM \
-  --methods peprompt \
-  --shot 10 \
-  --seeds 0 1 2 3 4 \
-  --repeats 10 \
-  --peprompt_ckpt artifacts/checkpoints/hgmp/pretrain/ACM.GraphCL.GCN.hid512.np500.seed0.pth \
-  --subgraph_type metapath_topk \
-  --metapath_max_hop 3 \
-  --metapath_topk 5 \
-  --save_dir artifacts/results/peprompt_metapath_topk_suite
-
-
-
-conda run -n HGEP python scripts/peprompt_benchmark.py \
-  --dataset ACM \
-  --methods peprompt \
-  --shot 1 \
-  --seeds 0 1 2 3 4 \
-  --repeats 1 \
-  --peprompt_ckpt artifacts/checkpoints/hgmp/pretrain/ACM.GraphCL.GCN.hid512.np500.seed0.pth \
-  --subgraph_type metapath_topk \
-  --metapath_max_hop 3 \
-  --metapath_topk 5 \
-  --save_dir artifacts/results/peprompt_metapath_topk_suite
-
-
-python scripts/peprompt_benchmark.py \
-  --dataset ACM \
-  --shot 10 \
-  --seeds 0 \
-  --repeats 10 \
-  --methods peprompt \
-  --subgraph_type metapath_topk \
-  --metapath_rank_metric degree_norm \
-  --peprompt_ckpt artifacts/checkpoints/hgmp/pretrain/ACM.GraphCL.GCN.hid512.np500.seed0.pth
 ## 2026-06-04 元路径采样与早停
 #### 元路径采样有效
 相较于直接的khop，metapath的结构是有效的，能够达到ACM 10-shot 88.6 此时的子图采样策略与prompt提示没有比较
@@ -1133,3 +1094,125 @@ full confirm 结果：
 
 #### IMDB数据集的F1计算
 由于当前的F1会被argmax缩成onehot，因此改回来试一下，发现效果还不如之前的效果。
+
+
+
+## 2026-06-29 hgprompt
+hgprompt对每条边会生成多个版本，通过多个prompt * h， 然后得到不同的消息版本，其中有一个全局版本和不同边对应的版本，当前边是哪个版本，消息传递就会用哪个版本
+
+hgprompt不是采用子图的方式，而是一种全局传递的方式。
+
+并且在下游中，不是采用的一种直接的分类方式，而是一种接近原型的方式，few-shot得到的样本将作为原型，其它预测的节点将不断通过cosin相似度靠近这个原型节点，这种方式得到的结果是79，接近80，但是不稳定，有接近8的标准差
+
+
+## 2026-06-30 HGPrompt native baseline 与 PEPrompt prototype 下游
+
+### 背景
+
+为了更公平地比较 PEPrompt 与 HGPrompt，近期补充了两类实验：
+
+1. **HGPrompt native baseline**：HGPrompt 使用自己的原生预训练 checkpoint，并在当前 PEPrompt/HGMP 对齐 split 上评估。
+2. **PEPrompt prototype 下游**：PEPrompt 仍使用 HGMP/GraphCL 预训练和 PE edge prompt，但将下游 MLP head 替换成 HGPrompt 风格的 class-center/prototype 分类。
+
+新增命令开关：
+
+```bash
+--peprompt_head_type prototype
+```
+
+prototype 下游逻辑：
+
+- 对训练子图提取 graph embedding；
+- 用训练集 embedding 按类别求 class center；
+- 对 val/test embedding 计算到各 class center 的 cosine similarity；
+- 用 validation loss early stopping；
+- 当前仅用于单标签任务，未用于 IMDB 多标签。
+
+### HGPrompt native baseline
+
+使用 HGPrompt 原生 ckpt：
+
+- `artifacts/checkpoints/hgprompt/pretrain/ACM.gcn.ft2.hop1.seed0.best.pt`
+- `artifacts/checkpoints/hgprompt/pretrain/DBLP.gcn.ft2.hop1.seed0.best.pt`
+
+日志：
+
+- `artifacts/logs/hgprompt_native/ACM_hgprompt_native_1shot.log`
+- `artifacts/logs/hgprompt_native/ACM_hgprompt_native_10shot.log`
+- `artifacts/logs/hgprompt_native/DBLP_hgprompt_native_1shot.log`
+- `artifacts/logs/hgprompt_native/DBLP_hgprompt_native_10shot.log`
+
+结果：
+
+| Dataset | Shot | Method | Count | Micro | Macro |
+| --- | ---: | --- | ---: | ---: | ---: |
+| ACM | 1 | HGPrompt native | 50 | `0.7735 ± 0.1079` | `0.7519 ± 0.1216` |
+| ACM | 10 | HGPrompt native | 50 | `0.8660 ± 0.0230` | `0.8635 ± 0.0244` |
+| DBLP | 1 | HGPrompt native | 50 | `0.8400 ± 0.0452` | `0.8252 ± 0.0532` |
+| DBLP | 10 | HGPrompt native | 50 | `0.9266 ± 0.0098` | `0.9197 ± 0.0132` |
+
+观察：
+
+- HGPrompt native 在 DBLP 上非常强，尤其 10-shot 达到 `macro=0.9197`。
+- DBLP 1-shot pooled mean 是 `0.8252`
+- 
+### HGMP64 统一预训练 ablation
+
+为了让 HGPrompt semantic prompt 在完整双 prompt 设置下跑通，尝试过将统一上游降到 HGMP-64。
+
+日志：
+
+- `artifacts/logs/hgmp_hid64_unified/ACM_hgmp64_to_hgprompt_semantic_1shot.log`
+- `artifacts/logs/hgmp_hid64_unified/ACM_hgmp64_to_peprompt_1shot_h3_k1-5_a0p5_adapt_nopath.log`
+- `artifacts/logs/hgmp_hid64_unified/ACM_hgprompt_ckpt_to_hgprompt_semantic_1shot.log`
+
+结果：
+
+| Dataset | Shot | Pretrain -> Downstream | Count | Micro | Macro |
+| --- | ---: | --- | ---: | ---: | ---: |
+| ACM | 1 | HGPrompt native -> HGPrompt | 50 | `0.7735 ± 0.1079` | `0.7519 ± 0.1216` |
+| ACM | 1 | HGMP64 -> HGPrompt | 50 | `0.6080 ± 0.0983` | `0.5868 ± 0.1147` |
+| ACM | 1 | HGMP64 -> PEPrompt | 50 | `0.7351 ± 0.0850` | `0.7191 ± 0.1016` |
+
+结论：
+
+- HGMP-64 不是合适的统一上游，既削弱 HGPrompt，也明显削弱 PEPrompt。
+- HGMP-64 可以作为“统一低维上游 ablation”，但不适合作为主实验协议。
+- HGMP-512 接 HGPrompt semantic prompt 会 OOM，原因是 HGPrompt 在全图边上做 semantic prompt message passing，hidden dim 从 64 到 512 后中间边消息张量显存约放大 8 倍。
+
+### PEPrompt prototype 下游
+
+为了测试“PEPrompt 表征 + HGPrompt class-center 分类”的效果，新增 PEPrompt prototype 下游实验。
+
+使用 HGMP-512 ckpt，数据集不包含 IMDB：
+
+- ACM: `metapath_topk_adapt h3/k1-5/a0.5/count`
+- DBLP: `metapath_topk_adapt h3/k1-8/a0.5/count`
+- Freebase: `metapath_topk h3/k3/count`, `feats_type=1`
+
+日志：
+
+- `artifacts/logs/peprompt_prototype/ACM_hgmp512_peprompt_prototype_1shot_h3_k1-5_a0p5_adapt_nopath.log`
+- `artifacts/logs/peprompt_prototype/ACM_hgmp512_peprompt_prototype_10shot_h3_k1-5_a0p5_adapt_nopath.log`
+- `artifacts/logs/peprompt_prototype/DBLP_hgmp512_peprompt_prototype_1shot_h3_k1-8_a0p5_adapt_nopath.log`
+- `artifacts/logs/peprompt_prototype/DBLP_hgmp512_peprompt_prototype_10shot_h3_k1-8_a0p5_adapt_nopath.log`
+- `artifacts/logs/peprompt_prototype/Freebase_hgmp512_peprompt_prototype_1shot_ft1_h3_k3_count.log`
+- `artifacts/logs/peprompt_prototype/Freebase_hgmp512_peprompt_prototype_10shot_ft1_h3_k3_count.log`
+
+结果：
+
+| Dataset | Shot | PEPrompt Subgraph | Count | Micro | Macro |
+| --- | ---: | --- | ---: | ---: | ---: |
+| ACM | 1 | adapt h3/k1-5/a0.5 | 50 | `0.7997 ± 0.0750` | `0.7889 ± 0.0836` |
+| ACM | 10 | adapt h3/k1-5/a0.5 | 50 | `0.9032 ± 0.0114` | `0.9026 ± 0.0118` |
+| DBLP | 1 | adapt h3/k1-8/a0.5 | 50 | `0.5220 ± 0.0753` | `0.5147 ± 0.0769` |
+| DBLP | 10 | adapt h3/k1-8/a0.5 | 50 | `0.8255 ± 0.0339` | `0.8234 ± 0.0342` |
+| Freebase | 1 | fixed h3/k3, ft1 | 50 | `0.2401 ± 0.0517` | `0.1924 ± 0.0493` |
+| Freebase | 10 | fixed h3/k3, ft1 | 50 | `0.3322 ± 0.0257` | `0.2760 ± 0.0260` |
+
+观察：
+
+- ACM 上 prototype 下游表现较强，10-shot `macro=0.9026`，高于 HGPrompt native 的 `0.8635`。
+- DBLP 10-shot 与当前最佳 PEPrompt 结果一致量级，但 DBLP 1-shot 明显崩塌，仅 `macro=0.5147`，说明 prototype 下游对 DBLP 极少样本非常不稳定。
+- Freebase 上 prototype 下游仍偏弱，10-shot `macro=0.2760`，与此前 Freebase 困难现象一致。
+- 结论上，prototype/class-center 分类可以作为 ablation，但目前不能替代 PEPrompt 的默认 MLP 下游。

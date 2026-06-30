@@ -3,6 +3,7 @@ from __future__ import annotations
 import argparse
 from dataclasses import dataclass
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any, Dict, Iterable
 
 import dgl
@@ -10,9 +11,16 @@ import numpy as np
 import torch
 import torch.nn.functional as F
 from dgl.nn.pytorch import GraphConv
+from torch_geometric.datasets import HGBDataset
+from torch_geometric.transforms import ToUndirected
+from torch_geometric.utils import to_dgl
+from gpbench.protocol_bridge.downstream_legacy import build_frozen_legacy_hgnn
 from gpbench.utils.early_stop import EarlyStopping, EarlyStopConfig
 from sklearn.metrics import f1_score
 
+from protocols.hgmp.prompt_legacy import GAT as HGMPGAT
+from protocols.hgmp.prompt_legacy import GCL_GCN
+from protocols.hgmp.utils_legacy import create_matrix
 from protocols.hgprompt.adapter import HPromptDownstreamBundle, load_hgprompt_downstream_bundle
 from protocols.hgprompt.source.GNN import GAT, GCN, GIN, semantic_GCN, myGAT
 from protocols.hgprompt.source.hgprompt import (
@@ -38,6 +46,14 @@ from protocols.hgprompt.source.hgprompt import (
     node_prompt_layer_feature_weighted_sum,
     prompt_gcn,
 )
+
+
+TARGET_NODETYPE = {
+    "ACM": "paper",
+    "DBLP": "author",
+    "IMDB": "movie",
+    "Freebase": "book",
+}
 
 
 @dataclass
@@ -105,6 +121,134 @@ def _prepare_feature_inputs(features_list, feats_type: int, device: torch.device
         raise ValueError(f"Unsupported feats_type: {feats_type}")
 
     return feats, in_dims
+
+
+def _apply_hgmp_feats_type(data, feats_type: int):
+    features_list = [value for value in data.x_dict.values()]
+
+    if feats_type in (0, 6, 7, -1, 8, 9):
+        pass
+    elif feats_type in (1, 5):
+        save = 0 if feats_type == 1 else 2
+        for i in range(len(features_list)):
+            if i != save:
+                features_list[i] = torch.zeros((features_list[i].shape[0], 10))
+    elif feats_type in (2, 4):
+        save = feats_type - 2
+        for i in range(len(features_list)):
+            if i == save:
+                continue
+            dim = features_list[i].shape[0]
+            idx = np.vstack((np.arange(dim), np.arange(dim)))
+            idx = torch.LongTensor(idx)
+            val = torch.FloatTensor(np.ones(dim))
+            features_list[i] = torch.sparse_coo_tensor(idx, val, torch.Size([dim, dim])).to_dense()
+    elif feats_type == 3:
+        for i in range(len(features_list)):
+            dim = features_list[i].shape[0]
+            idx = np.vstack((np.arange(dim), np.arange(dim)))
+            idx = torch.LongTensor(idx)
+            val = torch.FloatTensor(np.ones(dim))
+            features_list[i] = torch.sparse_coo_tensor(idx, val, torch.Size([dim, dim])).to_dense()
+    else:
+        raise ValueError(f"Unsupported HGMP feats_type={feats_type}")
+
+    data.set_value_dict("x", {ntype: features_list[i] for i, ntype in enumerate(data.node_types)})
+    return data
+
+
+def _load_hgmp_raw_heterograph(root: str, dataset: str, feats_type: int):
+    if dataset == "Freebase" and feats_type == -1:
+        dataset_obj = HGBDataset(root=root, name=dataset, transform=ToUndirected(merge=False))
+    else:
+        dataset_obj = HGBDataset(root=root, name=dataset)
+    data = dataset_obj[0]
+
+    for node_type, node_store in data.node_items():
+        for attr, value in list(node_store.items()):
+            if attr == "num_nodes":
+                if dataset == "Freebase" and feats_type in (1, 5):
+                    data[node_type]["x"] = torch.zeros((int(value), 10))
+                else:
+                    data[node_type]["x"] = create_matrix(value, 0.01)
+                del data[node_type][attr]
+
+    data = _apply_hgmp_feats_type(data, feats_type)
+    return to_dgl(data), list(data.node_types)
+
+
+def _build_edge_index_dict(graph):
+    edge_index_dict = {}
+    for etype in graph.canonical_etypes:
+        src, dst = graph.edges(etype=etype)
+        edge_index_dict[etype] = torch.stack([src, dst], dim=0)
+    return edge_index_dict
+
+
+def _make_hgmp_encoder_args(args, device: torch.device):
+    return SimpleNamespace(
+        method="hgmp",
+        dataset=args.dataset,
+        root=args.root,
+        device=device,
+        feats_type=getattr(args, "hgmp_feats_type", 0),
+        hgnn_type=getattr(args, "hgmp_hgnn_type", "GCN"),
+        hidden_dim=getattr(args, "hgmp_hidden_dim", args.hidden_dim),
+        num_heads=getattr(args, "hgmp_num_heads", args.num_heads),
+        num_layers=getattr(args, "hgmp_num_layers", args.num_layers),
+        dropout=getattr(args, "hgmp_dropout", args.dropout),
+        num_samples=getattr(args, "hgmp_num_samples", 0),
+        num_class=getattr(args, "num_class", 0),
+        edge_feats=getattr(args, "hgmp_edge_feats", getattr(args, "edge_feats", 64)),
+        slope=getattr(args, "hgmp_slope", getattr(args, "slope", 0.05)),
+    )
+
+
+@torch.no_grad()
+def _encode_hgmp_full_graph_for_hgprompt(args, bundle: HPromptDownstreamBundle, device: torch.device) -> torch.Tensor:
+    graph, node_types = _load_hgmp_raw_heterograph(
+        root=args.root,
+        dataset=args.dataset,
+        feats_type=int(getattr(args, "hgmp_feats_type", 0)),
+    )
+    graph = graph.to(device)
+    x_dict = {ntype: feat.to(device) for ntype, feat in graph.ndata["x"].items()}
+
+    hgmp_args = _make_hgmp_encoder_args(args, device)
+    hgnn = build_frozen_legacy_hgnn(hgmp_args, args.pretrain_ckpt)
+    hgnn.eval()
+
+    if hgnn.hgnn_type == "HGT":
+        edge_index_dict = {
+            etype: edge_index.to(device)
+            for etype, edge_index in _build_edge_index_dict(graph).items()
+        }
+        emb_dict = hgnn(TARGET_NODETYPE[args.dataset], x_dict, edge_index_dict)
+    elif hgnn.hgnn_type == "GCN":
+        emb_dict = hgnn(graph, x_dict)
+    elif hgnn.hgnn_type == "GAT":
+        emb_dict = hgnn(graph, x_dict, False)
+    else:
+        raise ValueError(f"HGMP pretrain family for HGPrompt downstream does not support hgnn_type={hgnn.hgnn_type}")
+
+    if len(node_types) != len(bundle.dl.nodes["count"]):
+        raise RuntimeError(
+            f"Cannot align HGMP embeddings to HGPrompt raw node ids: "
+            f"HGMP node_types={node_types}, raw type count={len(bundle.dl.nodes['count'])}."
+        )
+
+    pieces = []
+    for type_id, ntype in enumerate(node_types):
+        expected = int(bundle.dl.nodes["count"][type_id])
+        actual = int(emb_dict[ntype].size(0))
+        if actual != expected:
+            raise RuntimeError(
+                f"Cannot align HGMP embedding type {ntype} to HGPrompt type_id={type_id}: "
+                f"embedding rows={actual}, raw count={expected}."
+            )
+        pieces.append(emb_dict[ntype])
+
+    return torch.cat(pieces, dim=0).detach()
 
 
 def _build_edge2type(dl) -> Dict[tuple[int, int], int]:
@@ -202,7 +346,50 @@ def _strip_prefix(state_dict: dict[str, torch.Tensor], prefix: str):
     return {k[len(prefix):] if k.startswith(prefix) else k: v for k, v in state_dict.items()}
 
 
-def _smart_load_pretrain(model: torch.nn.Module, ckpt_path: str, device: torch.device, strict: bool = False):
+def _state_shape_summary(state_dict: dict[str, torch.Tensor]) -> dict[str, Any]:
+    fc_weight = next(
+        (
+            value
+            for key, value in state_dict.items()
+            if key.startswith("fc_list.") and key.endswith(".weight") and hasattr(value, "shape") and len(value.shape) == 2
+        ),
+        None,
+    )
+    layer_ids = {
+        int(parts[1])
+        for key in state_dict.keys()
+        if (parts := key.split(".")) and len(parts) > 2 and parts[0] == "layers" and parts[1].isdigit()
+    }
+    gat_layer_ids = {
+        int(parts[1])
+        for key in state_dict.keys()
+        if (parts := key.split(".")) and len(parts) > 2 and parts[0] == "gat_layers" and parts[1].isdigit()
+    }
+    return {
+        "hidden_dim": int(fc_weight.shape[0]) if fc_weight is not None else None,
+        "gcn_layers": max(layer_ids) + 1 if layer_ids else None,
+        "gat_layers": max(1, len(gat_layer_ids) - 1) if gat_layer_ids else None,
+        "num_tensors": len(state_dict),
+    }
+
+
+def _shape_mismatch_report(model_state: dict[str, torch.Tensor], ckpt_state: dict[str, torch.Tensor], limit: int = 12):
+    mismatches = []
+    for key, value in ckpt_state.items():
+        if key not in model_state or not hasattr(value, "shape"):
+            continue
+        if tuple(model_state[key].shape) != tuple(value.shape):
+            mismatches.append((key, tuple(model_state[key].shape), tuple(value.shape)))
+    return mismatches[:limit], len(mismatches)
+
+
+def _smart_load_pretrain(
+    model: torch.nn.Module,
+    ckpt_path: str,
+    device: torch.device,
+    strict: bool = False,
+    allow_partial: bool = False,
+):
     payload = torch.load(ckpt_path, map_location=device)
     state_dict = _extract_state_dict(payload)
 
@@ -215,9 +402,21 @@ def _smart_load_pretrain(model: torch.nn.Module, ckpt_path: str, device: torch.d
     ]
 
     last_err = None
+    last_shape_detail = None
+    model_state = model.state_dict()
     for cand in candidates:
+        mismatches, mismatch_count = _shape_mismatch_report(model_state, cand)
+        if mismatch_count > 0:
+            last_shape_detail = (mismatches, mismatch_count, _state_shape_summary(model_state), _state_shape_summary(cand))
+            continue
         try:
             missing, unexpected = model.load_state_dict(cand, strict=strict)
+            if not allow_partial and (len(missing) > 0 or len(unexpected) > 0):
+                last_err = RuntimeError(
+                    "partial checkpoint load is disabled: "
+                    f"missing={len(missing)}, unexpected={len(unexpected)}"
+                )
+                continue
             print(f"[load] ckpt={ckpt_path} | strict={strict} | missing={len(missing)} | unexpected={len(unexpected)}")
             if len(missing) > 0:
                 print(f"[load] missing keys (first 10): {missing[:10]}")
@@ -226,6 +425,23 @@ def _smart_load_pretrain(model: torch.nn.Module, ckpt_path: str, device: torch.d
             return
         except Exception as e:
             last_err = e
+
+    if last_shape_detail is not None:
+        mismatches, mismatch_count, model_summary, ckpt_summary = last_shape_detail
+        detail = "\n".join(
+            f"  - {key}: model{model_shape} vs ckpt{ckpt_shape}"
+            for key, model_shape, ckpt_shape in mismatches
+        )
+        raise RuntimeError(
+            "Failed to load HGPrompt checkpoint because backbone parameter shapes do not match.\n"
+            f"Checkpoint: {ckpt_path}\n"
+            f"Model summary: {model_summary}\n"
+            f"Checkpoint summary: {ckpt_summary}\n"
+            f"Shape mismatches shown: {len(mismatches)}/{mismatch_count}\n"
+            f"{detail}\n"
+            "Check --hgprompt_hidden_dim, --hgprompt_num_layers, --hgprompt_model_type, and --hgprompt_feats_type, "
+            "or rely on the checkpoint .json sidecar so peprompt_benchmark.py can sync them automatically."
+        )
 
     raise RuntimeError(f"Failed to load checkpoint: {ckpt_path}\nLast error: {last_err}")
 
@@ -408,17 +624,30 @@ def _run_once(args, bundle: HPromptDownstreamBundle, repeat_id: int, epoch_callb
     val_labels = torch.tensor(bundle.labels["val"][0], dtype=torch.long, device=device)
     test_labels = torch.tensor(bundle.labels["test"], dtype=torch.long, device=device)
 
-    net = _build_backbone(args, g, bundle.dl, in_dims, num_classes).to(device)
-    _smart_load_pretrain(net, args.pretrain_ckpt, device=device, strict=args.strict_load)
+    pretrain_family = str(getattr(args, "pretrain_family", "hgprompt")).lower()
+    if pretrain_family == "hgmp":
+        prelogits = _encode_hgmp_full_graph_for_hgprompt(args, bundle, device)
+        semantic_weight = None
+    elif pretrain_family == "hgprompt":
+        net = _build_backbone(args, g, bundle.dl, in_dims, num_classes).to(device)
+        _smart_load_pretrain(
+            net,
+            args.pretrain_ckpt,
+            device=device,
+            strict=args.strict_load,
+            allow_partial=bool(getattr(args, "allow_partial_load", False)),
+        )
 
-    net.eval()
-    for p in net.parameters():
-        p.requires_grad = False
+        net.eval()
+        for p in net.parameters():
+            p.requires_grad = False
 
-    with torch.no_grad():
-        prelogits, semantic_weight = _encode_once(args, net, features_list, e_feat)
+        with torch.no_grad():
+            prelogits, semantic_weight = _encode_once(args, net, features_list, e_feat)
+    else:
+        raise ValueError(f"Unsupported HGPrompt pretrain_family={pretrain_family}")
 
-    hidden_dim = args.shgn_hidden_dim if args.model_type == "SHGN" else args.hidden_dim
+    hidden_dim = int(prelogits.size(1))
     classify = _build_classifier(args, hidden_dim, num_classes, semantic_weight=semantic_weight).to(device)
 
     optimizer = None
@@ -597,6 +826,10 @@ def run_hgprompt_downstream(args):
         splits=args.splits,
         shot=args.shotnum,
         seed=args.seed,
+        split_source=getattr(args, "split_source", "splits"),
+        peprompt_offline_cache_dir=getattr(args, "peprompt_offline_cache_dir", None),
+        peprompt_feats_type=getattr(args, "peprompt_feats_type", 0),
+        peprompt_subgraph_type=getattr(args, "peprompt_subgraph_type", "khop"),
     )
 
     all_res: list[RepeatResult] = []
@@ -619,14 +852,24 @@ def build_parser():
     ap.add_argument("--root", type=str, default="data")
     ap.add_argument("--dataset", type=str, default="ACM", choices=["ACM", "DBLP", "IMDB", "Freebase"])
     ap.add_argument("--splits", type=str, default="splits")
+    ap.add_argument("--split_source", type=str, default="splits", choices=["splits", "peprompt_cache"])
+    ap.add_argument("--peprompt_offline_cache_dir", type=str, default="artifacts/cache/peprompt_offline_splits")
+    ap.add_argument("--peprompt_feats_type", type=int, default=0)
+    ap.add_argument("--peprompt_subgraph_type", type=str, default="khop")
     ap.add_argument("--shot", "--shotnum", dest="shotnum", type=int, default=1)
     ap.add_argument("--seed", type=int, default=0)
     ap.add_argument("--repeat", type=int, default=1)
     ap.add_argument("--tasknum", type=int, default=1)
     ap.add_argument("--pretrain_ckpt", type=str, required=True)
+    ap.add_argument("--pretrain_family", type=str, default="hgprompt", choices=["hgprompt", "hgmp"])
     ap.add_argument("--save_dir", type=str, default="artifacts/checkpoints/hgprompt/downstream")
     ap.add_argument("--device", type=str, default="cuda" if torch.cuda.is_available() else "cpu")
     ap.add_argument("--strict_load", action="store_true")
+    ap.add_argument(
+        "--allow_partial_load",
+        action="store_true",
+        help="Allow missing/unexpected keys when loading HGPrompt pretrain checkpoints.",
+    )
 
     # faithful HGPrompt args
     ap.add_argument("--feats_type", type=int, default=2)
@@ -669,6 +912,18 @@ def build_parser():
 
     ap.add_argument("--freebase_type", type=int, default=0)
     ap.add_argument("--shgn_hidden_dim", type=int, default=3)
+    ap.add_argument("--num_class", type=int, default=0)
+
+    # HGMP encoder settings used only when --pretrain_family=hgmp.
+    ap.add_argument("--hgmp_feats_type", type=int, default=0)
+    ap.add_argument("--hgmp_hidden_dim", type=int, default=512)
+    ap.add_argument("--hgmp_num_heads", type=int, default=2)
+    ap.add_argument("--hgmp_num_layers", type=int, default=2)
+    ap.add_argument("--hgmp_dropout", type=float, default=0.5)
+    ap.add_argument("--hgmp_hgnn_type", type=str, default="GCN")
+    ap.add_argument("--hgmp_num_samples", type=int, default=500)
+    ap.add_argument("--hgmp_edge_feats", type=int, default=64)
+    ap.add_argument("--hgmp_slope", type=float, default=0.05)
 
     return ap
 

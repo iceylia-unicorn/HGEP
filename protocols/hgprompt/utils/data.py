@@ -100,11 +100,23 @@ def load_data_lp(prefix='DBLP', shotnum=10,tasknum=2,index=None):
             dl, task_source,task_des
 
 
+RAW_DATASET_DIR = {
+    "ACM": "ACM",
+    "DBLP": "DBLP",
+    "IMDB": "IMDB",
+    "FREEBASE": "Freebase",
+}
+
+
+def _raw_dataset_path(prefix: str) -> Path:
+    key = str(prefix).upper()
+    raw_name = RAW_DATASET_DIR.get(key, key)
+    return DATA_ROOT / str(prefix).lower() / "raw" / raw_name
+
+
 def load_pretrain_data(prefix='DBLP'):
     #from scripts.data_loader import data_loader
-    prefix = prefix.lower() + '/raw/' + prefix.upper()
-
-    dl = data_loader(str(DATA_ROOT / prefix))
+    dl = data_loader(str(_raw_dataset_path(prefix)))
     features = []
     for i in range(len(dl.nodes['count'])):
         th = dl.nodes['attr'][i]
@@ -120,9 +132,7 @@ def load_pretrain_data(prefix='DBLP'):
 
 def load_pretrain_data_lp(prefix='DBLP'):
     #from scripts.data_loader import data_loader
-    prefix = prefix.lower() + '/raw/' + prefix.upper()
-
-    dl = data_loader_lp(str(DATA_ROOT / prefix))
+    dl = data_loader_lp(str(_raw_dataset_path(prefix)))
     features = []
     for i in range(len(dl.nodes['count'])):
         th = dl.nodes['attr'][i]

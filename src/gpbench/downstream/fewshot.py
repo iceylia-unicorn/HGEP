@@ -6,6 +6,7 @@ from pathlib import Path
 import pickle as pk
 from typing import Dict
 
+import numpy as np
 import torch
 import torch.nn.functional as F
 
@@ -384,6 +385,132 @@ def build_peprompt_offline_cache_path(
         / f"seed{int(seed)}"
         / f"ft{int(feats_type)}.pkl"
     )
+
+
+def build_peprompt_split_ids_path(
+    cache_dir: str | Path,
+    dataset_name: str,
+    shot: int,
+    seed: int,
+    feats_type: int,
+    subgraph_type: str = "khop",
+) -> Path:
+    return (
+        Path(cache_dir)
+        / str(dataset_name)
+        / f"{str(subgraph_type)}_{int(shot)}-shot"
+        / f"seed{int(seed)}"
+        / f"ft{int(feats_type)}.split_ids.npz"
+    )
+
+
+def save_peprompt_split_ids(
+    *,
+    cache_dir: str | Path,
+    dataset_name: str,
+    shot: int,
+    seed: int,
+    feats_type: int,
+    subgraph_type: str,
+    split_payload: dict,
+) -> Path:
+    path = build_peprompt_split_ids_path(
+        cache_dir=cache_dir,
+        dataset_name=dataset_name,
+        shot=shot,
+        seed=seed,
+        feats_type=feats_type,
+        subgraph_type=subgraph_type,
+    )
+    path.parent.mkdir(parents=True, exist_ok=True)
+    np.savez_compressed(
+        path,
+        train_ids=np.asarray(split_payload["train_ids"], dtype=np.int64),
+        train_labels=np.asarray(split_payload.get("train_labels", []), dtype=np.int64),
+        val_ids=np.asarray(split_payload["val_ids"], dtype=np.int64),
+        val_labels=np.asarray(split_payload.get("val_labels", []), dtype=np.int64),
+        test_ids=np.asarray(split_payload["test_ids"], dtype=np.int64),
+        test_labels=np.asarray(split_payload.get("test_labels", []), dtype=np.int64),
+        class_stats=np.asarray([split_payload.get("class_stats", {})], dtype=object),
+        num_classes=np.asarray([int(split_payload.get("num_classes", 0))], dtype=np.int64),
+        subgraph_cache_key=np.asarray([str(split_payload.get("subgraph_cache_key", subgraph_type))], dtype=object),
+        feats_type=np.asarray([int(split_payload.get("feats_type", feats_type))], dtype=np.int64),
+    )
+    return path
+
+
+def _split_ids_from_npz(path: Path) -> dict:
+    with np.load(path, allow_pickle=True) as data:
+        return {
+            "train_ids": data["train_ids"].astype(np.int64),
+            "train_labels": data["train_labels"].astype(np.int64),
+            "val_ids": data["val_ids"].astype(np.int64),
+            "val_labels": data["val_labels"].astype(np.int64),
+            "test_ids": data["test_ids"].astype(np.int64),
+            "test_labels": data["test_labels"].astype(np.int64),
+            "class_stats": data["class_stats"][0].item() if hasattr(data["class_stats"][0], "item") else data["class_stats"][0],
+            "num_classes": int(data["num_classes"][0]) if "num_classes" in data else None,
+            "source": "peprompt_split_ids",
+            "subgraph_cache_key": str(data["subgraph_cache_key"][0]) if "subgraph_cache_key" in data else path.parent.parent.name.rsplit("_", 1)[0],
+            "feats_type": int(data["feats_type"][0]) if "feats_type" in data else None,
+        }
+
+
+def load_peprompt_split_ids(
+    cache_dir: str | Path,
+    dataset_name: str,
+    shot: int,
+    seed: int,
+    feats_type: int,
+    subgraph_type: str = "khop",
+    *,
+    write_sidecar_if_missing: bool = True,
+) -> dict:
+    path = build_peprompt_split_ids_path(
+        cache_dir=cache_dir,
+        dataset_name=dataset_name,
+        shot=shot,
+        seed=seed,
+        feats_type=feats_type,
+        subgraph_type=subgraph_type,
+    )
+    if path.exists():
+        return _split_ids_from_npz(path)
+
+    payload = load_peprompt_offline_splits(
+        cache_dir=cache_dir,
+        dataset_name=dataset_name,
+        shot=shot,
+        seed=seed,
+        feats_type=feats_type,
+        subgraph_type=subgraph_type,
+    )
+    split_payload = {
+        "train_ids": payload["train_ids"],
+        "train_labels": payload.get("train_labels", []),
+        "val_ids": payload["val_ids"],
+        "val_labels": payload.get("val_labels", []),
+        "test_ids": payload["test_ids"],
+        "test_labels": payload.get("test_labels", []),
+        "class_stats": payload.get("class_stats", {}),
+        "num_classes": payload.get("num_classes", 0),
+        "subgraph_cache_key": payload.get("subgraph_cache_key", subgraph_type),
+        "feats_type": payload.get("feats_type", feats_type),
+    }
+    if write_sidecar_if_missing:
+        save_peprompt_split_ids(
+            cache_dir=cache_dir,
+            dataset_name=dataset_name,
+            shot=shot,
+            seed=seed,
+            feats_type=feats_type,
+            subgraph_type=subgraph_type,
+            split_payload=split_payload,
+        )
+        split_payload["source"] = "peprompt_split_ids_created"
+    else:
+        split_payload["source"] = "peprompt_full_cache_fallback"
+    return split_payload
 
 
 def load_peprompt_offline_splits(
