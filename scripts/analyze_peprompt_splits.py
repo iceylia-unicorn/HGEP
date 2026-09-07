@@ -65,19 +65,29 @@ def _cache_subgraph_type(args: argparse.Namespace | SimpleNamespace) -> str:
         )
     if bool(getattr(args, "metapath_keep_self", False)):
         suffix += "_self"
-
-    fusion_mode = str(getattr(args, "peprompt_fusion_mode", "none"))
-    ctx_dim = int(getattr(args, "peprompt_ctx_dim", 0) or 0)
-    if fusion_mode == "hop_decoupled" and ctx_dim > 0:
-        suffix += f"_mpvirt2_d{ctx_dim}"
-    elif fusion_mode == "onehop_ctx" and ctx_dim > 0:
-        suffix += f"_onehop_d{ctx_dim}"
-    elif fusion_mode == "type_ctx" and ctx_dim > 0:
-        suffix += f"_typectx_d{ctx_dim}"
-    elif fusion_mode in {"graph_summary", "graph_summary_basis"}:
-        suffix += "_graphsum"
-    elif fusion_mode == "metapath_pos" or str(getattr(args, "peprompt_mp_reg_mode", "none")) != "none":
-        suffix += "_mppos"
+    endpoint_mode = str(getattr(args, "metapath_endpoint_mode", "all"))
+    support_mode = str(getattr(args, "metapath_support_mode", "auto"))
+    if support_mode == "auto":
+        if endpoint_mode == "target_closed":
+            support_mode = "count"
+        elif subgraph_type in {"metapath_topk_path", "metapath_topk_path_adapt"}:
+            support_mode = "one_path"
+        else:
+            support_mode = "none"
+    support_topk = int(getattr(args, "metapath_support_topk", 0) or 0)
+    support_rank_mode = str(getattr(args, "metapath_support_rank_mode", "score"))
+    random_seed = int(getattr(args, "metapath_random_seed", 0) or 0)
+    if endpoint_mode != "all":
+        suffix += f"_{endpoint_mode}"
+        suffix += f"_support{support_mode}"
+    elif str(getattr(args, "metapath_support_mode", "auto")) != "auto":
+        suffix += f"_support{support_mode}"
+    if support_topk > 0:
+        suffix += f"_sk{support_topk}"
+    if support_rank_mode != "score":
+        suffix += f"_support{support_rank_mode}"
+    if metric == "random" or support_rank_mode == "random":
+        suffix += f"_rseed{random_seed}"
     return f"{subgraph_type}_{suffix}"
 
 
@@ -118,60 +128,16 @@ def _num_edges(graph) -> int:
     return total
 
 
-def _metapath_pos_stats(graph, feature_name: str) -> dict[str, float]:
-    total_edges = 0
-    edges_with_feat = 0
-    edges_with_support = 0
-    entries = 0
-    positive_entries = 0
-    support_mass = 0.0
-    active_dims: set[int] = set()
-
-    for etype in graph.canonical_etypes:
-        edge_count = int(graph.num_edges(etype=etype))
-        total_edges += edge_count
-        data = graph.edges[etype].data
-        feat = data.get(feature_name)
-        if feat is None:
-            continue
-        feat = feat.detach().cpu()
-        if feat.numel() == 0:
-            continue
-        if feat.dim() == 1:
-            feat = feat.view(-1, 1)
-        edge_support = feat.abs().sum(dim=-1)
-        dim_support = feat.abs().sum(dim=0)
-
-        edges_with_feat += int(feat.size(0))
-        edges_with_support += int((edge_support > 0).sum().item())
-        entries += int(feat.numel())
-        positive_entries += int((feat > 0).sum().item())
-        support_mass += float(feat.sum().item())
-        active_dims.update(int(i) for i in torch.nonzero(dim_support > 0, as_tuple=False).view(-1).tolist())
-
-    return {
-        "mp_pos_edges_with_feat": float(edges_with_feat),
-        "mp_pos_edges_with_support": float(edges_with_support),
-        "mp_pos_edge_support_ratio": float(edges_with_support / total_edges) if total_edges else math.nan,
-        "mp_pos_positive_entries": float(positive_entries),
-        "mp_pos_density": float(positive_entries / entries) if entries else math.nan,
-        "mp_pos_support_mass": float(support_mass),
-        "mp_pos_active_dims": float(len(active_dims)),
-    }
-
-
-def _graph_stats(sample: Any, split_name: str, sample_idx: int, feature_name: str) -> dict[str, Any]:
+def _graph_stats(sample: Any, split_name: str, sample_idx: int) -> dict[str, Any]:
     graph = _sample_graph(sample)
     present_etypes = sum(1 for etype in graph.canonical_etypes if int(graph.num_edges(etype=etype)) > 0)
-    row: dict[str, Any] = {
+    return {
         "split_name": split_name,
         "sample_idx": int(sample_idx),
         "num_nodes": float(_num_nodes(graph)),
         "num_edges": float(_num_edges(graph)),
         "present_etypes": float(present_etypes),
     }
-    row.update(_metapath_pos_stats(graph, feature_name))
-    return row
 
 
 def _label_counts(labels: Any, num_classes: int) -> list[int]:
@@ -191,10 +157,6 @@ def _summarize_rows(rows: list[dict[str, Any]], prefix: str) -> dict[str, float]
         "num_nodes",
         "num_edges",
         "present_etypes",
-        "mp_pos_edge_support_ratio",
-        "mp_pos_density",
-        "mp_pos_support_mass",
-        "mp_pos_active_dims",
     ]
     for key in keys:
         vals = [float(r[key]) for r in rows if key in r and not math.isnan(float(r[key]))]
@@ -382,7 +344,6 @@ def analyze(args: argparse.Namespace) -> None:
     cache_key = _cache_subgraph_type(args)
     out_dir = Path(args.out_dir)
     tag = args.tag or f"{args.dataset}_{cache_key}"
-    feature_name_default = "peprompt_metapath_pos_feat"
 
     cache_rows: list[dict[str, Any]] = []
     sample_rows: list[dict[str, Any]] = []
@@ -396,7 +357,6 @@ def analyze(args: argparse.Namespace) -> None:
             feats_type=args.feats_type,
             subgraph_type=cache_key,
         )
-        feature_name = str(payload.get("peprompt_metapath_pos_feature_name", feature_name_default))
         num_classes = int(payload.get("num_classes", 0) or 0)
         split_row: dict[str, Any] = {
             "dataset": args.dataset,
@@ -404,7 +364,6 @@ def analyze(args: argparse.Namespace) -> None:
             "split_seed": int(split_seed),
             "num_classes": num_classes,
             "metapath_count": int(payload.get("metapath_count", 0) or 0),
-            "peprompt_metapath_pos_dim": int(payload.get("peprompt_metapath_pos_dim", 0) or 0),
         }
 
         for split_name in ("train", "val", "test"):
@@ -416,7 +375,7 @@ def analyze(args: argparse.Namespace) -> None:
                     "dataset": args.dataset,
                     "cache_key": cache_key,
                     "split_seed": int(split_seed),
-                    **_graph_stats(sample, split_name, idx, feature_name),
+                    **_graph_stats(sample, split_name, idx),
                 }
                 for idx, sample in enumerate(samples)
             ]
@@ -502,9 +461,11 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--metapath_rel_threshold", type=float, default=0.5)
     parser.add_argument("--metapath_rank_metric", default="count")
     parser.add_argument("--metapath_keep_self", action="store_true")
-    parser.add_argument("--peprompt_fusion_mode", default="none")
-    parser.add_argument("--peprompt_ctx_dim", type=int, default=0)
-    parser.add_argument("--peprompt_mp_reg_mode", choices=["none", "consistency", "predict"], default="none")
+    parser.add_argument("--metapath_endpoint_mode", default="all", choices=["all", "target_closed"])
+    parser.add_argument("--metapath_support_mode", default="auto", choices=["auto", "none", "one_path", "count"])
+    parser.add_argument("--metapath_support_topk", type=int, default=0)
+    parser.add_argument("--metapath_support_rank_mode", default="score", choices=["score", "random"])
+    parser.add_argument("--metapath_random_seed", type=int, default=0)
     parser.add_argument("--peprompt_offline_cache_dir", default="artifacts/cache/peprompt_offline_splits")
     parser.add_argument("--log_paths", nargs="*", default=[])
     parser.add_argument("--out_dir", default="artifacts/analysis/peprompt_split_diagnostics")

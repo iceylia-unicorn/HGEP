@@ -74,7 +74,32 @@ def _cache_subgraph_type(args: argparse.Namespace) -> str:
         suffix = f"m{args.metapath_max_hop}_k{args.metapath_topk}_{args.metapath_rank_metric}"
     if args.metapath_keep_self:
         suffix += "_self"
+    endpoint_mode = str(getattr(args, "metapath_endpoint_mode", "all"))
+    support_mode = _resolve_metapath_support_mode_for_cache(
+        subgraph_type=str(args.subgraph_type),
+        endpoint_mode=endpoint_mode,
+        support_mode=str(getattr(args, "metapath_support_mode", "auto")),
+    )
+    support_topk = int(getattr(args, "metapath_support_topk", 0) or 0)
+    if endpoint_mode != "all":
+        suffix += f"_{endpoint_mode}"
+        suffix += f"_support{support_mode}"
+    elif str(getattr(args, "metapath_support_mode", "auto")) != "auto":
+        suffix += f"_support{support_mode}"
+    if support_topk > 0:
+        suffix += f"_sk{support_topk}"
     return f"{args.subgraph_type}_{suffix}"
+
+
+def _resolve_metapath_support_mode_for_cache(subgraph_type: str, endpoint_mode: str, support_mode: str) -> str:
+    support_mode = str(support_mode)
+    if support_mode != "auto":
+        return support_mode
+    if str(endpoint_mode) == "target_closed":
+        return "count"
+    if str(subgraph_type) in {"metapath_topk_path", "metapath_topk_path_adapt"}:
+        return "one_path"
+    return "none"
 
 
 def _as_numpy(value: Any) -> np.ndarray:
@@ -565,6 +590,9 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--metapath_rel_threshold", type=float, default=0.5)
     parser.add_argument("--metapath_rank_metric", default="count")
     parser.add_argument("--metapath_keep_self", action="store_true")
+    parser.add_argument("--metapath_endpoint_mode", default="all", choices=["all", "target_closed"])
+    parser.add_argument("--metapath_support_mode", default="auto", choices=["auto", "none", "one_path", "count"])
+    parser.add_argument("--metapath_support_topk", type=int, default=0)
     parser.add_argument("--peprompt_offline_cache_dir", default="artifacts/cache/peprompt_offline_splits")
     parser.add_argument("--out_dir", default="artifacts/analysis/split_neighborhood_visualization")
     parser.add_argument("--max_train_per_split", type=int, default=40)

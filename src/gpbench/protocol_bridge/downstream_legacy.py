@@ -243,7 +243,7 @@ def _prepare_edge_indices_for_device(hgnn, g, device: torch.device):
         return None
     edge_index_dict = _build_edge_index_dict(g)
     return {
-        etype: edge_index.to(device)
+        etype: edge_index.to(device, non_blocking=True)
         for etype, edge_index in edge_index_dict.items()
     }
 
@@ -252,9 +252,10 @@ def _build_edge_feature_dict(g, feature_name: str = "typepair_edge_feat"):
     edge_feature_dict = {}
     for etype in g.canonical_etypes:
         edge_data = g.edges[etype].data
-        if feature_name not in set(edge_data.keys()):
+        feat = edge_data.get(feature_name)
+        if feat is None:
             continue
-        edge_feature_dict[etype] = edge_data[feature_name].float()
+        edge_feature_dict[etype] = feat.float()
     return edge_feature_dict or None
 
 
@@ -266,7 +267,7 @@ def _prepare_edge_features_for_device(hgnn, g, device: torch.device):
     if edge_feature_dict is None:
         return None
     return {
-        etype: feat.to(device)
+        etype: feat.to(device, non_blocking=True)
         for etype, feat in edge_feature_dict.items()
     }
 
@@ -578,10 +579,10 @@ def extract_split_embeddings(
     ys = []
     for batch in loader:
         batched_graph, batched_label = _unpack_batch(batch, classification_type)
+        batched_graph = batched_graph.to(device)
         edge_index_dict = _prepare_edge_indices_for_device(hgnn, batched_graph, device)
         edge_feature_dict = _prepare_edge_features_for_device(hgnn, batched_graph, device)
         homo_graph = _prepare_homo_graph_for_device(hgnn, batched_graph, device)
-        batched_graph = batched_graph.to(device)
         batched_label = _prepare_labels_for_task(
             batched_label,
             device,
@@ -669,10 +670,10 @@ def _evaluate_graph_probe(
     with torch.no_grad():
         for batch in loader:
             batched_graph, batched_label = _unpack_batch(batch, classification_type)
+            batched_graph = batched_graph.to(device)
             edge_index_dict = _prepare_edge_indices_for_device(hgnn, batched_graph, device)
             edge_feature_dict = _prepare_edge_features_for_device(hgnn, batched_graph, device)
             homo_graph = _prepare_homo_graph_for_device(hgnn, batched_graph, device)
-            batched_graph = batched_graph.to(device)
             batched_label = _prepare_labels_for_task(
                 batched_label,
                 device,
@@ -718,10 +719,10 @@ def _evaluate_graph_probe_loss(
     with torch.no_grad():
         for batch in loader:
             batched_graph, batched_label = _unpack_batch(batch, classification_type)
+            batched_graph = batched_graph.to(device)
             edge_index_dict = _prepare_edge_indices_for_device(hgnn, batched_graph, device)
             edge_feature_dict = _prepare_edge_features_for_device(hgnn, batched_graph, device)
             homo_graph = _prepare_homo_graph_for_device(hgnn, batched_graph, device)
-            batched_graph = batched_graph.to(device)
             batched_label = _prepare_labels_for_task(
                 batched_label,
                 device,
@@ -790,10 +791,10 @@ def _collect_graph_embeddings(
     with context:
         for batch in loader:
             batched_graph, batched_label = _unpack_batch(batch, classification_type)
+            batched_graph = batched_graph.to(device)
             edge_index_dict = _prepare_edge_indices_for_device(hgnn, batched_graph, device)
             edge_feature_dict = _prepare_edge_features_for_device(hgnn, batched_graph, device)
             homo_graph = _prepare_homo_graph_for_device(hgnn, batched_graph, device)
-            batched_graph = batched_graph.to(device)
             batched_label = _prepare_labels_for_task(
                 batched_label,
                 device,
@@ -1147,7 +1148,6 @@ def _train_relation_prompt_probe(
         raise ValueError(f"Unsupported {args.method}_eval_mode: {eval_mode}")
     if eval_mode == "early_stop_only" and early_stop_mode != "loss":
         raise ValueError("PEPrompt eval_mode=early_stop_only requires peprompt_early_stop_mode=loss.")
-    mp_reg_weight = float(getattr(args, "peprompt_mp_reg_weight", 0.0) or 0.0)
     edge_dropout = float(getattr(args, "peprompt_edge_dropout", 0.0) or 0.0)
 
     hgnn = build_legacy_hgnn(
@@ -1209,10 +1209,10 @@ def _train_relation_prompt_probe(
             batched_graph, batched_label = _unpack_batch(batch, args.classification_type)
             if edge_dropout > 0.0:
                 batched_graph = _drop_training_edges(batched_graph, edge_dropout)
+            batched_graph = batched_graph.to(args.device)
             edge_index_dict = _prepare_edge_indices_for_device(hgnn, batched_graph, args.device)
             edge_feature_dict = _prepare_edge_features_for_device(hgnn, batched_graph, args.device)
             homo_graph = _prepare_homo_graph_for_device(hgnn, batched_graph, args.device)
-            batched_graph = batched_graph.to(args.device)
             batched_label = _prepare_labels_for_task(
                 batched_label,
                 args.device,
@@ -1220,8 +1220,6 @@ def _train_relation_prompt_probe(
                 args.classification_type,
             )
 
-            if mp_reg_weight > 0.0 and hasattr(hgnn.relation_prompt, "reset_regularization_loss"):
-                hgnn.relation_prompt.reset_regularization_loss()
             graph_emb = forward_graph_batch(
                 hgnn,
                 batched_graph,
@@ -1237,11 +1235,6 @@ def _train_relation_prompt_probe(
                 args.dataset,
                 args.classification_type,
             )
-            if mp_reg_weight > 0.0 and hasattr(hgnn.relation_prompt, "regularization_loss"):
-                loss = loss + mp_reg_weight * hgnn.relation_prompt.regularization_loss(
-                    device=loss.device,
-                    dtype=loss.dtype,
-                )
 
             opt.zero_grad()
             loss.backward()

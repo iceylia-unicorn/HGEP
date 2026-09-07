@@ -32,27 +32,10 @@ class PEPromptRelationConfig:
     edge_feature_dim: int = 0  # 输入边特征维度，这里对应 Laplacian PE 差值维度
     edge_feature_name: str = "peprompt_edge_feat"  # 图中边特征保存时使用的字段名
     edge_prompt_hidden: int = 128  # 将边 PE 映射到提示向量时，中间 MLP 的隐藏层维度
-    # ---- hop-decomposed compensation (Module 1→2 bridge) ----
-    fusion_mode: str = "none"  # "none" = PE-only; "edge_type" = PE + canonical edge type embedding
-    ctx_dim: int = 0           # 丢弃邻居上下文的特征维度，必须 == 全局节点特征维度
-    generator_hidden: int = 128  # hop_decoupled 模式下融合 MLP 的隐藏层维度
-    metapath_count: int = 0
-    metapath_embed_dim: int = 16
-    graph_summary_dim: int = 0
-    metapath_pos_dim: int = 0
-    metapath_pos_feature_name: str = "peprompt_metapath_pos_feat"
-    basis_count: int = 4
-    metapath_reg_mode: str = "none"
-    onehop_center_fusion: bool = False
 
 
 class PEPromptRelation(nn.Module):
-    """
-    Spectral-only relation prompt:
-    - no per-type-pair global prompt parameters
-    - one edge prompt per edge, produced directly from Laplacian PE features
-    - aggregate prompted messages to dst nodes and inject them residually
-    """
+    """Pure PE edge prompt used by PEPrompt downstream probing."""
 
     def __init__(
         self,
@@ -66,554 +49,36 @@ class PEPromptRelation(nn.Module):
         edge_feature_dim: int = 0,
         edge_feature_name: str = "peprompt_edge_feat",
         edge_prompt_hidden: int = 128,
-        fusion_mode: str = "none",
-        ctx_dim: int = 0,
-        generator_hidden: int = 128,
-        metapath_count: int = 0,
-        metapath_embed_dim: int = 16,
-        graph_summary_dim: int = 0,
-        metapath_pos_dim: int = 0,
-        metapath_pos_feature_name: str = "peprompt_metapath_pos_feat",
-        basis_count: int = 4,
-        metapath_reg_mode: str = "none",
-        onehop_center_fusion: bool = False,
     ):
-        """
-        Args:
-            metadata: 异构图元信息，格式为 (节点类型列表, 规范边类型列表)。
-            dim: 目标提示向量维度，通常与节点隐藏维度一致。
-            mode: 边提示注入方式；"mul" 为 `h_j * P_edge`，"add" 为 `h_j + P_edge`。
-            alpha: 聚合后的关系提示残差系数，控制注入强度。
-            dropout: 关系提示输出后的 dropout 比例。
-            use_ln: 是否按节点类型对输出施加 LayerNorm。
-            aggr: 对入边消息的聚合方式；支持 "mean" 和 "sum"。
-            edge_feature_dim: 输入边特征维度，即 Laplacian PE 差值的维度。
-            edge_feature_name: 从 DGL 边数据中读取 PE 边特征时使用的键名。
-            edge_prompt_hidden: 边提示 MLP 的隐藏层维度。
-            fusion_mode: "none" = PE-only; "edge_type" = PE + canonical edge type embedding;
-                "hop_decoupled" = PE + dropped ctx + h_src + h_dst;
-                "onehop_ctx" = 1-hop type-pooled dropped ctx + h_src + h_dst;
-                "type_ctx" = one pooled dropped ctx per destination type per subgraph;
-                "graph_summary" = one shared graph-level metapath summary for all edges;
-                "graph_summary_basis" = use graph summary as selector over prompt bases.
-                "metapath_pos" = PE + per-edge metapath-position support.
-            ctx_dim: 丢弃邻居上下文的特征维度，仅 hop_decoupled 模式下使用。
-            generator_hidden: hop_decoupled 模式下融合 MLP 的隐藏层维度。
-        """
         super().__init__()
         if mode not in {"mul", "add"}:
             raise ValueError(f"Unsupported mode: {mode}")
         if aggr not in {"mean", "sum"}:
             raise ValueError(f"Unsupported aggr: {aggr}")
-        if fusion_mode not in {"none", "edge_type", "metapath_pos", "hop_decoupled", "onehop_ctx", "type_ctx", "graph_summary", "graph_summary_basis"}:
-            raise ValueError(f"Unsupported fusion_mode: {fusion_mode}")
-        if metapath_reg_mode not in {"none", "consistency", "predict"}:
-            raise ValueError(f"Unsupported metapath_reg_mode: {metapath_reg_mode}")
         if int(edge_feature_dim or 0) <= 0:
             raise ValueError("PEPromptRelation requires positive edge_feature_dim.")
 
-        node_types, edge_types = metadata
+        node_types, _edge_types = metadata
         self.mode = mode
-        self.alpha = alpha
+        self.alpha = float(alpha)
         self.aggr = aggr
         self.edge_feature_dim = int(edge_feature_dim or 0)
-        self.edge_feature_name = edge_feature_name
-        self.fusion_mode = fusion_mode
-        self.ctx_dim = int(ctx_dim or 0)
-        self.ctx_stats_dim = 4
-        self.metapath_count = int(metapath_count or 0)
-        self.metapath_embed_dim = int(metapath_embed_dim or 0)
-        self.graph_summary_dim = int(graph_summary_dim or 0)
-        self.metapath_pos_dim = int(metapath_pos_dim or 0)
-        self.metapath_pos_feature_name = str(metapath_pos_feature_name)
-        self.basis_count = int(basis_count or 0)
-        self.metapath_reg_mode = str(metapath_reg_mode)
-        self.onehop_center_fusion = bool(onehop_center_fusion)
-        self.edge_type_to_id = {tuple(etype): idx for idx, etype in enumerate(edge_types)}
-        self.edge_type_embed_dim = int(self.metapath_embed_dim or 8)
-
+        self.edge_feature_name = str(edge_feature_name)
         self.drop = nn.Dropout(dropout)
         self.ln = nn.ModuleDict(
-            {
-                nt: (nn.LayerNorm(dim) if use_ln else nn.Identity())
-                for nt in node_types
-            }
+            {nt: (nn.LayerNorm(dim) if use_ln else nn.Identity()) for nt in node_types}
         )
-        self.edge_prompt_selector = None
-        self.prompt_basis = None
-        self.metapath_reg_predictor = None
-        self.last_reg_loss = None
-
-        # Build MLP with appropriate input dimension based on fusion mode.
-        if fusion_mode == "hop_decoupled" and self.ctx_dim > 0:
-            if self.metapath_count > 0 and self.metapath_embed_dim > 0:
-                self.metapath_embedding = nn.Embedding(self.metapath_count, self.metapath_embed_dim)
-            else:
-                self.metapath_embedding = None
-                self.metapath_embed_dim = 0
-            if self.edge_type_to_id:
-                self.edge_type_embedding = nn.Embedding(len(self.edge_type_to_id), self.edge_type_embed_dim)
-            else:
-                self.edge_type_embedding = None
-                self.edge_type_embed_dim = 0
-            ctx_token_dim = self.ctx_dim + self.ctx_stats_dim + self.metapath_embed_dim + self.edge_type_embed_dim
-            self.ctx_gate_mlp = nn.Sequential(
-                nn.LayerNorm(ctx_token_dim),
-                nn.Linear(ctx_token_dim, 1),
-            )
-            self.ctx_value_mlp = nn.Sequential(
-                nn.LayerNorm(ctx_token_dim),
-                nn.Linear(ctx_token_dim, generator_hidden),
-                nn.ReLU(),
-                nn.Dropout(dropout),
-                nn.Linear(generator_hidden, self.ctx_dim),
-            )
-            # Input: [h_src || h_dst || pe || dropped_ctx]
-            mlp_input_dim = 2 * dim + self.edge_feature_dim + self.ctx_dim
-            self.edge_prompt_mlp = nn.Sequential(
-                nn.LayerNorm(mlp_input_dim),
-                nn.Linear(mlp_input_dim, generator_hidden),
-                nn.ReLU(),
-                nn.Dropout(dropout),
-                nn.Linear(generator_hidden, dim),
-            )
-        elif fusion_mode in {"onehop_ctx", "type_ctx"} and self.ctx_dim > 0:
-            mlp_input_dim = 2 * dim + self.edge_feature_dim + self.ctx_dim
-            self.edge_prompt_mlp = nn.Sequential(
-                nn.LayerNorm(mlp_input_dim),
-                nn.Linear(mlp_input_dim, generator_hidden),
-                nn.ReLU(),
-                nn.Dropout(dropout),
-                nn.Linear(generator_hidden, dim),
-            )
-            self.metapath_embedding = None
-            self.edge_type_embedding = None
-            self.ctx_gate_mlp = None
-            self.ctx_value_mlp = None
-            if fusion_mode == "onehop_ctx" and self.onehop_center_fusion:
-                self.center_ctx_proj = nn.Sequential(
-                    nn.LayerNorm(self.ctx_dim),
-                    nn.Linear(self.ctx_dim, generator_hidden),
-                    nn.ReLU(),
-                    nn.Dropout(dropout),
-                    nn.Linear(generator_hidden, dim),
-                )
-                self.center_ctx_gate = nn.Sequential(
-                    nn.LayerNorm(2 * dim),
-                    nn.Linear(2 * dim, dim),
-                    nn.Sigmoid(),
-                )
-            else:
-                self.center_ctx_proj = None
-                self.center_ctx_gate = None
-        elif fusion_mode == "graph_summary" and self.graph_summary_dim > 0:
-            mlp_input_dim = 2 * dim + self.edge_feature_dim + self.graph_summary_dim
-            self.edge_prompt_mlp = nn.Sequential(
-                nn.LayerNorm(mlp_input_dim),
-                nn.Linear(mlp_input_dim, generator_hidden),
-                nn.ReLU(),
-                nn.Dropout(dropout),
-                nn.Linear(generator_hidden, dim),
-            )
-            self.metapath_embedding = None
-            self.edge_type_embedding = None
-            self.ctx_gate_mlp = None
-            self.ctx_value_mlp = None
-            self.center_ctx_proj = None
-            self.center_ctx_gate = None
-        elif fusion_mode == "graph_summary_basis" and self.graph_summary_dim > 0:
-            selector_input_dim = 2 * dim + self.edge_feature_dim + self.graph_summary_dim
-            self.edge_prompt_mlp = None
-            self.edge_prompt_selector = nn.Sequential(
-                nn.LayerNorm(selector_input_dim),
-                nn.Linear(selector_input_dim, generator_hidden),
-                nn.ReLU(),
-                nn.Dropout(dropout),
-                nn.Linear(generator_hidden, self.basis_count),
-            )
-            self.prompt_basis = nn.Parameter(torch.empty(self.basis_count, dim))
-            nn.init.xavier_uniform_(self.prompt_basis)
-            self.metapath_embedding = None
-            self.edge_type_embedding = None
-            self.ctx_gate_mlp = None
-            self.ctx_value_mlp = None
-            self.center_ctx_proj = None
-            self.center_ctx_gate = None
-        elif fusion_mode == "edge_type":
-            if self.edge_type_to_id:
-                self.edge_type_embedding = nn.Embedding(len(self.edge_type_to_id), self.edge_type_embed_dim)
-            else:
-                self.edge_type_embedding = None
-                self.edge_type_embed_dim = 0
-            mlp_input_dim = self.edge_feature_dim + self.edge_type_embed_dim
-            self.edge_prompt_mlp = nn.Sequential(
-                nn.LayerNorm(mlp_input_dim),
-                nn.Linear(mlp_input_dim, edge_prompt_hidden),
-                nn.ReLU(),
-                nn.Dropout(dropout),
-                nn.Linear(edge_prompt_hidden, dim),
-            )
-            self.metapath_embedding = None
-            self.ctx_gate_mlp = None
-            self.ctx_value_mlp = None
-            self.center_ctx_proj = None
-            self.center_ctx_gate = None
-            self.edge_prompt_selector = None
-            self.prompt_basis = None
-        elif fusion_mode == "metapath_pos" and self.metapath_pos_dim > 0:
-            mlp_input_dim = self.edge_feature_dim + self.metapath_pos_dim
-            self.edge_prompt_mlp = nn.Sequential(
-                nn.LayerNorm(mlp_input_dim),
-                nn.Linear(mlp_input_dim, edge_prompt_hidden),
-                nn.ReLU(),
-                nn.Dropout(dropout),
-                nn.Linear(edge_prompt_hidden, dim),
-            )
-            self.edge_type_embedding = None
-            self.ctx_gate_mlp = None
-            self.ctx_value_mlp = None
-            self.center_ctx_proj = None
-            self.center_ctx_gate = None
-            self.edge_prompt_selector = None
-            self.prompt_basis = None
-        elif self.edge_feature_dim > 0:
-            # PE-only mode (original)
-            self.edge_prompt_mlp = nn.Sequential(
-                nn.LayerNorm(self.edge_feature_dim),
-                nn.Linear(self.edge_feature_dim, edge_prompt_hidden),
-                nn.ReLU(),
-                nn.Dropout(dropout),
-                nn.Linear(edge_prompt_hidden, dim),
-            )
-            self.metapath_embedding = None
-            self.edge_type_embedding = None
-            self.ctx_gate_mlp = None
-            self.ctx_value_mlp = None
-            self.center_ctx_proj = None
-            self.center_ctx_gate = None
-            self.edge_prompt_selector = None
-            self.prompt_basis = None
-        else:
-            self.edge_prompt_mlp = None
-            self.metapath_embedding = None
-            self.edge_type_embedding = None
-            self.ctx_gate_mlp = None
-            self.ctx_value_mlp = None
-            self.center_ctx_proj = None
-            self.center_ctx_gate = None
-            self.edge_prompt_selector = None
-            self.prompt_basis = None
-
-        if self.metapath_reg_mode == "predict" and self.metapath_pos_dim > 0:
-            self.metapath_reg_predictor = nn.Sequential(
-                nn.LayerNorm(dim),
-                nn.Linear(dim, edge_prompt_hidden),
-                nn.ReLU(),
-                nn.Dropout(dropout),
-                nn.Linear(edge_prompt_hidden, self.metapath_pos_dim),
-            )
+        self.edge_prompt_mlp = nn.Sequential(
+            nn.LayerNorm(self.edge_feature_dim),
+            nn.Linear(self.edge_feature_dim, edge_prompt_hidden),
+            nn.ReLU(),
+            nn.Dropout(dropout),
+            nn.Linear(edge_prompt_hidden, dim),
+        )
 
     @property
     def uses_edge_features(self) -> bool:
-        return self.edge_prompt_mlp is not None or self.edge_prompt_selector is not None
-
-    def reset_regularization_loss(self):
-        self.last_reg_loss = None
-
-    def regularization_loss(self, device=None, dtype=None) -> torch.Tensor:
-        if self.last_reg_loss is None:
-            if device is None:
-                device = next(self.parameters()).device
-            if dtype is None:
-                dtype = next(self.parameters()).dtype
-            return torch.zeros((), device=device, dtype=dtype)
-        return self.last_reg_loss
-
-    def _match_last_dim(self, x: torch.Tensor, dim: int) -> torch.Tensor:
-        if x.size(-1) == dim:
-            return x
-        if x.size(-1) > dim:
-            return x[..., :dim]
-        pad_shape = list(x.shape)
-        pad_shape[-1] = dim - x.size(-1)
-        return torch.cat([x, x.new_zeros(pad_shape)], dim=-1)
-
-    def _node_graph_ids(self, graph, ntype: str, device) -> torch.Tensor:
-        counts = graph.batch_num_nodes(ntype)
-        if not isinstance(counts, torch.Tensor):
-            counts = torch.as_tensor(counts, dtype=torch.long)
-        counts = counts.to(device=device, dtype=torch.long).view(-1)
-        graph_ids = torch.arange(int(counts.numel()), device=device, dtype=torch.long)
-        return torch.repeat_interleave(graph_ids, counts)
-
-    def _batched_virtual_metapath_state(self, graph, device, dtype):
-        if graph is None:
-            return None
-
-        for ntype in graph.ntypes:
-            ctx_node_data = graph.nodes[ntype].data.get("dropped_metapath_ctx")
-            stats_node_data = graph.nodes[ntype].data.get("dropped_metapath_stats")
-            if ctx_node_data is None or stats_node_data is None:
-                continue
-
-            ctx = ctx_node_data.to(device=device, dtype=dtype)
-            stats = stats_node_data.to(device=device, dtype=dtype)
-            if ctx.dim() != 3 or stats.dim() != 3 or ctx.size(0) == 0:
-                continue
-
-            owner_graph_ids = self._node_graph_ids(graph, ntype, device)
-            center_mask = stats.abs().sum(dim=(-1, -2)) > 0
-            if not center_mask.any():
-                continue
-
-            num_graphs = int(owner_graph_ids.max().item()) + 1 if owner_graph_ids.numel() > 0 else 0
-            ctx_by_graph = ctx.new_zeros((num_graphs, ctx.size(1), ctx.size(2)))
-            stats_by_graph = stats.new_zeros((num_graphs, stats.size(1), stats.size(2)))
-            ctx_by_graph[owner_graph_ids[center_mask]] = ctx[center_mask]
-            stats_by_graph[owner_graph_ids[center_mask]] = stats[center_mask]
-            return {
-                "owner_ntype": ntype,
-                "ctx_by_graph": ctx_by_graph,
-                "stats_by_graph": stats_by_graph,
-            }
-        return None
-
-    def _metapath_ctx_per_edge(self, graph, virtual_state, etype, src_t: str, src: torch.Tensor, device, dtype):
-        if graph is None or self.ctx_gate_mlp is None or self.ctx_value_mlp is None:
-            return None
-        if virtual_state is None:
-            return None
-
-        keep_mask_node_data = graph.nodes[src_t].data.get("dropped_metapath_keep_mask")
-        if keep_mask_node_data is None:
-            return None
-
-        unique_src, inverse = torch.unique(src, sorted=False, return_inverse=True)
-        src_graph_ids = self._node_graph_ids(graph, src_t, device)[unique_src]
-        ctx_mp = virtual_state["ctx_by_graph"][src_graph_ids]
-        stats = virtual_state["stats_by_graph"][src_graph_ids]
-        if ctx_mp.dim() != 3 or ctx_mp.size(1) == 0:
-            return None
-        ctx_mp = self._match_last_dim(ctx_mp, self.ctx_dim)
-        stats = self._match_last_dim(stats, self.ctx_stats_dim)
-        keep_mask = keep_mask_node_data[unique_src].to(device=device, dtype=torch.bool)
-        chunk_size = 256
-        ctx_chunks = []
-        mp_emb_base = None
-        if self.metapath_embedding is not None:
-            if ctx_mp.size(1) <= self.metapath_embedding.num_embeddings:
-                mp_ids = torch.arange(ctx_mp.size(1), device=device)
-                mp_emb_base = self.metapath_embedding(mp_ids).to(dtype=dtype)
-            else:
-                mp_emb_base = None
-
-        etype_emb_base = None
-        if self.edge_type_embedding is not None:
-            etype_id = self.edge_type_to_id.get(tuple(etype))
-            if etype_id is not None:
-                etype_ids = torch.full(
-                    (ctx_mp.size(1),),
-                    int(etype_id),
-                    device=device,
-                    dtype=torch.long,
-                )
-                etype_emb_base = self.edge_type_embedding(etype_ids).to(dtype=dtype)
-
-        for start in range(0, ctx_mp.size(0), chunk_size):
-            end = min(start + chunk_size, ctx_mp.size(0))
-            ctx_chunk = ctx_mp[start:end]
-            stats_chunk = stats[start:end]
-            keep_mask_chunk = keep_mask[start:end]
-
-            token_parts = [ctx_chunk, stats_chunk]
-            if self.metapath_embedding is not None:
-                if mp_emb_base is not None:
-                    mp_emb = mp_emb_base.unsqueeze(0).expand(ctx_chunk.size(0), -1, -1)
-                else:
-                    mp_emb = ctx_chunk.new_zeros(ctx_chunk.size(0), ctx_chunk.size(1), self.metapath_embed_dim)
-                token_parts.append(mp_emb)
-            if self.edge_type_embedding is not None:
-                if etype_emb_base is not None:
-                    etype_emb = etype_emb_base.unsqueeze(0).expand(ctx_chunk.size(0), -1, -1)
-                else:
-                    etype_emb = ctx_chunk.new_zeros(ctx_chunk.size(0), ctx_chunk.size(1), self.edge_type_embed_dim)
-                token_parts.append(etype_emb)
-
-            token = torch.cat(token_parts, dim=-1)
-            has_state = stats_chunk.abs().sum(dim=-1) > 0
-            valid = keep_mask_chunk & has_state
-            gate_logits = self.ctx_gate_mlp(token).squeeze(-1)
-            gate_logits = gate_logits.masked_fill(~valid, torch.finfo(gate_logits.dtype).min)
-            alpha = torch.softmax(gate_logits, dim=-1)
-            has_valid = valid.any(dim=-1, keepdim=True)
-            alpha = torch.where(has_valid, alpha, torch.zeros_like(alpha))
-
-            values = self.ctx_value_mlp(token)
-            ctx_chunks.append((alpha.unsqueeze(-1) * values).sum(dim=1))
-
-        ctx_per_src = torch.cat(ctx_chunks, dim=0)
-        return ctx_per_src[inverse]
-
-    def _onehop_ctx_per_edge(self, graph, src_t: str, dst_t: str, src: torch.Tensor, device, dtype):
-        if graph is None or self.ctx_dim <= 0:
-            return None
-        ctx_key = f"dropped_onehop_ctx_{dst_t}"
-        ctx_node_data = graph.nodes[src_t].data.get(ctx_key)
-        if ctx_node_data is None:
-            return None
-        ctx_per_edge = ctx_node_data[src].to(device=device, dtype=dtype)
-        return self._match_last_dim(ctx_per_edge, self.ctx_dim)
-
-    def _batched_type_ctx_state(self, graph, device, dtype):
-        if graph is None:
-            return None
-
-        state = {}
-        for ntype in graph.ntypes:
-            owner_graph_ids = self._node_graph_ids(graph, ntype, device)
-            if owner_graph_ids.numel() == 0:
-                continue
-            num_graphs = int(owner_graph_ids.max().item()) + 1
-            for key, value in graph.nodes[ntype].data.items():
-                if not key.startswith("dropped_ctx_"):
-                    continue
-                dst_t = key[len("dropped_ctx_"):]
-                ctx = value.to(device=device, dtype=dtype)
-                if ctx.dim() != 2 or ctx.size(0) == 0:
-                    continue
-                center_mask = ctx.abs().sum(dim=-1) > 0
-                if not center_mask.any():
-                    continue
-                ctx_by_graph = ctx.new_zeros((num_graphs, ctx.size(-1)))
-                ctx_by_graph[owner_graph_ids[center_mask]] = ctx[center_mask]
-                state[dst_t] = ctx_by_graph
-        return state or None
-
-    def _type_ctx_per_edge(self, type_ctx_state, graph, src_t: str, dst_t: str, src: torch.Tensor, device, dtype):
-        if graph is None or self.ctx_dim <= 0 or not type_ctx_state or dst_t not in type_ctx_state:
-            return None
-        src_graph_ids = self._node_graph_ids(graph, src_t, device)[src]
-        ctx_per_edge = type_ctx_state[dst_t][src_graph_ids]
-        return self._match_last_dim(ctx_per_edge, self.ctx_dim)
-
-    def _batched_graph_summary_state(self, graph, device, dtype):
-        if graph is None:
-            return None
-
-        for ntype in graph.ntypes:
-            summary_node_data = graph.nodes[ntype].data.get("graph_metapath_summary")
-            if summary_node_data is None:
-                continue
-            summary = summary_node_data.to(device=device, dtype=dtype)
-            if summary.dim() != 2 or summary.size(0) == 0:
-                continue
-            owner_graph_ids = self._node_graph_ids(graph, ntype, device)
-            center_mask = summary.abs().sum(dim=-1) > 0
-            if not center_mask.any():
-                continue
-            num_graphs = int(owner_graph_ids.max().item()) + 1 if owner_graph_ids.numel() > 0 else 0
-            summary_by_graph = summary.new_zeros((num_graphs, summary.size(-1)))
-            summary_by_graph[owner_graph_ids[center_mask]] = summary[center_mask]
-            return summary_by_graph
-        return None
-
-    def _graph_summary_per_edge(self, graph_summary_state, graph, src_t: str, src: torch.Tensor, device, dtype):
-        if graph is None or self.graph_summary_dim <= 0 or graph_summary_state is None:
-            return None
-        src_graph_ids = self._node_graph_ids(graph, src_t, device)[src]
-        summary_per_edge = graph_summary_state[src_graph_ids].to(device=device, dtype=dtype)
-        return self._match_last_dim(summary_per_edge, self.graph_summary_dim)
-
-    def _metapath_pos_per_edge(self, graph, etype, device, dtype):
-        if graph is None or self.metapath_pos_dim <= 0:
-            return None
-        edge_data = graph.edges[etype].data.get(self.metapath_pos_feature_name)
-        if edge_data is None:
-            return None
-        edge_data = edge_data.to(device=device, dtype=dtype)
-        return self._match_last_dim(edge_data, self.metapath_pos_dim)
-
-    def _accumulate_metapath_prompt_regularization(self, p: torch.Tensor, metapath_pos: torch.Tensor | None):
-        if self.metapath_reg_mode == "none" or metapath_pos is None:
-            return
-        if p.numel() == 0 or metapath_pos.numel() == 0:
-            return
-
-        weights = metapath_pos.to(device=p.device, dtype=p.dtype).clamp_min(0.0)
-        if self.metapath_reg_mode == "predict":
-            if self.metapath_reg_predictor is None:
-                return
-            target = (weights > 0).to(dtype=p.dtype)
-            logits = self.metapath_reg_predictor(p)
-            reg_loss = torch.nn.functional.binary_cross_entropy_with_logits(logits, target)
-            self.last_reg_loss = reg_loss if self.last_reg_loss is None else self.last_reg_loss + reg_loss
-            return
-
-        support = weights.sum(dim=0)
-        valid = support > 1e-6
-        if not bool(valid.any()):
-            return
-
-        weights = weights[:, valid]
-        support = support[valid].clamp_min(1e-6)
-        means = (weights.transpose(0, 1) @ p) / support.unsqueeze(-1)
-        diff = p.unsqueeze(1) - means.unsqueeze(0)
-        loss_per_group = (weights.unsqueeze(-1) * diff.square()).sum(dim=(0, 2)) / (
-            support * max(int(p.size(-1)), 1)
-        )
-        reg_loss = loss_per_group.mean()
-        self.last_reg_loss = reg_loss if self.last_reg_loss is None else self.last_reg_loss + reg_loss
-
-    def _apply_onehop_center_fusion(self, x_dict: Dict[str, torch.Tensor], graph) -> Dict[str, torch.Tensor]:
-        if (
-            graph is None
-            or not self.onehop_center_fusion
-            or self.center_ctx_proj is None
-            or self.center_ctx_gate is None
-        ):
-            return x_dict
-
-        out_dict = dict(x_dict)
-        for ntype, x in x_dict.items():
-            ctx_keys = sorted(
-                key for key in graph.nodes[ntype].data.keys()
-                if key.startswith("dropped_onehop_ctx_")
-            )
-            if not ctx_keys:
-                continue
-
-            ctx_list = []
-            weight_list = []
-            for ctx_key in ctx_keys:
-                stats_key = ctx_key.replace("dropped_onehop_ctx_", "dropped_onehop_stats_")
-                ctx_mat = graph.nodes[ntype].data.get(ctx_key)
-                stats_mat = graph.nodes[ntype].data.get(stats_key)
-                if ctx_mat is None or stats_mat is None:
-                    continue
-                ctx_list.append(self._match_last_dim(ctx_mat.to(device=x.device, dtype=x.dtype), self.ctx_dim))
-                stats = stats_mat.to(device=x.device, dtype=x.dtype)
-                if stats.dim() != 2 or stats.size(-1) == 0:
-                    weight_list.append(torch.zeros((x.size(0),), device=x.device, dtype=x.dtype))
-                else:
-                    weight_list.append(stats[:, 1])
-
-            if not ctx_list:
-                continue
-
-            ctx_stack = torch.stack(ctx_list, dim=1)  # [N, T, ctx_dim]
-            weight_stack = torch.stack(weight_list, dim=1)  # [N, T]
-            valid = ctx_stack.abs().sum(dim=-1) > 0
-            logits = weight_stack.masked_fill(~valid, torch.finfo(weight_stack.dtype).min)
-            alpha = torch.softmax(logits, dim=-1)
-            has_valid = valid.any(dim=-1, keepdim=True)
-            alpha = torch.where(has_valid, alpha, torch.zeros_like(alpha))
-            pooled_ctx = (alpha.unsqueeze(-1) * ctx_stack).sum(dim=1)
-
-            proj = self.center_ctx_proj(pooled_ctx)
-            gate = self.center_ctx_gate(torch.cat([x, proj], dim=-1))
-            out_dict[ntype] = x + gate * proj
-
-        return out_dict
+        return True
 
     def forward(
         self,
@@ -622,231 +87,47 @@ class PEPromptRelation(nn.Module):
         edge_feature_dict: Dict[Tuple[str, str, str], torch.Tensor] | None = None,
         graph=None,
     ) -> Dict[str, torch.Tensor]:
-        """
-        Args:
-            x_dict: 各节点类型的节点表示字典，键为节点类型，值为节点特征矩阵。
-            edge_index_dict: 各规范边类型的边索引字典，形状为 [2, num_edges]。
-            edge_feature_dict: 各规范边类型对应的边特征字典，这里应为 Laplacian PE 差值。
-            graph: (hop_decoupled only) DGL heterograph used to read ``dropped_ctx_*`` from nodes.
-
-        Returns:
-            注入 PE 边提示后的各节点类型表示。
-        """
+        del graph
         device = next(iter(x_dict.values())).device
-
-        agg_dict = {
-            ntype: torch.zeros_like(x)
-            for ntype, x in x_dict.items()
-        }
+        agg_dict = {ntype: torch.zeros_like(x) for ntype, x in x_dict.items()}
         deg_dict = {
             ntype: torch.zeros((x.size(0), 1), device=device, dtype=x.dtype)
             for ntype, x in x_dict.items()
         }
 
-        use_onehop_ctx = (
-            self.fusion_mode == "onehop_ctx"
-            and self.ctx_dim > 0
-            and graph is not None
-        )
-        use_type_ctx = (
-            self.fusion_mode == "type_ctx"
-            and self.ctx_dim > 0
-            and graph is not None
-        )
-        use_graph_summary = (
-            self.fusion_mode == "graph_summary"
-            and self.graph_summary_dim > 0
-            and graph is not None
-        )
-        use_graph_summary_basis = (
-            self.fusion_mode == "graph_summary_basis"
-            and self.graph_summary_dim > 0
-            and self.edge_prompt_selector is not None
-            and self.prompt_basis is not None
-            and graph is not None
-        )
-        use_metapath_pos = (
-            self.fusion_mode == "metapath_pos"
-            and self.metapath_pos_dim > 0
-            and graph is not None
-        )
-        use_hop_decoupled = (
-            self.fusion_mode == "hop_decoupled"
-            and self.ctx_dim > 0
-            and graph is not None
-        )
-        if use_onehop_ctx:
-            x_dict = self._apply_onehop_center_fusion(x_dict, graph)
-        virtual_state = None
-        if use_hop_decoupled:
-            virtual_state = self._batched_virtual_metapath_state(graph, device, next(iter(x_dict.values())).dtype)
-        type_ctx_state = None
-        if use_type_ctx:
-            type_ctx_state = self._batched_type_ctx_state(graph, device, next(iter(x_dict.values())).dtype)
-        graph_summary_state = None
-        if use_graph_summary or use_graph_summary_basis:
-            graph_summary_state = self._batched_graph_summary_state(graph, device, next(iter(x_dict.values())).dtype)
-
         for (src_t, rel_t, dst_t), edge_index in edge_index_dict.items():
             src, dst = edge_index
             if src.numel() == 0:
                 continue
-
             if edge_feature_dict is None:
                 raise ValueError("PEPromptRelation requires edge_feature_dict, but received None.")
-
             edge_features = edge_feature_dict.get((src_t, rel_t, dst_t))
             if edge_features is None:
                 raise ValueError(
                     f"PEPromptRelation missing edge features for etype={(src_t, rel_t, dst_t)}."
                 )
 
-            if use_hop_decoupled:
-                # ---- hop-decomposed compensation ----
-                # Gather [h_src || h_dst || PE || dropped_ctx] per edge
-                h_src = x_dict[src_t][src]                              # [E, dim]
-                h_dst = x_dict[dst_t][dst]                              # [E, dim]
-                pe = edge_features.to(device)                            # [E, pe_dim]
-
-                ctx_per_edge = self._metapath_ctx_per_edge(
-                    graph,
-                    virtual_state,
-                    (src_t, rel_t, dst_t),
-                    src_t,
-                    src,
-                    device,
-                    pe.dtype,
-                )
-                if ctx_per_edge is None:
-                    ctx_key = f"dropped_ctx_{dst_t}"
-                    ctx_node_data = graph.nodes[src_t].data.get(ctx_key)
-                    if ctx_node_data is not None:
-                        ctx_per_edge = ctx_node_data[src].to(device=device, dtype=pe.dtype)
-                        ctx_per_edge = self._match_last_dim(ctx_per_edge, self.ctx_dim)
-                    else:
-                        ctx_per_edge = torch.zeros(
-                            pe.shape[0], self.ctx_dim, device=device, dtype=pe.dtype,
-                        )
-
-                mlp_input = torch.cat([h_src, h_dst, pe, ctx_per_edge], dim=-1)
-                p = self.edge_prompt_mlp(mlp_input)
-            elif use_onehop_ctx:
-                h_src = x_dict[src_t][src]
-                h_dst = x_dict[dst_t][dst]
-                pe = edge_features.to(device)
-                ctx_per_edge = self._onehop_ctx_per_edge(graph, src_t, dst_t, src, device, pe.dtype)
-                if ctx_per_edge is None:
-                    ctx_per_edge = torch.zeros(
-                        pe.shape[0], self.ctx_dim, device=device, dtype=pe.dtype,
-                    )
-                mlp_input = torch.cat([h_src, h_dst, pe, ctx_per_edge], dim=-1)
-                p = self.edge_prompt_mlp(mlp_input)
-            elif use_type_ctx:
-                h_src = x_dict[src_t][src]
-                h_dst = x_dict[dst_t][dst]
-                pe = edge_features.to(device)
-                ctx_per_edge = self._type_ctx_per_edge(type_ctx_state, graph, src_t, dst_t, src, device, pe.dtype)
-                if ctx_per_edge is None:
-                    ctx_per_edge = torch.zeros(
-                        pe.shape[0], self.ctx_dim, device=device, dtype=pe.dtype,
-                    )
-                mlp_input = torch.cat([h_src, h_dst, pe, ctx_per_edge], dim=-1)
-                p = self.edge_prompt_mlp(mlp_input)
-            elif use_graph_summary:
-                h_src = x_dict[src_t][src]
-                h_dst = x_dict[dst_t][dst]
-                pe = edge_features.to(device)
-                summary_per_edge = self._graph_summary_per_edge(
-                    graph_summary_state, graph, src_t, src, device, pe.dtype
-                )
-                if summary_per_edge is None:
-                    summary_per_edge = torch.zeros(
-                        pe.shape[0], self.graph_summary_dim, device=device, dtype=pe.dtype,
-                    )
-                mlp_input = torch.cat([h_src, h_dst, pe, summary_per_edge], dim=-1)
-                p = self.edge_prompt_mlp(mlp_input)
-            elif use_graph_summary_basis:
-                h_src = x_dict[src_t][src]
-                h_dst = x_dict[dst_t][dst]
-                pe = edge_features.to(device)
-                summary_per_edge = self._graph_summary_per_edge(
-                    graph_summary_state, graph, src_t, src, device, pe.dtype
-                )
-                if summary_per_edge is None:
-                    summary_per_edge = torch.zeros(
-                        pe.shape[0], self.graph_summary_dim, device=device, dtype=pe.dtype,
-                    )
-                selector_input = torch.cat([h_src, h_dst, pe, summary_per_edge], dim=-1)
-                alpha = torch.softmax(self.edge_prompt_selector(selector_input), dim=-1)
-                p = alpha @ self.prompt_basis.to(device=device, dtype=pe.dtype)
-            elif self.fusion_mode == "edge_type":
-                pe = edge_features.to(device)
-                if self.edge_type_embedding is not None:
-                    etype_id = self.edge_type_to_id.get((src_t, rel_t, dst_t))
-                    if etype_id is not None:
-                        etype_ids = torch.full(
-                            (pe.size(0),),
-                            int(etype_id),
-                            device=device,
-                            dtype=torch.long,
-                        )
-                        etype_emb = self.edge_type_embedding(etype_ids).to(dtype=pe.dtype)
-                    else:
-                        etype_emb = pe.new_zeros(pe.size(0), self.edge_type_embed_dim)
-                else:
-                    etype_emb = pe.new_zeros(pe.size(0), self.edge_type_embed_dim)
-                p = self.edge_prompt_mlp(torch.cat([pe, etype_emb], dim=-1))
-            elif use_metapath_pos:
-                pe = edge_features.to(device)
-                metapath_pos = self._metapath_pos_per_edge(
-                    graph,
-                    (src_t, rel_t, dst_t),
-                    device,
-                    pe.dtype,
-                )
-                if metapath_pos is None:
-                    metapath_pos = pe.new_zeros(pe.size(0), self.metapath_pos_dim)
-                p = self.edge_prompt_mlp(torch.cat([pe, metapath_pos], dim=-1))
-            else:
-                p = self.edge_prompt_mlp(edge_features.to(x_dict[src_t].device))
-
-            if self.metapath_reg_mode != "none":
-                reg_metapath_pos = self._metapath_pos_per_edge(
-                    graph,
-                    (src_t, rel_t, dst_t),
-                    device,
-                    p.dtype,
-                )
-                self._accumulate_metapath_prompt_regularization(p, reg_metapath_pos)
-
-            msg = x_dict[src_t][src]
+            prompt = self.edge_prompt_mlp(edge_features.to(device))
             if self.mode == "mul":
-                msg = msg * p
+                msg = x_dict[src_t][src] * prompt
             else:
-                msg = msg + p
+                msg = x_dict[src_t][src] + prompt
 
             agg_dict[dst_t].index_add_(0, dst, msg)
-
-            ones = torch.ones(
-                (dst.size(0), 1),
-                device=device,
-                dtype=x_dict[dst_t].dtype,
+            deg_dict[dst_t].index_add_(
+                0,
+                dst,
+                torch.ones((dst.numel(), 1), device=device, dtype=msg.dtype),
             )
-            deg_dict[dst_t].index_add_(0, dst, ones)
 
-        out_dict: Dict[str, torch.Tensor] = {}
+        out = {}
         for ntype, x in x_dict.items():
-            agg = agg_dict[ntype]
             if self.aggr == "mean":
-                agg = agg / deg_dict[ntype].clamp_min(1.0)
-
-            h = x + self.alpha * agg
-            h = self.drop(h)
-            h = self.ln[ntype](h)
-            out_dict[ntype] = h
-
-        return out_dict
-
+                agg = agg_dict[ntype] / deg_dict[ntype].clamp_min(1.0)
+            else:
+                agg = agg_dict[ntype]
+            out[ntype] = self.ln[ntype](x + self.alpha * self.drop(agg))
+        return out
 
 def _build_edge_index_dict(graph) -> Dict[Tuple[str, str, str], torch.Tensor]:
     edge_index_dict = {}
@@ -1049,17 +330,6 @@ class HGMPPEPromptHGNN(nn.Module):
             edge_feature_dim=relation_cfg.edge_feature_dim,
             edge_feature_name=relation_cfg.edge_feature_name,
             edge_prompt_hidden=relation_cfg.edge_prompt_hidden,
-            fusion_mode=relation_cfg.fusion_mode,
-            ctx_dim=relation_cfg.ctx_dim,
-            generator_hidden=relation_cfg.generator_hidden,
-            metapath_count=relation_cfg.metapath_count,
-            metapath_embed_dim=relation_cfg.metapath_embed_dim,
-            graph_summary_dim=relation_cfg.graph_summary_dim,
-            metapath_pos_dim=relation_cfg.metapath_pos_dim,
-            metapath_pos_feature_name=relation_cfg.metapath_pos_feature_name,
-            basis_count=relation_cfg.basis_count,
-            metapath_reg_mode=relation_cfg.metapath_reg_mode,
-            onehop_center_fusion=relation_cfg.onehop_center_fusion,
         )
 
         if self.hgnn_type == "HGT":
@@ -1089,7 +359,7 @@ class HGMPPEPromptHGNN(nn.Module):
             edge_index: HGT 路径下的异构边索引字典。
             edge_feature_dict: 各边类型的 PE 边特征字典。
             homo_graph: GCN 路径下的同构图，可选。
-            graph: (hop_decoupled) original heterograph for reading dropped_ctx node data.
+            graph: 保留该参数以兼容 HGT/GCN wrapper 调用；纯 PE prompt 不使用。
         """
         if self.hgnn_type == "HGT":
             return self.GraphConv(targetnode, x, edge_index, edge_feature_dict, graph=graph)
@@ -1271,17 +541,6 @@ def build_peprompt_relation_cfg_from_args(args) -> PEPromptRelationConfig:
         edge_feature_dim=getattr(args, "peprompt_edge_feature_dim", 0),
         edge_feature_name=getattr(args, "peprompt_edge_feature_name", "peprompt_edge_feat"),
         edge_prompt_hidden=getattr(args, "peprompt_edge_prompt_hidden", 128),
-        fusion_mode=getattr(args, "peprompt_fusion_mode", "none"),
-        ctx_dim=getattr(args, "peprompt_ctx_dim", 0),
-        generator_hidden=getattr(args, "peprompt_generator_hidden", 128),
-        metapath_count=getattr(args, "peprompt_metapath_count", 0),
-        metapath_embed_dim=getattr(args, "peprompt_metapath_embed_dim", 16),
-        graph_summary_dim=getattr(args, "peprompt_graph_summary_dim", 0),
-        metapath_pos_dim=getattr(args, "peprompt_metapath_pos_dim", 0),
-        metapath_pos_feature_name=getattr(args, "peprompt_metapath_pos_feature_name", "peprompt_metapath_pos_feat"),
-        basis_count=getattr(args, "peprompt_basis_count", 4),
-        metapath_reg_mode=getattr(args, "peprompt_mp_reg_mode", "none"),
-        onehop_center_fusion=getattr(args, "peprompt_onehop_center_fusion", False),
     )
 
 

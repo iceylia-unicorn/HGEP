@@ -72,7 +72,10 @@ DATASET_NUM_CLASS = {
 }
 
 PEPROMPT_EDGE_FEATURE_NAME = "peprompt_edge_feat"
-PEPROMPT_EDGE_FEATURES = ["SpectralEmbeddingDiff"]
+PEPROMPT_EDGE_FEATURES = ["SpectralEmbeddingDiff", "CoarseHighOrderPrompt", "TypeNeighborhoodEdge"]
+PEPROMPT_DEFAULT_EDGE_FEATURES = ["SpectralEmbeddingDiff"]
+PEPROMPT_DEFAULT_COARSE_HOPS = [0, 1]
+PEPROMPT_DEFAULT_TYPE_HOPS = [0, 1, 2]
 LEGACY_HGMP_METHODS = {"hgmp", "peprompt", "hgmp_prompt"}
 LEGACY_CKPT_NAME_RE = re.compile(
     r"^(?P<dataset>[^.]+)\.(?P<pretext>[^.]+)\.(?P<hgnn_type>[^.]+)\.hid(?P<hidden_dim>\d+)\.np(?P<num_samples>\d+)"
@@ -133,6 +136,26 @@ def _ensure_dir(path: Path) -> Path:
 def _format_float_for_key(value: float) -> str:
     text = f"{float(value):g}"
     return text.replace("-", "m").replace(".", "p")
+
+
+def _coerce_int_list(value, default: list[int] | tuple[int, ...] | None = None) -> list[int]:
+    if value is None:
+        return list(default or [])
+    if isinstance(value, str):
+        parts = [part for part in re.split(r"[\s,]+", value.strip()) if part]
+    else:
+        parts = []
+        for item in value:
+            parts.extend([part for part in re.split(r"[\s,]+", str(item).strip()) if part])
+    return [int(part) for part in parts]
+
+
+def _normalize_hop_list(value, default: list[int] | tuple[int, ...]) -> list[int]:
+    return sorted({hop for hop in _coerce_int_list(value, default) if int(hop) > 0})
+
+
+def _normalize_nonnegative_hop_list(value, default: list[int] | tuple[int, ...]) -> list[int]:
+    return sorted({hop for hop in _coerce_int_list(value, default) if int(hop) >= 0})
 
 
 def _set_global_seed(seed: int):
@@ -570,6 +593,82 @@ def _peprompt_spectral_cache_path(args) -> Path:
     )
 
 
+def _peprompt_coarse_highorder_cache_path(args) -> Path:
+    cache_dir = Path(
+        getattr(
+            args,
+            "peprompt_coarse_cache_dir",
+            ROOT / "artifacts" / "cache" / "peprompt_coarse_highorder",
+        )
+    )
+    per_type = int(getattr(args, "peprompt_coarse_supernodes_per_type", 16))
+    dim = int(getattr(args, "peprompt_coarse_dim", 8))
+    hops = _normalize_nonnegative_hop_list(
+        getattr(args, "peprompt_coarse_hops", None),
+        PEPROMPT_DEFAULT_COARSE_HOPS,
+    )
+    max_nodes = int(getattr(args, "peprompt_coarse_max_nodes", 50000))
+    walk_graph = str(getattr(args, "peprompt_coarse_walk_graph", "undirected"))
+    propagation = str(getattr(args, "peprompt_coarse_propagation", "coarse"))
+    seed = int(getattr(args, "peprompt_coarse_seed", 0))
+    hop_key = "-".join(str(hop) for hop in hops) if hops else "none"
+    return (
+        cache_dir
+        / args.dataset
+        / f"ft{args.feats_type}"
+        / (
+            f"coarse_pt{per_type}.d{dim}.h{hop_key}.mn{max_nodes}."
+            f"{walk_graph}.{propagation}.seed{seed}.pt"
+        )
+    )
+
+
+def _peprompt_type_neighborhood_cache_path(args) -> Path:
+    cache_dir = Path(
+        getattr(
+            args,
+            "peprompt_type_cache_dir",
+            ROOT / "artifacts" / "cache" / "peprompt_type_neighborhood",
+        )
+    )
+    hops = _normalize_nonnegative_hop_list(
+        getattr(args, "peprompt_type_hops", None),
+        PEPROMPT_DEFAULT_TYPE_HOPS,
+    )
+    hop_key = "-".join(str(hop) for hop in hops) if hops else "none"
+    walk_graph = str(getattr(args, "peprompt_type_walk_graph", "undirected"))
+    propagation_key = _peprompt_type_propagation_cache_key(args)
+    propagation_suffix = f".{propagation_key}" if propagation_key else ""
+    return (
+        cache_dir
+        / args.dataset
+        / f"ft{args.feats_type}"
+        / f"type_neigh.h{hop_key}.{walk_graph}{propagation_suffix}.pt"
+    )
+
+
+def _peprompt_type_edge_onehot_enabled(args) -> bool:
+    return bool(getattr(args, "peprompt_type_edge_onehot", True))
+
+
+def _peprompt_type_propagation_mode(args) -> str:
+    mode = str(getattr(args, "peprompt_type_propagation", "power")).lower()
+    if mode not in {"power", "ppr", "heat"}:
+        raise ValueError(f"Unsupported peprompt_type_propagation={mode}")
+    return mode
+
+
+def _peprompt_type_propagation_cache_key(args) -> str:
+    mode = _peprompt_type_propagation_mode(args)
+    if mode == "power":
+        return ""
+    if mode == "ppr":
+        alpha = _format_float_for_key(float(getattr(args, "peprompt_type_ppr_alpha", 0.15)))
+        return f"ppr{alpha}"
+    heat_time = _format_float_for_key(float(getattr(args, "peprompt_type_heat_time", 1.0)))
+    return f"heat{heat_time}"
+
+
 def _edge_type_key(etype) -> str:
     return "__".join(str(part) for part in etype)
 
@@ -638,10 +737,26 @@ def _spectral_embeddings(
         return torch.zeros((num_nodes, dim), dtype=torch.float32)
 
 
-def _feature_slices(num_node_types: int, num_edge_types: int, spectral_dim: int) -> dict[str, tuple[int, int]]:
+def _feature_slices(
+    num_node_types: int,
+    num_edge_types: int,
+    spectral_dim: int,
+    highorder_dim: int = 0,
+    coarse_highorder_dim: int = 0,
+    type_neighborhood_edge_dim: int = 0,
+) -> dict[str, tuple[int, int]]:
     del num_node_types
     del num_edge_types
-    return {"SpectralEmbeddingDiff": (0, spectral_dim)}
+    cursor = 0
+    slices = {}
+    for name, width in (
+        ("SpectralEmbeddingDiff", int(spectral_dim)),
+        ("CoarseHighOrderPrompt", int(coarse_highorder_dim)),
+        ("TypeNeighborhoodEdge", int(type_neighborhood_edge_dim)),
+    ):
+        slices[name] = (cursor, cursor + max(0, width))
+        cursor += max(0, width)
+    return slices
 
 
 def _coerce_feature_name_list(value) -> list[str] | None:
@@ -659,16 +774,60 @@ def get_selected_peprompt_edge_feature_names(args, feature_slices: dict[str, tup
     available = list(feature_slices.keys()) if feature_slices is not None else list(PEPROMPT_EDGE_FEATURES)
     configured = _coerce_feature_name_list(getattr(args, "peprompt_edge_feature_names", None))
     if configured is None:
-        return available
+        return [name for name in PEPROMPT_DEFAULT_EDGE_FEATURES if name in set(available)]
     if not configured:
         return []
     unknown = [name for name in configured if name not in set(available)]
     if unknown:
         raise ValueError(
             f"Unsupported peprompt edge feature names: {unknown}. "
-            f"Only spectral edge prompts remain enabled: {available}."
+            f"Available PEPrompt edge features: {available}."
         )
     return configured
+
+
+def _peprompt_edge_feature_cache_key(args) -> str:
+    selected = get_selected_peprompt_edge_feature_names(args)
+    if not selected:
+        return "penone"
+
+    parts = ["pe" + "-".join(name.lower().replace("embedding", "emb").replace("prompt", "pr") for name in selected)]
+    if "SpectralEmbeddingDiff" in selected:
+        parts.append(f"s{int(getattr(args, 'peprompt_spectral_dim', 8))}")
+    if "CoarseHighOrderPrompt" in selected:
+        hops = _normalize_nonnegative_hop_list(
+            getattr(args, "peprompt_coarse_hops", None),
+            PEPROMPT_DEFAULT_COARSE_HOPS,
+        )
+        hop_key = "-".join(str(hop) for hop in hops) if hops else "none"
+        parts.extend(
+            [
+                f"cpt{int(getattr(args, 'peprompt_coarse_supernodes_per_type', 16))}",
+                f"cd{int(getattr(args, 'peprompt_coarse_dim', 8))}",
+                f"ch{hop_key}",
+                f"cmn{int(getattr(args, 'peprompt_coarse_max_nodes', 50000))}",
+                str(getattr(args, "peprompt_coarse_walk_graph", "undirected"))[:3],
+                str(getattr(args, "peprompt_coarse_propagation", "coarse"))[:4],
+            ]
+        )
+    if "TypeNeighborhoodEdge" in selected:
+        hops = _normalize_nonnegative_hop_list(
+            getattr(args, "peprompt_type_hops", None),
+            PEPROMPT_DEFAULT_TYPE_HOPS,
+        )
+        hop_key = "-".join(str(hop) for hop in hops) if hops else "none"
+        edge_type_key = "eto" if _peprompt_type_edge_onehot_enabled(args) else "etx"
+        propagation_key = _peprompt_type_propagation_cache_key(args)
+        parts.extend(
+            [
+                f"th{hop_key}",
+                str(getattr(args, "peprompt_type_walk_graph", "undirected"))[:3],
+                edge_type_key,
+            ]
+        )
+        if propagation_key:
+            parts.append(propagation_key)
+    return "_".join(parts)
 
 
 def _summarize_edge_features(edge_feature_table: dict, feature_slices: dict[str, tuple[int, int]]) -> dict:
@@ -738,6 +897,388 @@ def _subset_peprompt_edge_feature_payload(payload: dict, args) -> dict:
     return out
 
 
+def _row_normalize_dense(matrix: np.ndarray) -> np.ndarray:
+    matrix = np.asarray(matrix, dtype=np.float32)
+    row_sum = matrix.sum(axis=1, keepdims=True)
+    return np.divide(
+        matrix,
+        row_sum + 1e-12,
+        out=np.zeros_like(matrix, dtype=np.float32),
+        where=row_sum > 0,
+    )
+
+
+def _build_sparse_walk_transition(
+    num_nodes: int,
+    src: torch.Tensor,
+    dst: torch.Tensor,
+    walk_graph: str,
+):
+    import scipy.sparse as sp
+
+    src_np = src.detach().cpu().numpy()
+    dst_np = dst.detach().cpu().numpy()
+    if walk_graph == "undirected":
+        row = np.concatenate([src_np, dst_np])
+        col = np.concatenate([dst_np, src_np])
+    elif walk_graph == "directed":
+        row = src_np
+        col = dst_np
+    else:
+        raise ValueError(f"Unsupported walk_graph={walk_graph}")
+
+    data = np.ones(row.shape[0], dtype=np.float32)
+    adj = sp.coo_matrix((data, (row, col)), shape=(num_nodes, num_nodes)).tocsr()
+    adj.setdiag(0)
+    adj.eliminate_zeros()
+
+    degree = np.asarray(adj.sum(axis=1)).reshape(-1).astype(np.float32)
+    inv_degree = np.zeros_like(degree, dtype=np.float32)
+    nonzero = degree > 0
+    inv_degree[nonzero] = 1.0 / degree[nonzero]
+    transition = sp.diags(inv_degree).dot(adj).tocsr()
+    return transition, degree
+
+
+def _prune_csr_topk(matrix, topk: int):
+    if topk <= 0:
+        return matrix.tocsr()
+
+    matrix = matrix.tocsr()
+    indptr = matrix.indptr
+    indices = matrix.indices
+    data = matrix.data
+    new_indptr = [0]
+    new_indices = []
+    new_data = []
+    for row_idx in range(matrix.shape[0]):
+        start = indptr[row_idx]
+        end = indptr[row_idx + 1]
+        row_indices = indices[start:end]
+        row_data = data[start:end]
+        if row_data.size > topk:
+            keep = np.argpartition(row_data, -topk)[-topk:]
+            row_indices = row_indices[keep]
+            row_data = row_data[keep]
+        order = np.argsort(row_indices)
+        new_indices.extend(row_indices[order].tolist())
+        new_data.extend(row_data[order].tolist())
+        new_indptr.append(len(new_indices))
+
+    import scipy.sparse as sp
+
+    pruned = sp.csr_matrix(
+        (
+            np.asarray(new_data, dtype=np.float32),
+            np.asarray(new_indices, dtype=np.int32),
+            np.asarray(new_indptr, dtype=np.int64),
+        ),
+        shape=matrix.shape,
+    )
+    pruned.eliminate_zeros()
+    return pruned
+
+
+def _compute_peprompt_coarse_highorder_payload(graph, args) -> dict:
+    start_time = time.perf_counter()
+    ntypes = list(graph.ntypes)
+    etypes = list(graph.canonical_etypes)
+
+    offsets = {}
+    total_nodes = 0
+    for ntype in ntypes:
+        offsets[ntype] = total_nodes
+        total_nodes += graph.num_nodes(ntype)
+
+    per_type = int(getattr(args, "peprompt_coarse_supernodes_per_type", 16))
+    coarse_dim = int(getattr(args, "peprompt_coarse_dim", 8))
+    hops = _normalize_nonnegative_hop_list(
+        getattr(args, "peprompt_coarse_hops", None),
+        PEPROMPT_DEFAULT_COARSE_HOPS,
+    )
+    max_nodes = int(getattr(args, "peprompt_coarse_max_nodes", 50000))
+    out_dim = coarse_dim * len(hops)
+    embeddings = torch.zeros((total_nodes, out_dim), dtype=torch.float32)
+    node_to_super = torch.empty(0, dtype=torch.long)
+
+    if total_nodes == 0 or per_type <= 0 or coarse_dim <= 0 or not hops:
+        return {
+            "coarse_highorder_embeddings": embeddings,
+            "coarse_highorder_dim": int(embeddings.size(1)),
+            "coarse_highorder_edge_dim": int(embeddings.size(1) * 3),
+            "coarse_node_to_super": node_to_super,
+            "coarse_supernode_count": 0,
+            "coarse_hops": hops,
+            "node_types": ntypes,
+            "edge_types": etypes,
+            "node_offsets": offsets,
+            "total_nodes": int(total_nodes),
+            "generation_seconds": float(time.perf_counter() - start_time),
+        }
+    if total_nodes > max_nodes:
+        warnings.warn(
+            f"Skip CoarseHighOrderPrompt for {total_nodes} nodes; exceeds max_nodes={max_nodes}."
+        )
+        return {
+            "coarse_highorder_embeddings": embeddings,
+            "coarse_highorder_dim": int(embeddings.size(1)),
+            "coarse_highorder_edge_dim": int(embeddings.size(1) * 3),
+            "coarse_node_to_super": node_to_super,
+            "coarse_supernode_count": 0,
+            "coarse_hops": hops,
+            "node_types": ntypes,
+            "edge_types": etypes,
+            "node_offsets": offsets,
+            "total_nodes": int(total_nodes),
+            "generation_seconds": float(time.perf_counter() - start_time),
+        }
+
+    try:
+        import scipy.sparse as sp
+
+        global_src, global_dst = _collect_global_edges(graph, offsets)
+        transition, degree = _build_sparse_walk_transition(
+            total_nodes,
+            global_src,
+            global_dst,
+            walk_graph=str(getattr(args, "peprompt_coarse_walk_graph", "undirected")),
+        )
+        del transition
+
+        node_to_super_np = np.full(total_nodes, -1, dtype=np.int64)
+        super_types = []
+        cursor = 0
+        for type_idx, ntype in enumerate(ntypes):
+            n = int(graph.num_nodes(ntype))
+            if n <= 0:
+                continue
+            count = min(n, max(1, per_type))
+            ids = np.arange(offsets[ntype], offsets[ntype] + n, dtype=np.int64)
+            order = np.lexsort((ids, degree[ids]))
+            groups = np.floor(np.arange(n, dtype=np.float64) * float(count) / float(n)).astype(np.int64)
+            groups = np.minimum(groups, count - 1)
+            node_to_super_np[ids[order]] = cursor + groups
+            super_types.extend([type_idx] * count)
+            cursor += count
+
+        super_count = int(cursor)
+        if super_count == 0 or np.any(node_to_super_np < 0):
+            raise ValueError("Failed to build complete coarse node assignment.")
+
+        coarse_src = node_to_super_np[global_src.detach().cpu().numpy()]
+        coarse_dst = node_to_super_np[global_dst.detach().cpu().numpy()]
+        data = np.ones(coarse_src.shape[0], dtype=np.float32)
+        coarse_adj = sp.coo_matrix((data, (coarse_src, coarse_dst)), shape=(super_count, super_count)).tocsr()
+        if str(getattr(args, "peprompt_coarse_walk_graph", "undirected")) == "undirected":
+            coarse_adj = (coarse_adj + coarse_adj.T).tocsr()
+        coarse_adj.setdiag(0)
+        coarse_adj.eliminate_zeros()
+        coarse_degree = np.asarray(coarse_adj.sum(axis=1)).reshape(-1).astype(np.float32)
+        inv = np.zeros_like(coarse_degree, dtype=np.float32)
+        nonzero = coarse_degree > 0
+        inv[nonzero] = 1.0 / coarse_degree[nonzero]
+        coarse_transition = sp.diags(inv).dot(coarse_adj).tocsr()
+
+        raw_dim = 2 + len(ntypes) + 2 * len(etypes)
+        profile = np.zeros((super_count, raw_dim), dtype=np.float32)
+        sizes = np.bincount(node_to_super_np, minlength=super_count).astype(np.float32)
+        degree_sum = np.bincount(node_to_super_np, weights=degree, minlength=super_count).astype(np.float32)
+        profile[:, 0] = np.log1p(sizes)
+        profile[:, 1] = np.log1p(degree_sum / np.maximum(sizes, 1.0))
+        for super_id, type_idx in enumerate(super_types):
+            profile[super_id, 2 + int(type_idx)] = 1.0
+
+        base = 2 + len(ntypes)
+        for etype_idx, etype in enumerate(etypes):
+            src_t, _, dst_t = etype
+            src, dst = graph.edges(etype=etype)
+            src_global = src.detach().cpu().numpy().astype(np.int64) + offsets[src_t]
+            dst_global = dst.detach().cpu().numpy().astype(np.int64) + offsets[dst_t]
+            np.add.at(profile[:, base + etype_idx], node_to_super_np[src_global], 1.0)
+            np.add.at(profile[:, base + len(etypes) + etype_idx], node_to_super_np[dst_global], 1.0)
+        profile[:, base:] = np.log1p(profile[:, base:])
+        profile = _row_normalize_dense(profile)
+
+        rng = np.random.default_rng(int(getattr(args, "peprompt_coarse_seed", 0)))
+        projection = rng.normal(
+            loc=0.0,
+            scale=1.0 / float(max(1, raw_dim)) ** 0.5,
+            size=(raw_dim, coarse_dim),
+        ).astype(np.float32)
+        current = np.tanh(profile @ projection).astype(np.float32)
+
+        blocks = []
+        max_hop = max(hops)
+        for hop in range(max_hop + 1):
+            if hop in hops:
+                blocks.append(current[node_to_super_np])
+            if hop < max_hop:
+                current = np.asarray(coarse_transition @ current, dtype=np.float32)
+
+        embeddings = torch.from_numpy(np.concatenate(blocks, axis=1).astype(np.float32))
+        node_to_super = torch.from_numpy(node_to_super_np.astype(np.int64))
+    except ImportError:
+        warnings.warn("scipy is not available; CoarseHighOrderPrompt falls back to zeros.")
+    except Exception as exc:
+        warnings.warn(f"CoarseHighOrderPrompt failed ({exc}); falling back to zeros.")
+
+    return {
+        "coarse_highorder_embeddings": embeddings,
+        "coarse_highorder_dim": int(embeddings.size(1)),
+        "coarse_highorder_edge_dim": int(embeddings.size(1) * 3),
+        "coarse_node_to_super": node_to_super,
+        "coarse_supernode_count": int(node_to_super.max().item() + 1) if node_to_super.numel() else 0,
+        "coarse_hops": hops,
+        "coarse_supernodes_per_type": int(per_type),
+        "coarse_dim": int(coarse_dim),
+        "node_types": ntypes,
+        "edge_types": etypes,
+        "node_offsets": offsets,
+        "total_nodes": int(total_nodes),
+        "generation_seconds": float(time.perf_counter() - start_time),
+    }
+
+
+def prepare_peprompt_coarse_highorder_payload(args) -> tuple[dict, Path, bool]:
+    cache_path = _peprompt_coarse_highorder_cache_path(args)
+    cache_path.parent.mkdir(parents=True, exist_ok=True)
+    cache_hit = cache_path.exists()
+    if cache_hit:
+        payload = _load_torch_payload(cache_path)
+    else:
+        graph, _ = _load_raw_heterograph(args.root, args.dataset, args.feats_type)
+        payload = _compute_peprompt_coarse_highorder_payload(graph, args)
+        torch.save(payload, cache_path)
+    payload = dict(payload)
+    payload["coarse_cache_path"] = str(cache_path)
+    return payload, cache_path, cache_hit
+
+
+def _compute_peprompt_type_neighborhood_payload(graph, args) -> dict:
+    start_time = time.perf_counter()
+    ntypes = list(graph.ntypes)
+    etypes = list(graph.canonical_etypes)
+
+    offsets = {}
+    total_nodes = 0
+    for ntype in ntypes:
+        offsets[ntype] = total_nodes
+        total_nodes += graph.num_nodes(ntype)
+
+    hops = _normalize_nonnegative_hop_list(
+        getattr(args, "peprompt_type_hops", None),
+        PEPROMPT_DEFAULT_TYPE_HOPS,
+    )
+    if not hops:
+        hops = [0]
+    propagation = _peprompt_type_propagation_mode(args)
+    ppr_alpha = float(getattr(args, "peprompt_type_ppr_alpha", 0.15))
+    heat_time = float(getattr(args, "peprompt_type_heat_time", 1.0))
+    if propagation == "ppr" and not (0.0 < ppr_alpha <= 1.0):
+        raise ValueError("--peprompt_type_ppr_alpha must be in (0, 1].")
+    if propagation == "heat" and heat_time < 0.0:
+        raise ValueError("--peprompt_type_heat_time must be >= 0.")
+
+    type_features = np.zeros((total_nodes, len(ntypes)), dtype=np.float32)
+    for type_idx, ntype in enumerate(ntypes):
+        start = int(offsets[ntype])
+        end = start + int(graph.num_nodes(ntype))
+        type_features[start:end, type_idx] = 1.0
+
+    global_src, global_dst = _collect_global_edges(graph, offsets)
+    try:
+        transition, _degree = _build_sparse_walk_transition(
+            total_nodes,
+            global_src,
+            global_dst,
+            walk_graph=str(getattr(args, "peprompt_type_walk_graph", "undirected")),
+        )
+
+        max_hop = max(hops)
+        current = type_features
+        blocks = []
+        cumulative = np.zeros_like(type_features, dtype=np.float32)
+        cumulative_weight = 0.0
+        heat_weight = 1.0
+        for hop in range(max_hop + 1):
+            if propagation == "power":
+                block = current
+            else:
+                if propagation == "ppr":
+                    weight = ppr_alpha * ((1.0 - ppr_alpha) ** hop)
+                else:
+                    if hop == 0:
+                        heat_weight = 1.0
+                    else:
+                        heat_weight *= heat_time / float(hop)
+                    weight = heat_weight
+                cumulative = cumulative + np.asarray(current * weight, dtype=np.float32)
+                cumulative_weight += float(weight)
+                block = cumulative / max(cumulative_weight, 1e-12)
+            if hop in hops:
+                blocks.append(np.asarray(block, dtype=np.float32))
+            if hop < max_hop:
+                current = np.asarray(transition @ current, dtype=np.float32)
+        node_embeddings = torch.from_numpy(np.concatenate(blocks, axis=1).astype(np.float32))
+    except ImportError:
+        warnings.warn("scipy is not available; TypeNeighborhoodEdge falls back to zeros.")
+        node_embeddings = torch.zeros((total_nodes, len(ntypes) * len(hops)), dtype=torch.float32)
+    except Exception as exc:
+        warnings.warn(f"TypeNeighborhoodEdge failed ({exc}); falling back to zeros.")
+        node_embeddings = torch.zeros((total_nodes, len(ntypes) * len(hops)), dtype=torch.float32)
+
+    type_edge_onehot = _peprompt_type_edge_onehot_enabled(args)
+    edge_dim = int(node_embeddings.size(1) * 4 + (len(etypes) if type_edge_onehot else 0))
+    return {
+        "type_neighborhood_embeddings": node_embeddings.float(),
+        "type_neighborhood_dim": int(node_embeddings.size(1)),
+        "type_neighborhood_edge_dim": edge_dim,
+        "type_hops": hops,
+        "type_walk_graph": str(getattr(args, "peprompt_type_walk_graph", "undirected")),
+        "type_propagation": propagation,
+        "type_ppr_alpha": ppr_alpha if propagation == "ppr" else None,
+        "type_heat_time": heat_time if propagation == "heat" else None,
+        "type_edge_onehot": type_edge_onehot,
+        "node_types": ntypes,
+        "edge_types": etypes,
+        "node_offsets": offsets,
+        "total_nodes": int(total_nodes),
+        "total_edges": int(global_src.numel()),
+        "generation_seconds": float(time.perf_counter() - start_time),
+    }
+
+
+def prepare_peprompt_type_neighborhood_payload(args) -> tuple[dict, Path, bool]:
+    cache_path = _peprompt_type_neighborhood_cache_path(args)
+    cache_path.parent.mkdir(parents=True, exist_ok=True)
+    cache_hit = cache_path.exists()
+    if cache_hit:
+        payload = _load_torch_payload(cache_path)
+    else:
+        graph, _ = _load_raw_heterograph(args.root, args.dataset, args.feats_type)
+        payload = _compute_peprompt_type_neighborhood_payload(graph, args)
+        torch.save(payload, cache_path)
+    payload = dict(payload)
+    type_edge_onehot = _peprompt_type_edge_onehot_enabled(args)
+    propagation = _peprompt_type_propagation_mode(args)
+    payload["type_edge_onehot"] = type_edge_onehot
+    payload["type_propagation"] = payload.get("type_propagation", propagation)
+    payload["type_ppr_alpha"] = payload.get(
+        "type_ppr_alpha",
+        float(getattr(args, "peprompt_type_ppr_alpha", 0.15)) if propagation == "ppr" else None,
+    )
+    payload["type_heat_time"] = payload.get(
+        "type_heat_time",
+        float(getattr(args, "peprompt_type_heat_time", 1.0)) if propagation == "heat" else None,
+    )
+    payload["type_neighborhood_edge_dim"] = int(
+        int(payload.get("type_neighborhood_dim", 0)) * 4
+        + (len(payload.get("edge_types", [])) if type_edge_onehot else 0)
+    )
+    payload["type_cache_path"] = str(cache_path)
+    return payload, cache_path, cache_hit
+
+
 def _compute_peprompt_spectral_payload(graph, args) -> dict:
     start_time = time.perf_counter()
     ntypes = list(graph.ntypes)
@@ -771,13 +1312,52 @@ def _compute_peprompt_spectral_payload(graph, args) -> dict:
     }
 
 
-def _build_spectral_edge_feature_payload(graph, spectral_payload: dict) -> dict:
+def _build_spectral_edge_feature_payload(
+    graph,
+    spectral_payload: dict | None,
+    coarse_highorder_payload: dict | None = None,
+    type_neighborhood_payload: dict | None = None,
+    args=None,
+) -> dict:
     ntypes = list(graph.ntypes)
     etypes = list(graph.canonical_etypes)
-    spectral = spectral_payload["spectral_embeddings"]
-    offsets = spectral_payload["node_offsets"]
-    spectral_dim = int(spectral_payload["spectral_dim"])
-    feature_slices = _feature_slices(len(ntypes), len(etypes), spectral_dim)
+    selected_names = get_selected_peprompt_edge_feature_names(args) if args is not None else list(PEPROMPT_DEFAULT_EDGE_FEATURES)
+    base_payload = spectral_payload or coarse_highorder_payload or type_neighborhood_payload
+    if base_payload is None:
+        raise ValueError("PEPrompt edge feature payload requires at least one selected feature payload.")
+    offsets = base_payload["node_offsets"]
+    spectral = spectral_payload["spectral_embeddings"] if spectral_payload is not None else None
+    spectral_dim = int(spectral_payload["spectral_dim"]) if spectral_payload is not None and "SpectralEmbeddingDiff" in selected_names else 0
+    coarse_highorder = (
+        coarse_highorder_payload["coarse_highorder_embeddings"]
+        if coarse_highorder_payload is not None
+        else None
+    )
+    coarse_highorder_edge_dim = (
+        int(coarse_highorder_payload.get("coarse_highorder_edge_dim", 0))
+        if coarse_highorder_payload is not None and "CoarseHighOrderPrompt" in selected_names
+        else 0
+    )
+    type_neighborhood = (
+        type_neighborhood_payload["type_neighborhood_embeddings"]
+        if type_neighborhood_payload is not None
+        else None
+    )
+    type_neighborhood_edge_dim = (
+        int(type_neighborhood_payload.get("type_neighborhood_edge_dim", 0))
+        if type_neighborhood_payload is not None and "TypeNeighborhoodEdge" in selected_names
+        else 0
+    )
+    type_edge_onehot = bool((type_neighborhood_payload or {}).get("type_edge_onehot", True))
+    edge_type_to_idx = {etype: idx for idx, etype in enumerate(etypes)}
+    feature_slices = _feature_slices(
+        len(ntypes),
+        len(etypes),
+        spectral_dim,
+        0,
+        coarse_highorder_edge_dim,
+        type_neighborhood_edge_dim,
+    )
     edge_feature_table = {}
 
     for src_t, rel_t, dst_t in etypes:
@@ -787,8 +1367,35 @@ def _build_spectral_edge_feature_payload(graph, spectral_payload: dict) -> dict:
         dst = dst.detach().cpu().long()
         src_global = src + offsets[src_t]
         dst_global = dst + offsets[dst_t]
-        spectral_diff = spectral[src_global] - spectral[dst_global]
-        edge_feature_table[etype] = spectral_diff.float()
+        parts = []
+        if "SpectralEmbeddingDiff" in selected_names:
+            if spectral is None:
+                raise ValueError("SpectralEmbeddingDiff requested but spectral payload is missing.")
+            parts.append((spectral[src_global] - spectral[dst_global]).float())
+        if "CoarseHighOrderPrompt" in selected_names:
+            if coarse_highorder is None:
+                raise ValueError("CoarseHighOrderPrompt requested but coarse high-order payload is missing.")
+            src_coarse = coarse_highorder[src_global].float()
+            dst_coarse = coarse_highorder[dst_global].float()
+            diff = src_coarse - dst_coarse
+            parts.append(torch.cat([diff, diff.abs(), src_coarse * dst_coarse], dim=1).float())
+        if "TypeNeighborhoodEdge" in selected_names:
+            if type_neighborhood is None:
+                raise ValueError("TypeNeighborhoodEdge requested but type-neighborhood payload is missing.")
+            src_type = type_neighborhood[src_global].float()
+            dst_type = type_neighborhood[dst_global].float()
+            diff = src_type - dst_type
+            type_parts = [src_type, dst_type, diff, diff.abs()]
+            if type_edge_onehot:
+                edge_type = torch.zeros((src.numel(), len(etypes)), dtype=torch.float32)
+                if src.numel() > 0:
+                    edge_type[:, edge_type_to_idx[etype]] = 1.0
+                type_parts.append(edge_type)
+            parts.append(torch.cat(type_parts, dim=1).float())
+        if parts:
+            edge_feature_table[etype] = torch.cat(parts, dim=1).float().contiguous()
+        else:
+            edge_feature_table[etype] = torch.zeros((src.numel(), 0), dtype=torch.float32)
 
     total_edges = int(sum(value.size(0) for value in edge_feature_table.values()))
     stats = _summarize_edge_features(edge_feature_table, feature_slices)
@@ -799,10 +1406,27 @@ def _build_spectral_edge_feature_payload(graph, spectral_payload: dict) -> dict:
         "feature_stats": stats,
         "node_types": ntypes,
         "edge_types": etypes,
-        "total_nodes": int(spectral_payload["total_nodes"]),
+        "total_nodes": int(base_payload["total_nodes"]),
         "total_edges": total_edges,
-        "generation_seconds": float(spectral_payload["generation_seconds"]),
-        "spectral_cache_path": spectral_payload.get("spectral_cache_path"),
+        "generation_seconds": float((spectral_payload or {}).get("generation_seconds", 0.0))
+        + float((coarse_highorder_payload or {}).get("generation_seconds", 0.0)),
+        "spectral_dim": int((spectral_payload or {}).get("spectral_dim", 0) or 0),
+        "spectral_cache_path": (spectral_payload or {}).get("spectral_cache_path"),
+        "coarse_cache_path": (coarse_highorder_payload or {}).get("coarse_cache_path"),
+        "coarse_supernode_count": (coarse_highorder_payload or {}).get("coarse_supernode_count"),
+        "coarse_supernodes_per_type": (coarse_highorder_payload or {}).get("coarse_supernodes_per_type"),
+        "coarse_hops": (coarse_highorder_payload or {}).get("coarse_hops"),
+        "coarse_dim": (coarse_highorder_payload or {}).get("coarse_dim"),
+        "coarse_highorder_dim": (coarse_highorder_payload or {}).get("coarse_highorder_dim"),
+        "type_cache_path": (type_neighborhood_payload or {}).get("type_cache_path"),
+        "type_hops": (type_neighborhood_payload or {}).get("type_hops"),
+        "type_walk_graph": (type_neighborhood_payload or {}).get("type_walk_graph"),
+        "type_propagation": (type_neighborhood_payload or {}).get("type_propagation"),
+        "type_ppr_alpha": (type_neighborhood_payload or {}).get("type_ppr_alpha"),
+        "type_heat_time": (type_neighborhood_payload or {}).get("type_heat_time"),
+        "type_edge_onehot": (type_neighborhood_payload or {}).get("type_edge_onehot"),
+        "type_neighborhood_dim": (type_neighborhood_payload or {}).get("type_neighborhood_dim"),
+        "type_neighborhood_edge_dim": (type_neighborhood_payload or {}).get("type_neighborhood_edge_dim"),
     }
 
 
@@ -825,6 +1449,23 @@ def _write_edge_feature_stats_json(cache_path: Path, payload: dict):
         "total_nodes": payload["total_nodes"],
         "total_edges": payload["total_edges"],
         "generation_seconds": payload["generation_seconds"],
+        "spectral_dim": payload.get("spectral_dim"),
+        "spectral_cache_path": payload.get("spectral_cache_path"),
+        "coarse_cache_path": payload.get("coarse_cache_path"),
+        "coarse_supernode_count": payload.get("coarse_supernode_count"),
+        "coarse_supernodes_per_type": payload.get("coarse_supernodes_per_type"),
+        "coarse_hops": payload.get("coarse_hops"),
+        "coarse_dim": payload.get("coarse_dim"),
+        "coarse_highorder_dim": payload.get("coarse_highorder_dim"),
+        "type_cache_path": payload.get("type_cache_path"),
+        "type_hops": payload.get("type_hops"),
+        "type_walk_graph": payload.get("type_walk_graph"),
+        "type_propagation": payload.get("type_propagation"),
+        "type_ppr_alpha": payload.get("type_ppr_alpha"),
+        "type_heat_time": payload.get("type_heat_time"),
+        "type_edge_onehot": payload.get("type_edge_onehot"),
+        "type_neighborhood_dim": payload.get("type_neighborhood_dim"),
+        "type_neighborhood_edge_dim": payload.get("type_neighborhood_edge_dim"),
     }
     stats_path.write_text(json.dumps(stats_payload, indent=2, ensure_ascii=False), encoding="utf-8")
 
@@ -883,10 +1524,35 @@ def prepare_peprompt_spectral_payload(args) -> tuple[dict, Path, bool]:
 
 
 def prepare_peprompt_edge_feature_table(args, wandb_run=None) -> dict:
-    """把节点级谱嵌入转换为边级 PE 差值特征表，供 PEPrompt 注入使用。"""
+    """把全图结构编码转换为边级 PE 特征表，供 PEPrompt 注入使用。"""
     graph, _ = _load_raw_heterograph(args.root, args.dataset, args.feats_type)
-    spectral_payload, cache_path, cache_hit = prepare_peprompt_spectral_payload(args)
-    payload = _build_spectral_edge_feature_payload(graph, spectral_payload)
+    selected_names = get_selected_peprompt_edge_feature_names(args)
+
+    spectral_payload = None
+    coarse_highorder_payload = None
+    type_neighborhood_payload = None
+    cache_path = _peprompt_spectral_cache_path(args)
+    cache_hit = False
+    if "SpectralEmbeddingDiff" in selected_names:
+        spectral_payload, cache_path, cache_hit = prepare_peprompt_spectral_payload(args)
+    if "CoarseHighOrderPrompt" in selected_names:
+        coarse_highorder_payload, coarse_cache_path, coarse_cache_hit = prepare_peprompt_coarse_highorder_payload(args)
+        if spectral_payload is None:
+            cache_path = coarse_cache_path
+            cache_hit = coarse_cache_hit
+    if "TypeNeighborhoodEdge" in selected_names:
+        type_neighborhood_payload, type_cache_path, type_cache_hit = prepare_peprompt_type_neighborhood_payload(args)
+        if spectral_payload is None and coarse_highorder_payload is None:
+            cache_path = type_cache_path
+            cache_hit = type_cache_hit
+
+    payload = _build_spectral_edge_feature_payload(
+        graph,
+        spectral_payload=spectral_payload,
+        coarse_highorder_payload=coarse_highorder_payload,
+        type_neighborhood_payload=type_neighborhood_payload,
+        args=args,
+    )
     payload = _subset_peprompt_edge_feature_payload(payload, args)
     if getattr(args, "peprompt_write_edge_feature_stats", True):
         _write_edge_feature_stats_json(cache_path, payload)
@@ -959,62 +1625,83 @@ def load_peprompt_offline_legacy_splits(args):
     )
     setattr(args, "peprompt_edge_feature_dim", int(payload.get("peprompt_edge_feature_dim", 0)))
     setattr(args, "peprompt_metapath_count", int(payload.get("metapath_count") or 0))
-    setattr(args, "peprompt_graph_summary_dim", int(payload.get("peprompt_graph_summary_dim", 0) or 0))
-    setattr(args, "peprompt_metapath_pos_dim", int(payload.get("peprompt_metapath_pos_dim", 0) or 0))
-    setattr(args, "peprompt_metapath_pos_feature_name", str(payload.get("peprompt_metapath_pos_feature_name", "peprompt_metapath_pos_feat")))
-    targetnode = payload["targetnode"]
-    dropped_ctx_by_target = payload.get("dropped_metapath_context_by_target")
-    dropped_onehop_ctx_by_target = payload.get("dropped_onehop_context_by_target")
-    # Lazy import to break circular dependency with precompute_peprompt_cache.
-    from scripts.precompute_peprompt_cache import _restore_dropped_ctx_in_sample
-
-    for sample_list in (payload["train"], payload["val"], payload["test"]):
-        for sample in sample_list:
-            _restore_dropped_ctx_in_sample(
-                sample,
-                targetnode,
-                dropped_ctx_by_target,
-                dropped_onehop_ctx_by_target,
+    actual_features = payload.get("peprompt_edge_feature_names")
+    if actual_features is not None:
+        expected_features = get_selected_peprompt_edge_feature_names(args)
+        if list(actual_features) != list(expected_features):
+            warnings.warn(
+                "Loaded PEPrompt offline cache was built with edge features "
+                f"{list(actual_features)}, but current args request {expected_features}. "
+                "Regenerate the cache or set --peprompt_edge_feature_names to match it."
             )
+    targetnode = payload["targetnode"]
     return payload["train"], payload["val"], payload["test"], targetnode
 
 
 def _peprompt_cache_subgraph_type(args) -> str:
     subgraph_type = str(getattr(args, "subgraph_type", "khop"))
     if subgraph_type not in {"metapath_topk", "metapath_topk_path", "metapath_topk_adapt", "metapath_topk_path_adapt"}:
-        return subgraph_type
-    metric = str(getattr(args, "metapath_rank_metric", "count"))
-    if subgraph_type in {"metapath_topk_adapt", "metapath_topk_path_adapt"}:
-        min_topk = int(getattr(args, "metapath_min_topk", 1))
-        max_topk = int(getattr(args, "metapath_max_topk", getattr(args, "metapath_topk", 5)))
-        rel_threshold = float(getattr(args, "metapath_rel_threshold", 0.5))
-        suffix = (
-            f"m{int(getattr(args, 'metapath_max_hop', 3))}_"
-            f"k{min_topk}-{max_topk}_"
-            f"a{_format_float_for_key(rel_threshold)}_"
-            f"{metric}"
-        )
+        base_key = subgraph_type
     else:
-        suffix = (
-            f"m{int(getattr(args, 'metapath_max_hop', 3))}_"
-            f"k{int(getattr(args, 'metapath_topk', 5))}_"
-            f"{metric}"
+        metric = str(getattr(args, "metapath_rank_metric", "count"))
+        if subgraph_type in {"metapath_topk_adapt", "metapath_topk_path_adapt"}:
+            min_topk = int(getattr(args, "metapath_min_topk", 1))
+            max_topk = int(getattr(args, "metapath_max_topk", getattr(args, "metapath_topk", 5)))
+            rel_threshold = float(getattr(args, "metapath_rel_threshold", 0.5))
+            suffix = (
+                f"m{int(getattr(args, 'metapath_max_hop', 3))}_"
+                f"k{min_topk}-{max_topk}_"
+                f"a{_format_float_for_key(rel_threshold)}_"
+                f"{metric}"
+            )
+        else:
+            suffix = (
+                f"m{int(getattr(args, 'metapath_max_hop', 3))}_"
+                f"k{int(getattr(args, 'metapath_topk', 5))}_"
+                f"{metric}"
+            )
+        if bool(getattr(args, "metapath_keep_self", False)):
+            suffix += "_self"
+        endpoint_mode = str(getattr(args, "metapath_endpoint_mode", "all"))
+        support_mode = _resolve_metapath_support_mode_for_cache(
+            subgraph_type=subgraph_type,
+            endpoint_mode=endpoint_mode,
+            support_mode=str(getattr(args, "metapath_support_mode", "auto")),
         )
-    if bool(getattr(args, "metapath_keep_self", False)):
-        suffix += "_self"
-    fusion_mode = str(getattr(args, "peprompt_fusion_mode", "none"))
-    ctx_dim = int(getattr(args, "peprompt_ctx_dim", 0) or 0)
-    if fusion_mode == "hop_decoupled" and ctx_dim > 0:
-        suffix += f"_mpvirt2_d{ctx_dim}"
-    elif fusion_mode == "onehop_ctx" and ctx_dim > 0:
-        suffix += f"_onehop_d{ctx_dim}"
-    elif fusion_mode == "type_ctx" and ctx_dim > 0:
-        suffix += f"_typectx_d{ctx_dim}"
-    elif fusion_mode in {"graph_summary", "graph_summary_basis"}:
-        suffix += "_graphsum"
-    elif fusion_mode == "metapath_pos" or str(getattr(args, "peprompt_mp_reg_mode", "none")) != "none":
-        suffix += "_mppos"
-    return f"{subgraph_type}_{suffix}"
+        support_topk = int(getattr(args, "metapath_support_topk", 0) or 0)
+        support_rank_mode = str(getattr(args, "metapath_support_rank_mode", "score"))
+        random_seed = int(getattr(args, "metapath_random_seed", 0) or 0)
+        if endpoint_mode != "all":
+            suffix += f"_{endpoint_mode}"
+            suffix += f"_support{support_mode}"
+        elif str(getattr(args, "metapath_support_mode", "auto")) != "auto":
+            suffix += f"_support{support_mode}"
+        if support_topk > 0:
+            suffix += f"_sk{support_topk}"
+        if support_rank_mode != "score":
+            suffix += f"_support{support_rank_mode}"
+        if metric == "random" or support_rank_mode == "random":
+            suffix += f"_rseed{random_seed}"
+        base_key = f"{subgraph_type}_{suffix}"
+
+    selected = get_selected_peprompt_edge_feature_names(args)
+    include_feature_key = getattr(args, "peprompt_cache_include_feature_key", None)
+    if include_feature_key is None:
+        include_feature_key = selected != PEPROMPT_DEFAULT_EDGE_FEATURES
+    if include_feature_key:
+        return f"{base_key}_{_peprompt_edge_feature_cache_key(args)}"
+    return base_key
+
+
+def _resolve_metapath_support_mode_for_cache(subgraph_type: str, endpoint_mode: str, support_mode: str) -> str:
+    support_mode = str(support_mode)
+    if support_mode != "auto":
+        return support_mode
+    if str(endpoint_mode) == "target_closed":
+        return "count"
+    if str(subgraph_type) in {"metapath_topk_path", "metapath_topk_path_adapt"}:
+        return "one_path"
+    return "none"
 
 
 def _hgprompt_split_cache_subgraph_type(args) -> str:
@@ -1094,6 +1781,7 @@ def _make_legacy_args(cli_args, method: str, ckpt_path: str, split_seed: int, re
         peprompt_edge_feature_names=cli_args.peprompt_edge_feature_names,
         peprompt_edge_feature_name=cli_args.peprompt_edge_feature_name,
         peprompt_spectral_cache_dir=cli_args.peprompt_spectral_cache_dir,
+        peprompt_coarse_cache_dir=cli_args.peprompt_coarse_cache_dir,
         peprompt_offline_cache_dir=cli_args.peprompt_offline_cache_dir,
         subgraph_type=cli_args.subgraph_type,
         metapath_max_hop=cli_args.metapath_max_hop,
@@ -1103,21 +1791,31 @@ def _make_legacy_args(cli_args, method: str, ckpt_path: str, split_seed: int, re
         metapath_rel_threshold=cli_args.metapath_rel_threshold,
         metapath_rank_metric=cli_args.metapath_rank_metric,
         metapath_keep_self=cli_args.metapath_keep_self,
+        metapath_endpoint_mode=cli_args.metapath_endpoint_mode,
+        metapath_support_mode=cli_args.metapath_support_mode,
+        metapath_support_topk=cli_args.metapath_support_topk,
+        metapath_support_rank_mode=cli_args.metapath_support_rank_mode,
+        metapath_random_seed=cli_args.metapath_random_seed,
         peprompt_write_edge_feature_stats=cli_args.peprompt_write_edge_feature_stats,
         peprompt_spectral_dim=cli_args.peprompt_spectral_dim,
         peprompt_spectral_max_nodes=cli_args.peprompt_spectral_max_nodes,
+        peprompt_coarse_supernodes_per_type=cli_args.peprompt_coarse_supernodes_per_type,
+        peprompt_coarse_dim=cli_args.peprompt_coarse_dim,
+        peprompt_coarse_hops=cli_args.peprompt_coarse_hops,
+        peprompt_coarse_max_nodes=cli_args.peprompt_coarse_max_nodes,
+        peprompt_coarse_walk_graph=cli_args.peprompt_coarse_walk_graph,
+        peprompt_coarse_propagation=cli_args.peprompt_coarse_propagation,
+        peprompt_coarse_seed=cli_args.peprompt_coarse_seed,
+        peprompt_type_cache_dir=cli_args.peprompt_type_cache_dir,
+        peprompt_type_hops=cli_args.peprompt_type_hops,
+        peprompt_type_walk_graph=cli_args.peprompt_type_walk_graph,
+        peprompt_type_propagation=cli_args.peprompt_type_propagation,
+        peprompt_type_ppr_alpha=cli_args.peprompt_type_ppr_alpha,
+        peprompt_type_heat_time=cli_args.peprompt_type_heat_time,
+        peprompt_type_edge_onehot=cli_args.peprompt_type_edge_onehot,
+        peprompt_cache_include_feature_key=cli_args.peprompt_cache_include_feature_key,
         peprompt_edge_prompt_hidden=cli_args.peprompt_edge_prompt_hidden,
-        peprompt_fusion_mode=cli_args.peprompt_fusion_mode,
-        peprompt_ctx_dim=cli_args.peprompt_ctx_dim,
-        peprompt_generator_hidden=cli_args.peprompt_generator_hidden,
-        peprompt_metapath_embed_dim=cli_args.peprompt_metapath_embed_dim,
-        peprompt_graph_summary_dim=cli_args.peprompt_graph_summary_dim,
-        peprompt_metapath_pos_dim=cli_args.peprompt_metapath_pos_dim,
-        peprompt_basis_count=cli_args.peprompt_basis_count,
-        peprompt_mp_reg_mode=cli_args.peprompt_mp_reg_mode,
-        peprompt_mp_reg_weight=cli_args.peprompt_mp_reg_weight,
         peprompt_edge_dropout=cli_args.peprompt_edge_dropout,
-        peprompt_onehop_center_fusion=cli_args.peprompt_onehop_center_fusion,
         embed_batch_size=cli_args.embed_batch_size,
         head_hidden=cli_args.head_hidden,
         head_dropout=cli_args.head_dropout,
@@ -1556,13 +2254,18 @@ def build_parser():
         help="Which pretraining family the PEPrompt checkpoint comes from. HGPrompt GCN ckpts are mapped into the HGMP-GCN wrapper.",
     )
     ap.add_argument("--peprompt_edge_feature_dim", type=int, default=0)  # 实际挂到边上的特征维度，运行时会被自动更新
-    ap.add_argument("--peprompt_edge_feature_names", nargs="*", default=None, choices=PEPROMPT_EDGE_FEATURES)  # 启用的边特征名称，当前仅支持谱差值
+    ap.add_argument("--peprompt_edge_feature_names", nargs="*", default=None, choices=PEPROMPT_EDGE_FEATURES)  # 启用的边特征名称，默认保持 SpectralEmbeddingDiff
     ap.add_argument("--peprompt_edge_feature_name", type=str, default=PEPROMPT_EDGE_FEATURE_NAME)  # DGL 图中保存 PEPrompt 边特征的字段名
     ap.add_argument(
         "--peprompt_spectral_cache_dir",
         type=Path,
         default=ROOT / "artifacts" / "cache" / "peprompt_spectral_embeddings",
     )  # Laplacian PE 缓存目录
+    ap.add_argument(
+        "--peprompt_coarse_cache_dir",
+        type=Path,
+        default=ROOT / "artifacts" / "cache" / "peprompt_coarse_highorder",
+    )  # 粗粒度 supernode 高阶图 prompt 缓存目录
     ap.add_argument(
         "--peprompt_offline_cache_dir",
         type=Path,
@@ -1579,11 +2282,35 @@ def build_parser():
     ap.add_argument("--metapath_min_topk", type=int, default=1)  # 自适应 top-k 的每条元路径最少保留终点数
     ap.add_argument("--metapath_max_topk", type=int, default=5)  # 自适应 top-k 的每条元路径最多保留终点数
     ap.add_argument("--metapath_rel_threshold", type=float, default=0.5)  # 自适应 top-k 相对最高分阈值
-    ap.add_argument("--metapath_rank_metric", type=str, default="count", choices=["count", "degree_norm", "count_idf"])  # top-k 排序指标
+    ap.add_argument("--metapath_rank_metric", type=str, default="count", choices=["count", "degree_norm", "count_idf", "random"])  # top-k 排序指标
     ap.add_argument("--metapath_keep_self", action="store_true")  # 是否允许同类型元路径把目标节点自身纳入 top-k
+    ap.add_argument("--metapath_endpoint_mode", type=str, default="all", choices=["all", "target_closed"])  # endpoint 类型策略
+    ap.add_argument("--metapath_support_mode", type=str, default="auto", choices=["auto", "none", "one_path", "count"])  # 中间 support 节点恢复策略
+    ap.add_argument("--metapath_support_topk", type=int, default=0)  # count support 每个 metapath position 的保留上限，0 表示不额外限制
+    ap.add_argument("--metapath_support_rank_mode", type=str, default="score", choices=["score", "random"])  # support 节点排序/采样方式
+    ap.add_argument("--metapath_random_seed", type=int, default=0)  # endpoint/support 随机消融的可复现随机种子
     ap.add_argument("--peprompt_write_edge_feature_stats", action=argparse.BooleanOptionalAction, default=True)  # 是否写出边特征统计信息
     ap.add_argument("--peprompt_spectral_dim", type=int, default=16)  # Laplacian PE 维度
     ap.add_argument("--peprompt_spectral_max_nodes", type=int, default=50000)  # 计算谱分解允许的最大节点数
+    ap.add_argument("--peprompt_coarse_supernodes_per_type", type=int, default=16)  # 每种节点类型粗化出的 supernode 数
+    ap.add_argument("--peprompt_coarse_dim", type=int, default=8)  # 每个 coarse hop 输出的结构 profile 投影维度
+    ap.add_argument("--peprompt_coarse_hops", nargs="*", type=int, default=list(PEPROMPT_DEFAULT_COARSE_HOPS))  # 使用的粗图传播 hop，允许 0
+    ap.add_argument("--peprompt_coarse_max_nodes", type=int, default=50000)  # 计算粗化图允许的最大原始节点数
+    ap.add_argument("--peprompt_coarse_walk_graph", type=str, default="undirected", choices=["undirected", "directed"])  # 构造粗图时是否双向化原始拓扑
+    ap.add_argument("--peprompt_coarse_propagation", type=str, default="coarse", choices=["coarse"])  # 粗图传播模式
+    ap.add_argument("--peprompt_coarse_seed", type=int, default=0)  # coarse profile 固定随机投影种子
+    ap.add_argument(
+        "--peprompt_type_cache_dir",
+        type=Path,
+        default=ROOT / "artifacts" / "cache" / "peprompt_type_neighborhood",
+    )  # 类型邻域编码缓存目录
+    ap.add_argument("--peprompt_type_hops", nargs="*", type=int, default=list(PEPROMPT_DEFAULT_TYPE_HOPS))  # 类型传播 hop，允许 0
+    ap.add_argument("--peprompt_type_walk_graph", type=str, default="undirected", choices=["undirected", "directed"])  # 类型传播使用有向或无向拓扑
+    ap.add_argument("--peprompt_type_propagation", type=str, default="power", choices=["power", "ppr", "heat"])  # TypeNeighborhoodEdge 类型传播算子
+    ap.add_argument("--peprompt_type_ppr_alpha", type=float, default=0.15)  # PPR/RWR 类型扩散的重启系数
+    ap.add_argument("--peprompt_type_heat_time", type=float, default=1.0)  # heat kernel 类型扩散时间
+    ap.add_argument("--peprompt_type_edge_onehot", action=argparse.BooleanOptionalAction, default=True)  # TypeNeighborhoodEdge 是否拼接边类型 one-hot
+    ap.add_argument("--peprompt_cache_include_feature_key", action=argparse.BooleanOptionalAction, default=None)  # 离线缓存目录名是否包含 PE 配置；默认仅非旧谱特征包含
     ap.add_argument("--peprompt_edge_prompt_hidden", type=int, default=128)  # 将 PE 边特征映射为提示向量的 MLP 隐层维度
     ap.add_argument(
         "--peprompt_head_type",
@@ -1605,77 +2332,6 @@ def build_parser():
         default="full",
         choices=["full", "early_stop_only"],
         help="PEPrompt downstream eval mode. early_stop_only skips per-epoch train/val/test F1 and evaluates F1 once on the best loss checkpoint.",
-    )
-
-    # ---- hop-decomposed compensation (Module 1+2) ----
-    ap.add_argument(
-        "--peprompt_fusion_mode",
-        type=str,
-        default="none",
-        choices=["none", "edge_type", "metapath_pos", "hop_decoupled", "onehop_ctx", "type_ctx", "graph_summary", "graph_summary_basis"],
-        help="Edge prompt fusion mode: 'none' = spectral PE only; "
-             "'edge_type' = spectral PE plus canonical edge-type embedding; "
-             "'metapath_pos' = spectral PE plus per-edge metapath-position support; "
-             "'hop_decoupled' = PE + dropped-neighbour context + h_src + h_dst; "
-             "'onehop_ctx' = 1-hop type-pooled dropped context on 1-hop edges; "
-             "'type_ctx' = one pooled dropped-context per dst node type per subgraph; "
-             "'graph_summary' = shared graph-level metapath summary for all edges in a subgraph; "
-             "'graph_summary_basis' = use graph summary as a selector over prompt bases.",
-    )
-    ap.add_argument(
-        "--peprompt_ctx_dim",
-        type=int,
-        default=0,
-        help="Dimension of the dropped-neighbour context vector (must match node feature dim). "
-             "Used when --peprompt_fusion_mode is hop_decoupled, onehop_ctx, or type_ctx.",
-    )
-    ap.add_argument(
-        "--peprompt_graph_summary_dim",
-        type=int,
-        default=0,
-        help="Graph-level metapath summary dimension; populated from offline cache when --peprompt_fusion_mode is graph_summary or graph_summary_basis.",
-    )
-    ap.add_argument(
-        "--peprompt_metapath_pos_dim",
-        type=int,
-        default=0,
-        help="Per-edge metapath-position support feature dimension; populated from offline cache when --peprompt_fusion_mode=metapath_pos.",
-    )
-    ap.add_argument(
-        "--peprompt_basis_count",
-        type=int,
-        default=4,
-        help="Number of global prompt bases used by basis-style prompt modes such as graph_summary_basis.",
-    )
-    ap.add_argument(
-        "--peprompt_mp_reg_mode",
-        type=str,
-        default="none",
-        choices=["none", "consistency", "predict"],
-        help="Metapath regularization mode applied to edge prompts without changing message generation.",
-    )
-    ap.add_argument(
-        "--peprompt_mp_reg_weight",
-        type=float,
-        default=0.0,
-        help="Weight for metapath prompt regularization loss.",
-    )
-    ap.add_argument(
-        "--peprompt_generator_hidden",
-        type=int,
-        default=128,
-        help="Hidden dimension of the fusion MLP when --peprompt_fusion_mode=hop_decoupled.",
-    )
-    ap.add_argument(
-        "--peprompt_metapath_embed_dim",
-        type=int,
-        default=16,
-        help="Metapath-id embedding dimension used by hop_decoupled weighted-metapath context.",
-    )
-    ap.add_argument(
-        "--peprompt_onehop_center_fusion",
-        action="store_true",
-        help="When --peprompt_fusion_mode=onehop_ctx, also fuse the pooled 1-hop dropped context into the centre node.",
     )
 
     # HGPrompt 专属设置：仅在 methods 包含 hgprompt 时使用。
