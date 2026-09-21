@@ -1777,6 +1777,8 @@ def _make_legacy_args(cli_args, method: str, ckpt_path: str, split_seed: int, re
         relation_prompt_dropout=cli_args.relation_prompt_dropout,
         relation_prompt_aggr=cli_args.relation_prompt_aggr,
         relation_prompt_use_ln=cli_args.relation_prompt_use_ln,
+        relation_prompt_constraint=cli_args.relation_prompt_constraint,
+        relation_prompt_constraint_scale=cli_args.relation_prompt_constraint_scale,
         peprompt_edge_feature_dim=cli_args.peprompt_edge_feature_dim,
         peprompt_edge_feature_names=cli_args.peprompt_edge_feature_names,
         peprompt_edge_feature_name=cli_args.peprompt_edge_feature_name,
@@ -2244,6 +2246,13 @@ def build_parser():
     ap.add_argument("--relation_prompt_dropout", type=float, default=0.1)  # 关系提示层输出 dropout
     ap.add_argument("--relation_prompt_aggr", type=str, default="mean", choices=["mean", "sum"])  # 入边消息聚合方式
     ap.add_argument("--relation_prompt_use_ln", action="store_true")  # 是否在关系提示输出后使用 LayerNorm
+    ap.add_argument(
+        "--relation_prompt_constraint",
+        type=str,
+        default="none",
+        choices=["none", "identity_tanh", "positive_sigmoid", "identity_l2norm"],
+    )  # 对 edge_prompt_mlp 输出做约束；默认保持旧实现
+    ap.add_argument("--relation_prompt_constraint_scale", type=float, default=0.5)  # prompt 输出约束强度
 
     # PEPrompt 专属设置：只保留基于 Laplacian PE 的边提示参数。
     ap.add_argument(

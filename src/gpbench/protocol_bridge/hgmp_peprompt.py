@@ -7,6 +7,8 @@ from typing import Dict, Iterable, Tuple
 import dgl
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
+from torch.utils.checkpoint import checkpoint
 
 from protocols.hgmp.pretrain_legacy import (
     GraphCL,
@@ -32,6 +34,9 @@ class PEPromptRelationConfig:
     edge_feature_dim: int = 0  # 输入边特征维度，这里对应 Laplacian PE 差值维度
     edge_feature_name: str = "peprompt_edge_feat"  # 图中边特征保存时使用的字段名
     edge_prompt_hidden: int = 128  # 将边 PE 映射到提示向量时，中间 MLP 的隐藏层维度
+    edge_chunk_size: int = 0  # 0 表示一次性处理；正数表示按边分块，公式不变，仅降低峰值显存
+    prompt_constraint: str = "none"  # none/identity_tanh/positive_sigmoid/identity_l2norm
+    prompt_constraint_scale: float = 0.5  # 约束强度；mul 下 identity 类约束围绕 1 做有限扰动
 
 
 class PEPromptRelation(nn.Module):
@@ -49,12 +54,17 @@ class PEPromptRelation(nn.Module):
         edge_feature_dim: int = 0,
         edge_feature_name: str = "peprompt_edge_feat",
         edge_prompt_hidden: int = 128,
+        edge_chunk_size: int = 0,
+        prompt_constraint: str = "none",
+        prompt_constraint_scale: float = 0.5,
     ):
         super().__init__()
         if mode not in {"mul", "add"}:
             raise ValueError(f"Unsupported mode: {mode}")
         if aggr not in {"mean", "sum"}:
             raise ValueError(f"Unsupported aggr: {aggr}")
+        if prompt_constraint not in {"none", "identity_tanh", "positive_sigmoid", "identity_l2norm"}:
+            raise ValueError(f"Unsupported prompt_constraint: {prompt_constraint}")
         if int(edge_feature_dim or 0) <= 0:
             raise ValueError("PEPromptRelation requires positive edge_feature_dim.")
 
@@ -64,6 +74,9 @@ class PEPromptRelation(nn.Module):
         self.aggr = aggr
         self.edge_feature_dim = int(edge_feature_dim or 0)
         self.edge_feature_name = str(edge_feature_name)
+        self.edge_chunk_size = int(edge_chunk_size or 0)
+        self.prompt_constraint = prompt_constraint
+        self.prompt_constraint_scale = float(prompt_constraint_scale)
         self.drop = nn.Dropout(dropout)
         self.ln = nn.ModuleDict(
             {nt: (nn.LayerNorm(dim) if use_ln else nn.Identity()) for nt in node_types}
@@ -79,6 +92,28 @@ class PEPromptRelation(nn.Module):
     @property
     def uses_edge_features(self) -> bool:
         return True
+
+    def _apply_prompt_constraint(self, raw_prompt: torch.Tensor) -> torch.Tensor:
+        if self.prompt_constraint == "none":
+            return raw_prompt
+
+        scale = self.prompt_constraint_scale
+        if self.prompt_constraint == "identity_tanh":
+            delta = scale * torch.tanh(raw_prompt)
+            return 1.0 + delta if self.mode == "mul" else delta
+
+        if self.prompt_constraint == "positive_sigmoid":
+            if self.mode == "mul":
+                lower = max(0.0, 1.0 - scale)
+                upper = 1.0 + scale
+                return lower + (upper - lower) * torch.sigmoid(raw_prompt)
+            return scale * (2.0 * torch.sigmoid(raw_prompt) - 1.0)
+
+        if self.prompt_constraint == "identity_l2norm":
+            delta = scale * F.normalize(raw_prompt, p=2, dim=-1)
+            return 1.0 + delta if self.mode == "mul" else delta
+
+        raise RuntimeError(f"Unexpected prompt_constraint: {self.prompt_constraint}")
 
     def forward(
         self,
@@ -107,18 +142,34 @@ class PEPromptRelation(nn.Module):
                     f"PEPromptRelation missing edge features for etype={(src_t, rel_t, dst_t)}."
                 )
 
-            prompt = self.edge_prompt_mlp(edge_features.to(device))
-            if self.mode == "mul":
-                msg = x_dict[src_t][src] * prompt
-            else:
-                msg = x_dict[src_t][src] + prompt
+            chunk_size = self.edge_chunk_size if self.edge_chunk_size > 0 else int(src.numel())
+            for start in range(0, int(src.numel()), chunk_size):
+                end = min(start + chunk_size, int(src.numel()))
+                src_chunk = src[start:end].to(device)
+                dst_chunk = dst[start:end].to(device)
+                edge_chunk = edge_features[start:end].to(device)
 
-            agg_dict[dst_t].index_add_(0, dst, msg)
-            deg_dict[dst_t].index_add_(
-                0,
-                dst,
-                torch.ones((dst.numel(), 1), device=device, dtype=msg.dtype),
-            )
+                def _message(
+                    edge_feat: torch.Tensor,
+                    src_ids: torch.Tensor = src_chunk,
+                    src_type: str = src_t,
+                ) -> torch.Tensor:
+                    prompt = self._apply_prompt_constraint(self.edge_prompt_mlp(edge_feat))
+                    if self.mode == "mul":
+                        return x_dict[src_type][src_ids] * prompt
+                    return x_dict[src_type][src_ids] + prompt
+
+                if self.training and self.edge_chunk_size > 0:
+                    msg = checkpoint(_message, edge_chunk, use_reentrant=False)
+                else:
+                    msg = _message(edge_chunk)
+
+                agg_dict[dst_t].index_add_(0, dst_chunk, msg)
+                deg_dict[dst_t].index_add_(
+                    0,
+                    dst_chunk,
+                    torch.ones((dst_chunk.numel(), 1), device=device, dtype=msg.dtype),
+                )
 
         out = {}
         for ntype, x in x_dict.items():
@@ -330,6 +381,9 @@ class HGMPPEPromptHGNN(nn.Module):
             edge_feature_dim=relation_cfg.edge_feature_dim,
             edge_feature_name=relation_cfg.edge_feature_name,
             edge_prompt_hidden=relation_cfg.edge_prompt_hidden,
+            edge_chunk_size=relation_cfg.edge_chunk_size,
+            prompt_constraint=relation_cfg.prompt_constraint,
+            prompt_constraint_scale=relation_cfg.prompt_constraint_scale,
         )
 
         if self.hgnn_type == "HGT":
@@ -541,6 +595,9 @@ def build_peprompt_relation_cfg_from_args(args) -> PEPromptRelationConfig:
         edge_feature_dim=getattr(args, "peprompt_edge_feature_dim", 0),
         edge_feature_name=getattr(args, "peprompt_edge_feature_name", "peprompt_edge_feat"),
         edge_prompt_hidden=getattr(args, "peprompt_edge_prompt_hidden", 128),
+        edge_chunk_size=getattr(args, "peprompt_edge_chunk_size", 0),
+        prompt_constraint=getattr(args, "relation_prompt_constraint", "none"),
+        prompt_constraint_scale=getattr(args, "relation_prompt_constraint_scale", 0.5),
     )
 
 

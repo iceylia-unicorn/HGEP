@@ -1,33 +1,47 @@
-# PEPrompt 研究日志
+# TGEP（TypeGraphEdgePrompt）研究日志
 
-本文档用于记录 HGEP/PEPrompt 的方法设计、实现变化和实验结果。早期内容中包含一些已经被否定的尝试，例如 typepair prompt、dropped-context 复杂融合和基向量选择器；这些内容保留在历史记录中，当前推荐结论以前面的“当前状态”为准。
+本文档用于记录 HGEP/TGEP 的方法设计、实现变化和实验结果。早期内容中的 PEPrompt 是用于验证“边级结构提示”可行性的探索性设计，不再作为论文主方法或必须比较的基线；相关记录保留以便追溯。历史名称 `TypeNeighborhoodEdge` 自 2026-09-21 起统一更名为 **TypeGraphEdgePrompt（TGEP）**。
 
 ## 当前项目介绍
 
-PEPrompt 的核心目标是在 HGMP 的异构图 prompt 框架上，引入**边级结构提示**，使下游子图分类时的消息传递不仅依赖节点特征和节点 prompt，也能感知边在局部结构中的位置。
+TGEP 的核心目标是在 HGMP 的异构图 prompt 框架上，引入**类型感知的边级图结构提示**，使下游子图分类时的消息传递不仅依赖节点特征和节点 prompt，也能感知边两端节点的多阶类型邻域与关系语义。
 
 当前稳定版本采用以下流程：
 
 1. 使用 HGMP 的 GraphCL 预训练 checkpoint 初始化异构 GNN。
 2. 离线生成 few-shot 下游子图缓存，支持 `khop`、`fanout`、`metapath_topk`、`metapath_topk_path`、`metapath_topk_adapt` 和 `metapath_topk_path_adapt`。
-3. PEPrompt 当前主线使用基于元路径的动态子图。每个目标节点按元路径可达计数筛选语义邻域；DBLP 上固定 top-k 不够稳定，当前最优方向是 adaptive top-k。最新 ablation 表明核心收益主要来自 adaptive endpoint selection，path-preserving 不是必要条件。
-4. 对子图边计算 PE edge feature。当前有效主线是把异构子图视作同质图，计算 Laplacian PE，并用边两端 PE 差作为边结构编码。
-5. 用 PE edge feature 经过 MLP 生成 edge prompt，再注入 HGMP 的消息传递模块。
+3. TGEP 当前主线使用基于元路径的动态子图。每个目标节点按元路径可达计数筛选语义邻域；DBLP 上固定 top-k 不够稳定，当前最优方向是 adaptive top-k。最新 ablation 表明核心收益主要来自 adaptive endpoint selection，path-preserving 不是必要条件。
+4. 以节点类型 one-hot 为初始信号，在子图上进行多阶类型传播或扩散，获得每个节点的类型邻域表示。
+5. 对边 $u \rightarrow v$ 构造有向端点交互与关系编码，生成 TGEP edge feature；再通过 edge prompt 注入 HGMP 的消息传递模块。Laplacian PE 仅作为历史探索结果与补充对照，不作为 TGEP 的组成部分或主要叙事。
 
 当前推荐实验配置：
 
-| Dataset | PEPrompt Subgraph | Notes |
+| Dataset | TGEP Subgraph | Notes |
 | --- | --- | --- |
 | ACM | metapath h3/k3 | 当前 r10 结果最稳定，约 `0.8999/0.8997` |
-| DBLP | metapath adapt h3/k1-8/a0.5；1-shot 可用 target-closed count full-support | 常规主线为 h3 adaptive；当前 protocol benchmark 中 target-closed count full-support 达到约 `0.8869/0.8851`，但 cache 很大 |
+| DBLP | metapath adapt h3/k1-8/a0.5；强协议优先用 target-closed + supportcount_sk16 | 常规主线为 h3 adaptive；target-closed full-support 效果强但 cache 很大，不作为默认多数据集实验配置 |
 | IMDB | metapath h2/k3 | 多标签任务，高阶 metapath 噪声更明显 |
 | Freebase | metapath h3/k3, `feats_type=1` | 避免 dense pseudo-feature 导致 CPU OOM |
+| AMiner | pending | 当前仓库尚未接入 AMiner 数据、split、checkpoint 和 dataset defaults；接入后纳入正式多数据集表 |
+
+后续实验记录约定：
+
+```text
+ACM 只作为快速筛选数据集，不能单独支撑方法结论。
+正式实验默认至少补 DBLP 和 Freebase；若环境中有 IMDB/AMiner，也应一并报告。
+论文主方法统一写作 TypeGraphEdgePrompt（TGEP）；历史记录中的 TypeNeighborhoodEdge 均指 TGEP 的早期名称。
+PEPrompt/Spectral PE 仅作为探索性结果或补充对照，不作为 TGEP 论文必须击败的基线，也不作为主结果表的中心比较对象。
+DBLP 不默认使用 target-closed full-support cache；常规验证使用 h3/k1-8/a0.5 adaptive，强协议验证使用 m4/k1-8 target_closed + supportcount_sk16。
+需要使用 DBLP full-support 时，必须单独说明 cache size / precompute time / 是否为最终确认实验。
+AMiner 当前未接入；报告中只能列为 planned，不应写成已完成实验。
+```
 
 ## 当前结论
 
 - Typepair prompt 单独作为类型级边 prompt 效果有限，后续不再作为主线。
-- Laplacian PE edge feature 是当前最有效的结构提示来源。
-- Metapath-topk 子图比 khop 更适合 PEPrompt，尤其在 ACM、DBLP、Freebase 上优势明显。
+- TGEP 是当前唯一的核心方法；其创新重点是以多阶类型邻域和关系语义构造边级图结构提示，而非谱位置编码。
+- Laplacian PE edge feature 在早期探索中效果较强，但 PEPrompt/PE 不再定义主方法方向；其结果仅用于验证边级结构提示可行性与补充说明。
+- Metapath-topk 子图比 khop 更适合 TGEP，尤其在 ACM、DBLP、Freebase 上优势明显。
 - DBLP 上固定 top-k 的主要问题是 split 间差异很大；adaptive top-k 通过相对阈值动态选择每条元路径的终点数量，显著缓解了 split 低分问题。常规 h3 no-path adaptive 仍是较轻量主线。
 - DBLP 1-shot 诊断中，`target_closed + count endpoint ranking + full support recovery` 是目前最强分支，当前 protocol benchmark 达到约 `micro=0.8869 / macro=0.8851`。其收益来自 target-to-target semantic endpoint 和完整 support 结构，而不是 PE sim rerank；代价是离线 cache 显著膨胀。
 - Target-closed 并非普适策略。Freebase 的有向 schema 使许多重要类型无法进入 `BOOK -> ... -> BOOK` closed metapath，因此 target-closed 在 Freebase 1-shot 上效果较差；Freebase 更适合 open endpoint selection 加 support recovery。
@@ -37,7 +51,9 @@ PEPrompt 的核心目标是在 HGMP 的异构图 prompt 框架上，引入**边�
 
 ## 待解决问题
 
-- [ ] PEPrompt 仍然比纯节点 prompt 慢，需要进一步减少 PE 与 edge prompt 的下游开销；DBLP full-support cache 已暴露明显存储/IO 压力。
+- [ ] 完成 TGEP 核心结构：多尺度类型邻域聚合、有向端点交互、关系编码与稳定的 identity-centered edge gate；DBLP full-support cache 已暴露明显存储/IO 压力。
+- [ ] 后续新模块实验必须补多数据集结果：至少 DBLP、Freebase；有条件时加入 IMDB、AMiner。ACM 只能作为快速筛选。
+- [ ] 接入 AMiner：补数据、few-shot split、checkpoint、`HOP_NUM/TARGET_NODETYPE/DATASET_NUM_CLASS` 与缓存协议。
 - [x] 验证 typepair 是否是噪声。结论：typepair 不是当前主线。
 - [x] 离线处理子图与 PE edge feature。
 - [x] 多数据集验证：ACM、DBLP、IMDB、Freebase 已跑通 r10 对比。
@@ -1631,6 +1647,192 @@ artifacts/results/type_neighborhood_edge/ACM_diffusion_ppr0p15_h0-1-2-3/ACM/1-sh
 artifacts/results/type_neighborhood_edge/ACM_diffusion_heat1_h0-1-2-3/ACM/1-shot/peprompt.metapath_topk_adapt_m3_k1-5_a0p5_count_petypeneighborhoodedge_th0-1-2-3_und_eto_heat1/overall_summary.json
 ```
 
+#### MUG fixed split 下游协议对齐实验：ACM
+
+```text
+goal=验证保持 MUG 原固定 split + LogReg 下游协议时，TypeNeighborhoodEdge 是否仍带来增益
+upstream=MUG, dataset=ACM, pretrained epochs=50, embedding_dim=512
+downstream_protocol=mug_fixed_split
+split=train_60/val_60/test_60
+classifier=LogReg
+eval_epochs=200
+eva_lr=0.05
+eva_wd=0.0005
+repeats=5
+prompt=TypeNeighborhoodEdge edge-level prompt, formula unchanged
+type_hops=0,1,2,3
+type_neighborhood_dim=12
+edge_feature_dim=50
+metapath_edges=57853, 4338213
+edge_chunk_size=50000
+note=mug_fixed_split 使用完整 train_60 训练集，不是 true 1-shot；本轮用于对齐本地 MUG main.py -> evaluate() 协议
+```
+
+| Method | Downstream | Count | Micro-F1 | Macro-F1 | Delta macro vs MUG+LogReg |
+| --- | --- | ---: | ---: | ---: | ---: |
+| MUG+LogReg | MUG fixed split | 5 | 0.8006 +/- 0.0187 | 0.8053 +/- 0.0130 | 0.0000 |
+| MUG+TypeNeighborhoodEdge+LogReg | MUG fixed split + edge prompt | 5 | 0.7564 +/- 0.0094 | 0.7206 +/- 0.0180 | -0.0847 |
+
+```text
+Log:
+artifacts/logs/mug_peprompt/acm_mug_fixed_split_r60_mug50_full_edges.log
+
+Summary:
+artifacts/results/mug_peprompt/acm_mug_fixed_split_r60_mug50_full_edges/acm_mug_fixed_split_1shot_r60_mug50_s0_r5.summary.json
+
+Per-run:
+artifacts/results/mug_peprompt/acm_mug_fixed_split_r60_mug50_full_edges/acm_mug_fixed_split_1shot_r60_mug50_s0_r5.per_run.csv
+```
+
+#### MUG fixed split prompt 输出约束消融：ACM
+
+```text
+goal=验证 MUG fixed split 下，TypeNeighborhoodEdge 的性能下降是否来自 edge_prompt_mlp 输出无约束
+upstream=MUG, dataset=ACM, pretrained epochs=50, embedding_dim=512
+downstream_protocol=mug_fixed_split
+split=train_60/val_60/test_60
+classifier=LogReg
+prompt=TypeNeighborhoodEdge edge-level prompt
+type_hops=0,1,2,3
+edge_feature_dim=50
+metapath_edges=57853, 4338213
+relation_prompt_mode=mul
+relation_prompt_alpha=0.5
+relation_prompt_use_ln=false
+implemented_args=--relation_prompt_constraint {none,identity_tanh,positive_sigmoid,identity_l2norm}; --relation_prompt_constraint_scale
+```
+
+Quick 筛选协议：
+
+```text
+eval_epochs=50
+repeats=3
+edge_chunk_size=200000
+methods=mug_type_neighborhood_edge
+```
+
+| Constraint | Scale | Count | Micro-F1 | Macro-F1 | Delta macro vs none |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| none | 0.5 | 3 | 0.6733 +/- 0.0336 | 0.6321 +/- 0.0052 | 0.0000 |
+| identity_tanh | 0.25 | 3 | 0.7297 +/- 0.0258 | 0.6283 +/- 0.0814 | -0.0039 |
+| identity_tanh | 0.5 | 3 | 0.7543 +/- 0.0294 | 0.6992 +/- 0.0918 | +0.0670 |
+| positive_sigmoid | 0.5 | 3 | 0.7113 +/- 0.0025 | 0.5704 +/- 0.0009 | -0.0617 |
+| identity_l2norm | 4.0 | 3 | 0.6497 +/- 0.0807 | 0.5525 +/- 0.0199 | -0.0797 |
+
+正式复跑协议：
+
+```text
+selected_constraint=identity_tanh
+selected_scale=0.5
+eval_epochs=200
+repeats=5
+edge_chunk_size=200000
+methods=mug_type_neighborhood_edge
+```
+
+| Method | Constraint | Count | Micro-F1 | Macro-F1 | Delta macro vs MUG+LogReg | Delta macro vs unconstrained prompt |
+| --- | --- | ---: | ---: | ---: | ---: | ---: |
+| MUG+LogReg | none | 5 | 0.8006 +/- 0.0187 | 0.8053 +/- 0.0130 | 0.0000 | +0.0847 |
+| MUG+TypeNeighborhoodEdge+LogReg | unconstrained | 5 | 0.7564 +/- 0.0094 | 0.7206 +/- 0.0180 | -0.0847 | 0.0000 |
+| MUG+TypeNeighborhoodEdge+LogReg | identity_tanh, scale=0.5 | 5 | 0.7952 +/- 0.0123 | 0.7999 +/- 0.0096 | -0.0055 | +0.0793 |
+
+```text
+Quick logs:
+artifacts/logs/mug_peprompt/prompt_constraints_quick/acm_fixed_none_s0p5.log
+artifacts/logs/mug_peprompt/prompt_constraints_quick/acm_fixed_identity_tanh_s0p25.log
+artifacts/logs/mug_peprompt/prompt_constraints_quick/acm_fixed_identity_tanh_s0p5.log
+artifacts/logs/mug_peprompt/prompt_constraints_quick/acm_fixed_positive_sigmoid_s0p5.log
+artifacts/logs/mug_peprompt/prompt_constraints_quick/acm_fixed_identity_l2norm_s4p0.log
+
+Quick summaries:
+artifacts/results/mug_peprompt/acm_mug_fixed_split_prompt_constraints_quick/none_s0p5/acm_mug_fixed_split_r60_mug50_s0_r3.summary.json
+artifacts/results/mug_peprompt/acm_mug_fixed_split_prompt_constraints_quick/identity_tanh_s0p25/acm_mug_fixed_split_r60_mug50_s0_r3.summary.json
+artifacts/results/mug_peprompt/acm_mug_fixed_split_prompt_constraints_quick/identity_tanh_s0p5/acm_mug_fixed_split_r60_mug50_s0_r3.summary.json
+artifacts/results/mug_peprompt/acm_mug_fixed_split_prompt_constraints_quick/positive_sigmoid_s0p5/acm_mug_fixed_split_r60_mug50_s0_r3.summary.json
+artifacts/results/mug_peprompt/acm_mug_fixed_split_prompt_constraints_quick/identity_l2norm_s4p0/acm_mug_fixed_split_r60_mug50_s0_r3.summary.json
+
+Formal summary:
+artifacts/results/mug_peprompt/acm_mug_fixed_split_prompt_constraints/identity_tanh_s0p5/acm_mug_fixed_split_r60_mug50_s0_r5.summary.json
+```
+
+#### HGEP 原始 TypeNeighborhoodEdge prompt 输出约束验证：ACM
+
+```text
+goal=验证 MUG 中有效的 identity_tanh 有界调制，迁移回原始 HGEP/PEPrompt 小子图协议后是否仍有增益
+dataset=ACM
+shot=1
+subgraph=metapath_topk_adapt h3/k1-5/a0.5/count
+splits=0-2
+repeats=5
+total=15
+checkpoint=artifacts/checkpoints/hgmp/pretrain/ACM.GraphCL.GCN.hid512.np500.seed0.pth
+type_hops=0,1,2,3
+edge type one-hot=yes
+epochs=100
+patience=30
+early_stop=val_loss
+eval_mode=early_stop_only
+```
+
+| Method | Constraint | Count | Micro-F1 | Macro-F1 | Delta macro vs unconstrained |
+| --- | --- | ---: | ---: | ---: | ---: |
+| TypeNeighborhoodEdge h0-1-2-3 | none | 15 | 0.8236 +/- 0.0464 | 0.8168 +/- 0.0528 | 0.0000 |
+| TypeNeighborhoodEdge h0-1-2-3 | identity_tanh, scale=0.5 | 15 | 0.8079 +/- 0.0565 | 0.7997 +/- 0.0624 | -0.0171 |
+
+```text
+Implemented args:
+--relation_prompt_constraint identity_tanh
+--relation_prompt_constraint_scale 0.5
+
+Log:
+artifacts/logs/type_neighborhood_edge/benchmark_acm_h0-1-2-3_identity_tanh_s0p5.log
+
+Summary:
+artifacts/results/type_neighborhood_edge/ACM_hop_h0-1-2-3_identity_tanh_s0p5/ACM/1-shot/peprompt.metapath_topk_adapt_m3_k1-5_a0p5_count_petypeneighborhoodedge_th0-1-2-3_und_eto/overall_summary.json
+```
+
+#### HGEP 原始 TypeNeighborhoodEdge prompt 输出约束多数据集补充
+
+```text
+goal=不只依赖 ACM，补 DBLP / Freebase 验证 identity_tanh 有界调制是否在原始 HGEP/PEPrompt 中稳定有用
+shot=1
+splits=0-2
+repeats=5
+total=15 per dataset/config
+constraint=identity_tanh
+constraint_scale=0.5
+edge_feature=TypeNeighborhoodEdge
+AMiner=当前仓库没有 data/splits/checkpoint/dataset defaults，无法直接运行
+runner=scripts/run_hgep_typeedge_constraint_multidataset.sh
+Freebase TypeNeighborhoodEdge cache=artifacts/cache/type_neighborhood_edge_multidataset, 1.1G
+```
+
+| Dataset | Protocol | Constraint | Count | Micro-F1 | Macro-F1 | Delta macro vs none |
+| --- | --- | --- | ---: | ---: | ---: | ---: |
+| ACM | h3/k1-5/a0.5 adaptive, h0-1-2-3 | none | 15 | 0.8236 +/- 0.0464 | 0.8168 +/- 0.0528 | 0.0000 |
+| ACM | h3/k1-5/a0.5 adaptive, h0-1-2-3 | identity_tanh, scale=0.5 | 15 | 0.8079 +/- 0.0565 | 0.7997 +/- 0.0624 | -0.0171 |
+| DBLP | h3/k1-8/a0.5 adaptive, h0-1-2 | none | 15 | 0.5247 +/- 0.0682 | 0.5151 +/- 0.0693 | 0.0000 |
+| DBLP | h3/k1-8/a0.5 adaptive, h0-1-2 | identity_tanh, scale=0.5 | 15 | 0.5442 +/- 0.0580 | 0.5421 +/- 0.0575 | +0.0270 |
+| Freebase | h3/k3 fixed, ft1, h0-1-2 | none | 15 | 0.2209 +/- 0.0304 | 0.1733 +/- 0.0375 | 0.0000 |
+| Freebase | h3/k3 fixed, ft1, h0-1-2 | identity_tanh, scale=0.5 | 15 | 0.2298 +/- 0.0554 | 0.1858 +/- 0.0507 | +0.0125 |
+
+```text
+DBLP result:
+artifacts/results/type_neighborhood_edge/DBLP_typeonly_identity_tanh_s0p5/DBLP/1-shot/peprompt.metapath_topk_adapt_m3_k1-8_a0p5_count_petypeneighborhoodedge_th0-1-2_und_eto/overall_summary.json
+artifacts/logs/type_neighborhood_edge/constraint_multidataset/benchmark_dblp_h0-1-2_identity_tanh_s0p5.log
+
+Freebase none result:
+artifacts/results/type_neighborhood_edge/Freebase_typeonly_none_s0p5/Freebase/1-shot/peprompt.metapath_topk_m3_k3_count_petypeneighborhoodedge_th0-1-2_und_eto/overall_summary.json
+artifacts/logs/type_neighborhood_edge/constraint_multidataset/benchmark_freebase_h0-1-2_none_s0p5.log
+
+Freebase identity_tanh result:
+artifacts/results/type_neighborhood_edge/Freebase_typeonly_identity_tanh_s0p5/Freebase/1-shot/peprompt.metapath_topk_m3_k3_count_petypeneighborhoodedge_th0-1-2_und_eto/overall_summary.json
+artifacts/logs/type_neighborhood_edge/constraint_multidataset/benchmark_freebase_h0-1-2_identity_tanh_s0p5.log
+
+Freebase precompute log:
+artifacts/logs/type_neighborhood_edge/constraint_multidataset/precompute_freebase_h0-1-2.log
+```
+
 关键观察：
 
 ```text
@@ -1639,9 +1841,299 @@ matched subset 指同一子图协议、同一 split/repeat 子集下的局部对
 ACM 1-shot 快速结果略高于同协议 SpectralEmbeddingDiff 子集，且方差更小，说明“节点类型 one-hot 固定传播 + 边类型 one-hot”确实能提供有效的类型邻域结构信号。
 ACM 1-shot hop 消融显示二阶不是当前 TypeNeighborhoodEdge 的最优上限；加入三阶后 macro 从 0.7896 提升到 0.8168，说明更远的类型上下文在 ACM 上有明显价值。继续加四阶仅提升约 +0.0004 macro，且 seed-mean macro std 从 0.0163 增到 0.0428，因此 h0-1-2-3 更像当前更稳的候选。
 ACM 1-shot 无参数扩散算子消融显示，裸 `A^k X` 不一定是最优；PPR alpha=0.15 相比 power 只提升约 +0.001 macro，heat t=1.0 提升约 +0.0038 macro。当前证据只能说明 heat 是一个略好的候选，不能说明扩散算子已经解决 TypeNeighborhoodEdge 的主要瓶颈。
+MUG fixed split 协议对齐后，MUG+LogReg 能恢复到约 0.80 macro/micro，说明 MUG embedding 和固定 split 下游本身正常；此前低分主要来自下游协议不一致。
+在 MUG fixed split + LogReg 下，直接插入 TypeNeighborhoodEdge 会明显下降（macro -0.0847）。这说明当前 TypeNeighborhoodEdge 对 HGMP/PEPrompt 子图协议有效，但不能直接迁移到 MUG 的稠密 metapath target-target 邻接；稠密 metapath 边上对所有目标节点做可训练 edge prompt 聚合，可能破坏了 MUG embedding 中已经由 metapath encoder 学到的表示。
+对 edge_prompt_mlp 输出加入 identity-centered 有界约束后，MUG fixed split 上的下降基本被修复：identity_tanh scale=0.5 的正式结果为 0.7999 macro，只比 MUG+LogReg 低约 0.0055，并比无约束 TypeNeighborhoodEdge 高约 0.0793 macro。这说明此前主要问题不是类型邻域边特征完全无效，而是无约束乘法 prompt 在稠密 metapath 图上破坏了 MUG 表示。
+positive_sigmoid 和 identity_l2norm 的 quick 筛选结果较差，说明单纯保持正缩放或限制整体 L2 范数不一定足够；当前更合适的是允许每维正负小幅调制，但把调制限制在 `1 +/- scale` 的 identity_tanh。
+同一个 identity_tanh scale=0.5 放回原始 HGEP/PEPrompt 后呈现数据集依赖：ACM 1-shot 小子图协议没有增益，macro 从 0.8168 降到 0.7997；但 DBLP 轻量 h3/k1-8 adaptive 从 0.5151 提升到 0.5421，Freebase h3/k3 ft1 从 0.1733 提升到 0.1858。当前不能把该约束作为默认增强，但可以作为 DBLP/Freebase 上降低无界 prompt 风险的可选开关。
+AMiner 当前没有本地 data/splits/checkpoint，也没有写入 HGEP dataset defaults，因此本轮无法运行；后续需要先接入数据和协议后再纳入正式表格。
 DBLP h3 普通 adaptive 下，TypeNeighborhoodEdge 与同协议 SpectralEmbeddingDiff 都只有约 0.52-0.53 macro；这不是代码异常，而是该协议本身弱。DBLP 真正高分来自 target-closed/support recovery 这类语义端点与支撑节点恢复，而不是只靠 prompt 边特征替换。
 DBLP 强协议下，TypeNeighborhoodEdge 相比 NoEdgePrompt 有稳定的正向增益，说明固定类型传播得到的边级邻域编码确实在生成 prompt 时提供了有效信号；它不是无效替代。
 DBLP 强协议内部消融显示：h0 到 h0-1 只提升约 +0.001 macro，说明一阶类型邻域传播本身贡献很弱；h0-1 到 h0-1-2 提升约 +0.010 macro，二阶类型上下文是当前 TypeNeighborhoodEdge 里更主要的增益来源。
 去掉 edge type one-hot 后，h0-1-2 从 0.8397 macro 降到 0.8364 macro，边类型特征有正向贡献但幅度较小；它更像稳定补充项，而不是主要性能来源。
 但 TypeNeighborhoodEdge 仍落后于 SpectralEmbeddingDiff 约 4.5 macro points，且跨 split 方差更大，因此目前不能声称它已完全替代 PE。当前最准确结论是：它可减少对谱 PE 的依赖并显著优于无结构 prompt，但仍需与谱 PE 组合，或改进类型/关系传播设计后才可能达到原 PE 水平。
 ```
+
+### 2026-09-14 | MUG 预训练 + PEPrompt 下游桥接
+
+当前问题：希望保持 MUG 预训练表示，但下游不再使用 MUG fixed split / LogReg 或 MUG 稠密 metapath prompt，而是回到 PEPrompt 的 few-shot offline subgraph + edge prompt 微调协议。
+
+诊断结论：
+
+```text
+1. MUG fixed split + LogReg 本身正常，说明 MUG embedding 不是完全无效；此前低分主要来自下游协议不一致和无界 edge prompt 破坏表征。
+2. 不能直接把 MUG checkpoint 当作 HGMP checkpoint 加载到 PEPrompt，因为 MUG 的预训练产物是 target-level metapath encoder embedding，不是 HGMP-GCN/HGT 的 state_dict。
+3. 合理桥接方式是：MUG 负责 target embedding；PEPrompt 负责 few-shot 子图、边特征、edge prompt 和下游 head。
+4. DBLP 可以直接桥接：PEPrompt DBLP author id 最大为 4056，MUG DBLP target rows 为 4057。
+5. Freebase 不能直接桥接：PEPrompt Freebase cache 的 targetnode=book，target id 最大为 40400；MUG freebase target rows 只有 3492，且类别数也是 3 而非 PEPrompt Freebase 的 7。这说明两者不是同一个 Freebase 任务定义，直接跑会发生 target-id / label-space 错位，低分没有方法意义。
+```
+
+新增脚本：
+
+```text
+scripts/mug_peprompt_downstream.py
+```
+
+该脚本读取/生成 MUG embedding，读取 PEPrompt offline cache，并在下游比较：
+
+```text
+mug_target_mlp: MUG target embedding + MLP head
+mug_peprompt: MUG target embedding + PEPrompt offline subgraph + PEPromptRelation edge prompt + MLP head
+```
+
+实现细节：
+
+```text
+node_init=graph_target_mean 时，target 节点使用 MUG embedding，非 target 节点使用同一子图内 target embedding 均值初始化，避免异构边在 mul prompt 下因为非 target 节点为零而无法传递有效消息。
+默认 relation_prompt_constraint=identity_tanh, scale=0.5，用于降低无界乘法 prompt 破坏 MUG 表征的风险。
+脚本会检查 MUG target embedding 行数、PEPrompt cache target id 和类别数；不一致时直接报错。
+```
+
+Smoke test：
+
+```text
+ACM, existing MUG embedding, 1 epoch smoke passed.
+Result path:
+artifacts/results/mug_peprompt_downstream/smoke_acm/ACM_1shot_metapath_topk_adapt_m3_k1-5_a0p5_count_mug50_s0_r1.summary.json
+```
+
+建议正式 DBLP 命令：
+
+```bash
+/home_A/yuanqilin/.conda/envs/HGEP/bin/python -u scripts/mug_peprompt_downstream.py \
+  --dataset DBLP \
+  --save_embedding_path artifacts/cache/mug_embeddings/dblp_mug_seed0_epoch50.pt \
+  --mug_epochs 50 \
+  --seed 0 \
+  --gpu 0 \
+  --shot 1 \
+  --split_seeds 0 1 2 3 4 \
+  --repeats 10 \
+  --feats_type 0 \
+  --subgraph_type metapath_topk_adapt \
+  --metapath_max_hop 4 \
+  --metapath_min_topk 1 \
+  --metapath_max_topk 8 \
+  --metapath_rel_threshold 0.5 \
+  --metapath_rank_metric count \
+  --metapath_endpoint_mode target_closed \
+  --metapath_support_mode count \
+  --metapath_support_topk 16 \
+  --methods mug_target_mlp mug_peprompt \
+  --node_init graph_target_mean \
+  --pool_scope target \
+  --relation_prompt_constraint identity_tanh \
+  --relation_prompt_constraint_scale 0.5 \
+  --epochs 200 \
+  --patience 30 \
+  --batch_size 16 \
+  --out_dir artifacts/results/mug_peprompt_downstream/dblp_strong_mug50
+```
+
+Freebase 后续路径：必须先让 MUG 使用与 HGEP/PEPrompt 相同的 HGB Freebase book 节点、7 类 label 和 target id 空间重新预训练，或建立严格的 id mapping；否则不应报告 “MUG + PEPrompt Freebase” 结果。
+
+#### HGB Freebase MUG 预训练适配实现
+
+已采用第一条路径：让 MUG 在 HGEP/PEPrompt 使用的 HGB Freebase 上重新预训练。
+
+实现位置：
+
+```text
+scripts/mug_bridge_utils.py
+scripts/mug_peprompt_downstream.py
+```
+
+关键实现：
+
+```text
+1. 新增 HGB Freebase -> MUG 输入构造：
+   target=book
+   target rows=40402
+   labels=-1..6，其中有标签节点为 7 类；保持原始 book id 空间，保证能与 PEPrompt cache 对齐。
+
+2. 构造 MUG metapath：
+   不使用 HGB Freebase 的所有长元路径，而按 MUG 原始 Freebase 风格构造少量 book-X-book shared-neighbor metapath。
+   当前 X 包含 business/film/location/music/organization/people/sports。
+
+3. 避免 MUG 原始 dense reconstruction OOM：
+   原 MUG 会把 target-target metapath 转为 dense，40402 x 40402 单个矩阵约 6.5GB，不可行。
+   新增 LargeTargetMUG，用 sampled positive/negative metapath edge reconstruction 替代 dense adjacency reconstruction。
+
+4. target feature：
+   不再使用 40402 x 40402 dense identity feature；改用 compact structural/random feature，默认 hgb_mug_feature_dim=256。
+```
+
+已完成 smoke：
+
+```text
+HGB Freebase input build:
+book nodes=40402
+labels=-1..6
+num_classes=7
+metapaths=7
+
+tiny forward:
+hgb_mug_hidden_dim=64
+hgb_mug_feature_signal_dim=128
+hgb_mug_sample_size=128
+mug_epochs=0
+embeds=(40402, 64)
+
+tiny training:
+mug_epochs=1
+loss=1.348765
+embeds=(40402, 64)
+```
+
+建议 Freebase 正式命令：
+
+```bash
+/home_A/yuanqilin/.conda/envs/HGEP/bin/python -u scripts/mug_peprompt_downstream.py \
+  --dataset Freebase \
+  --mug_data_source hgb \
+  --save_embedding_path artifacts/cache/mug_embeddings/hgb_freebase_book_mug_seed0_epoch50.pt \
+  --mug_epochs 50 \
+  --seed 0 \
+  --gpu 0 \
+  --shot 1 \
+  --split_seeds 0 1 2 3 4 \
+  --repeats 10 \
+  --feats_type 1 \
+  --subgraph_type metapath_topk_adapt \
+  --metapath_max_hop 3 \
+  --metapath_min_topk 1 \
+  --metapath_max_topk 5 \
+  --metapath_rel_threshold 0.5 \
+  --metapath_rank_metric count \
+  --metapath_support_mode count \
+  --metapath_support_topk 8 \
+  --methods mug_target_mlp mug_peprompt \
+  --node_init graph_target_mean \
+  --pool_scope target \
+  --relation_prompt_constraint identity_tanh \
+  --relation_prompt_constraint_scale 0.5 \
+  --hgb_mug_feature_dim 256 \
+  --hgb_mug_hidden_dim 512 \
+  --hgb_mug_feature_signal_dim 1024 \
+  --hgb_mug_sample_size 1024 \
+  --hgb_mug_max_edges_per_metapath 500000 \
+  --hgb_mug_recon_edges_per_metapath 200000 \
+  --epochs 200 \
+  --patience 30 \
+  --batch_size 16 \
+  --out_dir artifacts/results/mug_peprompt_downstream/freebase_hgb_mug50
+```
+
+注意：这是协议正确的 HGB Freebase MUG 版本；结果应与之前 MUG native Freebase 区分命名，建议统一写作 `MUG-HGB-Freebase -> PEPrompt`。
+
+#### MUG -> PEPrompt 同 TypeNeighborhoodEdge 协议结果
+
+目标：按用户要求，“保持 MUG 的预训练，用 PEPrompt 做下游微调”，并且尽量与前面 TypeNeighborhoodEdge 的 PEPrompt 协议对齐。
+
+实际运行设置：
+
+```text
+DBLP:
+mug_data_source=native
+MUG epochs=50
+target embeddings=4057 x 2048
+PEPrompt cache=artifacts/cache/type_neighborhood_edge_strong
+subgraph=metapath_topk_adapt_m4_k1-8_a0p5_count_target_closed_supportcount_petypeneighborhoodedge_th0-1-2_und_eto
+shot=1
+splits=0-4
+repeats=10
+total=50
+epochs=200
+patience=30
+constraint=identity_tanh, scale=0.5
+
+Freebase:
+mug_data_source=hgb
+MUG epochs=50
+target embeddings=40402 x 256
+PEPrompt cache=artifacts/cache/type_neighborhood_edge_multidataset
+subgraph=metapath_topk_m3_k3_count_petypeneighborhoodedge_th0-1-2_und_eto
+shot=1
+splits=0-2
+repeats=5
+total=15
+epochs=100
+patience=30
+constraint=identity_tanh, scale=0.5
+```
+
+Freebase 资源说明：
+
+```text
+第一次按 hgb_mug_hidden_dim=512 / feature_signal_dim=1024 / max_edges_per_metapath=500000 / recon_edges_per_metapath=200000 运行时 GPU OOM。
+正式落盘结果改用 hgb_mug_hidden_dim=256 / feature_signal_dim=512 / max_edges_per_metapath=100000 / recon_edges_per_metapath=50000。
+因此该 Freebase 结果是协议正确的 HGB-Freebase 对齐结果，但不是最大容量 HGB-MUG 配置。
+```
+
+结果：
+
+| Dataset | Upstream | Downstream | Count | Micro-F1 | Macro-F1 | Delta macro vs MUG target MLP |
+| --- | --- | --- | ---: | ---: | ---: | ---: |
+| DBLP | native MUG | MUG target embedding + MLP | 50 | 0.8053 +/- 0.0862 | 0.7969 +/- 0.1010 | 0.0000 |
+| DBLP | native MUG | MUG target embedding + PEPromptRelation | 50 | 0.8182 +/- 0.0657 | 0.8094 +/- 0.0781 | +0.0125 |
+| Freebase | HGB-Freebase MUG | MUG target embedding + MLP | 15 | 0.1961 +/- 0.0625 | 0.1607 +/- 0.0530 | 0.0000 |
+| Freebase | HGB-Freebase MUG | MUG target embedding + PEPromptRelation | 15 | 0.1950 +/- 0.0512 | 0.1634 +/- 0.0546 | +0.0027 |
+
+与此前 HGMP/PEPrompt TypeNeighborhoodEdge 对比：
+
+| Dataset | Comparable PEPrompt baseline | Count | Micro-F1 | Macro-F1 | MUG->PEPrompt delta macro |
+| --- | --- | ---: | ---: | ---: | ---: |
+| DBLP | TypeNeighborhoodEdge strong h0-1-2 | 50 | 0.8452 +/- 0.0592 | 0.8397 +/- 0.0691 | -0.0303 |
+| DBLP | Spectral PE strong | 50 | 0.8869 +/- 0.0339 | 0.8851 +/- 0.0369 | -0.0757 |
+| Freebase | TypeNeighborhoodEdge none | 15 | 0.2209 +/- 0.0304 | 0.1733 +/- 0.0375 | -0.0099 |
+| Freebase | TypeNeighborhoodEdge identity_tanh | 15 | 0.2298 +/- 0.0554 | 0.1858 +/- 0.0507 | -0.0224 |
+
+结果文件：
+
+```text
+DBLP summary:
+artifacts/results/mug_peprompt_downstream/dblp_strong_typeedge_mug50/DBLP_1shot_metapath_topk_adapt_m4_k1-8_a0p5_count_target_closed_supportcount_petypeneighborhoodedge_th0-1-2_und_eto_mug50_s0-1-2-3-4_r10.summary.json
+
+DBLP per-run:
+artifacts/results/mug_peprompt_downstream/dblp_strong_typeedge_mug50/DBLP_1shot_metapath_topk_adapt_m4_k1-8_a0p5_count_target_closed_supportcount_petypeneighborhoodedge_th0-1-2_und_eto_mug50_s0-1-2-3-4_r10.per_run.csv
+
+Freebase summary:
+artifacts/results/mug_peprompt_downstream/freebase_typeedge_hgb_mug50_hid256/Freebase_1shot_metapath_topk_m3_k3_count_petypeneighborhoodedge_th0-1-2_und_eto_mug50_s0-1-2_r5.summary.json
+
+Freebase per-run:
+artifacts/results/mug_peprompt_downstream/freebase_typeedge_hgb_mug50_hid256/Freebase_1shot_metapath_topk_m3_k3_count_petypeneighborhoodedge_th0-1-2_und_eto_mug50_s0-1-2_r5.per_run.csv
+```
+
+当前解释：
+
+```text
+1. DBLP 上，MUG embedding 接 PEPromptRelation 确实比只接 target MLP 更好，macro +0.0125，说明 PEPrompt 下游子图/edge prompt 不是完全无效。
+2. 但 DBLP 的 MUG->PEPrompt 仍低于同协议 HGMP/PEPrompt TypeNeighborhoodEdge strong 约 3.0 macro points，更低于 Spectral PE strong 约 7.6 macro points。说明 MUG 的 target-level metapath embedding 不能直接等价替代 HGMP 预训练骨干与 PEPrompt 的子图表征。
+3. Freebase 上，协议对齐后的 HGB-Freebase MUG->PEPrompt 只比 target MLP 高约 0.0027 macro，基本没有显著下游增益；且低于此前 HGMP/PEPrompt identity_tanh 结果。
+4. Freebase 差的原因不再是 “MUG native Freebase 与 HGB Freebase 不是同一数据集” 这一硬错位；本轮已经统一为 HGB book/7-class/id-space。但新的 HGB-Freebase MUG 为了可扩展，使用 sampled reconstruction 与 compact features，且 metapath 只是 book-X-book shared-neighbor 近似，预训练信号可能比原 HGMP/PEPrompt 所需的 few-shot 子图结构更弱。
+5. 结论应写成：保持 MUG 预训练再接 PEPrompt 是可跑、协议正确的桥接方案；DBLP 有小幅收益但未追上原 HGMP/PEPrompt；Freebase 目前收益很弱，需要继续改 HGB-MUG 预训练任务或特征，而不是把低分归因于 PEPrompt 下游代码错误。
+```
+
+### 2026-09-21 | 研究主线重定：TypeGraphEdgePrompt（TGEP）
+
+本次与导师讨论后，确定核心方法不再是 PEPrompt。PEPrompt 只是早期用于验证“边级结构提示是否有价值”的测试性设计；它既不是外部基线，也不需要作为论文中 TGEP 必须对比或超越的对象。后续论文、实验和叙事以 **TypeGraphEdgePrompt（TGEP）** 为唯一主方法。
+
+命名约定：历史记录、缓存名和代码参数中的 `TypeNeighborhoodEdge` 暂不强制重命名，以保证已有结果可追溯；论文与后续新增实验统一使用 `TypeGraphEdgePrompt (TGEP)`。二者在当前语境中指同一方法谱系，TGEP 是正式名称。
+
+TGEP 的问题定义是：few-shot 异构图下游通常依赖局部子图，但局部采样会丢失高阶类型结构；TGEP 不使用谱分解位置编码，而是从节点类型 one-hot 出发，经多阶传播/扩散获得类型邻域状态，并为有向关系边构造结构提示，从而以受控方式调制预训练 HGNN 的消息传递。
+
+当前待实现和验证的 TGEP 核心结构：
+
+1. 多尺度类型邻域编码：为不同传播阶数建立独立投影，并学习节点或边相关的阶数权重，避免仅拼接 `h0,h1,...,hL`。
+2. 有向端点交互：使用源端、目标端、差分、逐元素交互以及关系/端点类型编码，显式保留异构有向图语义；Freebase 应特别检查方向性。
+3. 稳定的边提示门控：以 identity-centered 有界调制作为候选，例如 `m_uv' = (1 + beta_uv) * m_uv`，并通过 `beta_uv = scale * tanh(g(e_uv))` 限制对预训练表示的破坏。
+4. 类型扩散算子：对 raw power、PPR、heat 进行受控比较；它们是 TGEP 的编码选择，而不是另起一个方法分支。
+
+后续实验优先级：
+
+1. 在 DBLP 强协议上做 TGEP 内部消融：多尺度聚合、是否区分方向、edge type/endpoint type、交互形式、identity gate；同时报告完整 split/repeat。
+2. 在 ACM 1-shot 和 Freebase 1-shot 验证跨数据集可迁移性；IMDB 单独处理多标签评估和早停，不因其低分否定 TGEP。
+3. 报告 TGEP 的预计算时间、缓存大小、子图规模、训练时间和峰值内存，形成“无需谱分解、类型语义显式可控”的效率与可解释性证据。
+4. PEPrompt/Spectral PE 结果只放在补充实验或历史探索中，用于说明早期观察；主结果表围绕 NoEdgePrompt、TGEP 消融及适当的公开方法基线组织。
+
+明确不再采用的叙事：不把 “TGEP + Spectral PE 融合” 作为默认方向，也不以“完全替代或击败 PEPrompt”为研究目标。需要回答的是 TGEP 的类型图结构编码为何有效、在哪些异构模式下有效，以及它如何以较低的结构预处理依赖改善边级消息传递。
